@@ -521,3 +521,39 @@ mix credo --strict
 mix dialyzer
 mix ecto.gen.migration <name>
 ```
+
+---
+
+## 13. Локальное окружение (Windows)
+
+Инструменты ставятся вне проекта, версии — фактические на момент разворачивания:
+
+| Компонент | Версия | Путь |
+|---|---|---|
+| Erlang/OTP | 27.3.4.13 | `C:\Program Files\Erlang OTP` |
+| Elixir | 1.20.3 (OTP 27) | `C:\Elixir` |
+| MySQL | 8.4.4 (модуль OSPanel) | `E:\OSPanel\modules\MySQL-8.4\bin` |
+
+### MySQL
+
+OSPanel биндит MySQL не на `127.0.0.1`, а на собственный loopback-алиас
+**`127.127.126.32:3306`** — именно этот хост прописан в `config/dev.exs` и
+`config/test.exs`. Пользователь `root` с пустым паролем (дефолт OSPanel).
+
+Базы: **`block-poker`** (dev) и **`block-poker_test`** (test). Имя с дефисом,
+поэтому в сыром SQL — только в бэктиках.
+
+Если лаунчер OSPanel не запускается, сервер поднимается напрямую тем же конфигом:
+
+```
+E:\OSPanel\modules\MySQL-8.4\bin\mysqld.exe --defaults-file=E:\OSPanel\modules\MySQL-8.4\my.ini
+```
+
+Проверка: `mysql -u root --host=127.127.126.32 -e "SELECT VERSION();"`
+
+### Известное ограничение
+
+`argon2_elixir` — NIF на C, и `elixir_make` на Windows требует `nmake` из
+Visual C++ Build Tools; MinGW не подходит (`Makefile.win` написан под nmake).
+Зависимость **пока не подключена** — она понадобится на шаге `Accounts`.
+Тогда нужно либо поставить Build Tools, либо выбрать хеш без NIF.
