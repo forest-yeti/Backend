@@ -18,7 +18,7 @@ defmodule BlockPoker.Tables.TableServer do
 
   use GenServer, restart: :temporary
 
-  alias BlockPoker.Engine.{ButtonDraw, Rng}
+  alias BlockPoker.Engine.{ButtonDraw, Hand, Rng}
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.Tables.{RoomState, Seat, TableRegistry}
   alias Phoenix.PubSub
@@ -101,6 +101,15 @@ defmodule BlockPoker.Tables.TableServer do
   @spec sit_out(GenServer.server(), Ecto.UUID.t()) :: :ok | {:error, atom()}
   def sit_out(room, user_id), do: GenServer.call(room, {:sit_out, user_id})
 
+  @doc "Игровое действие. `seq` — счётчик стола, который клиент видел."
+  @spec act(GenServer.server(), Ecto.UUID.t(), Hand.action(), non_neg_integer() | nil) ::
+          :ok | {:error, atom()}
+  def act(room, user_id, action, seq), do: GenServer.call(room, {:act, user_id, action, seq})
+
+  @doc "Открыть свои карты по желанию."
+  @spec show_cards(GenServer.server(), Ecto.UUID.t()) :: :ok | {:error, atom()}
+  def show_cards(room, user_id), do: GenServer.call(room, {:show_cards, user_id})
+
   @spec sit_in(GenServer.server(), Ecto.UUID.t()) :: :ok | {:error, atom()}
   def sit_in(room, user_id), do: GenServer.call(room, {:sit_in, user_id})
 
@@ -179,6 +188,26 @@ defmodule BlockPoker.Tables.TableServer do
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:act, user_id, action, seq}, _from, state) do
+    with {:ok, hand} <- fetch_hand(state),
+         {:ok, seat} <- seat_of(state, user_id),
+         {:ok, hand, events} <- Hand.act(hand, seat, action, seq) do
+      {:reply, :ok, apply_hand(state, hand, events)}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:show_cards, user_id}, _from, state) do
+    with {:ok, hand} <- fetch_hand(state),
+         {:ok, seat} <- seat_of(state, user_id),
+         {:ok, hand, events} <- Hand.show_cards(hand, seat) do
+      {:reply, :ok, apply_hand(state, hand, events)}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
@@ -325,10 +354,211 @@ defmodule BlockPoker.Tables.TableServer do
   end
 
   defp do_timeout(:button_draw, state) do
-    # Раздача стартует здесь (задача 4). Пока фиксируем результат розыгрыша.
     room = %{state.room | phase: :idle, button_draw: nil}
     state = put_room(state, room)
     broadcast(state, "button_ready", %{button_seat: room.button_seat})
+    start_hand(state)
+  end
+
+  # Время на ход вышло: ход делается за игрока — чек, если бесплатно, иначе
+  # фолд. Молча зависнуть стол не может.
+  defp do_timeout(:action, state) do
+    case fetch_hand(state) do
+      {:ok, hand} ->
+        case Hand.timeout(hand) do
+          {:ok, hand, events} -> apply_hand(state, hand, events)
+          {:error, _reason} -> state
+        end
+
+      {:error, _reason} ->
+        state
+    end
+  end
+
+  # Пауза между раздачами: игрок должен успеть увидеть, чем всё кончилось.
+  defp do_timeout(:next_hand, state), do: start_hand(state)
+
+  # --- раздача --------------------------------------------------------------
+
+  defp start_hand(%State{room: %RoomState{phase: :hand}} = state), do: state
+
+  defp start_hand(state) do
+    state = put_room(state, activate_big_blind(state.room))
+
+    case state.game_mode.hand_setup(state.room) do
+      {:ok, setup} ->
+        {hand, events} = Hand.start(setup, state.rng, rake: rake_fun(state))
+        state = put_room(state, %{state.room | phase: :hand, hand: hand})
+
+        broadcast(state, "hand_started", %{
+          button_seat: setup.button_seat,
+          players: seat_stacks(hand)
+        })
+
+        apply_hand(state, hand, events)
+
+      {:error, _reason} ->
+        state
+    end
+  end
+
+  # Игрок, ждавший большого блайнда, вступает ровно тогда, когда блайнд
+  # доходит до него: иначе вход был бы способом не платить блайнды.
+  defp activate_big_blind(%RoomState{big_blind_seat: nil} = room), do: room
+
+  defp activate_big_blind(room) do
+    case Map.get(room.seats, room.big_blind_seat) do
+      %Seat{waiting_for_bb: true} = seat ->
+        %{room | seats: Map.put(room.seats, seat.number, %{seat | waiting_for_bb: false})}
+
+      _other ->
+        room
+    end
+  end
+
+  defp rake_fun(state) do
+    setting = state.room.setting
+    fn pot, players, opts -> state.game_mode.rake(setting, pot, players, opts) end
+  end
+
+  # Пока раздача идёт, источник правды по стекам — она: комната только
+  # зеркалит их, чтобы снапшот и лобби не разъезжались с движком.
+  defp apply_hand(state, hand, events) do
+    state = put_room(state, sync_seats(%{state.room | hand: hand}, hand))
+    state = Enum.reduce(events, state, &emit/2)
+
+    if Hand.finished?(hand), do: finish_hand(state, hand), else: arm_action_timer(state, hand)
+  end
+
+  defp sync_seats(room, hand) do
+    seats =
+      Enum.reduce(hand.players, room.seats, fn {number, player}, seats ->
+        Map.update!(seats, number, &%{&1 | stack: player.stack})
+      end)
+
+    %{room | seats: seats, action_seq: hand.seq}
+  end
+
+  defp arm_action_timer(state, %Hand{to_act: nil} = _hand), do: cancel_timer(state, :action)
+
+  defp arm_action_timer(state, hand) do
+    ms = state.room.setting.action_timeout_ms
+    deadline = System.monotonic_time(:millisecond) + ms
+    state = put_room(state, %{state.room | deadline_at: deadline})
+    broadcast(state, "action_prompt", prompt_payload(hand, ms))
+    schedule(state, :action, ms)
+  end
+
+  defp finish_hand(state, hand) do
+    state = cancel_timer(state, :action)
+
+    room = %{state.room | hand: nil, deadline_at: nil}
+    room = state.game_mode.on_hand_finished(room, hand.results)
+    room = %{room | button_seat: next_button(room)}
+    room = %{room | big_blind_seat: big_blind_seat_for(room)}
+
+    state =
+      state
+      |> put_room(room)
+      |> handle_broke_players(hand)
+      |> maybe_stop_game()
+
+    announce(state)
+
+    if length(RoomState.players(state.room)) >= 2 and state.room.game_started? do
+      schedule(state, :next_hand, 2_000)
+    else
+      state
+    end
+  end
+
+  # Проигравший всё не встаёт молча: кэш даёт ему время докупиться.
+  defp handle_broke_players(state, hand) do
+    Enum.reduce(hand.players, state, fn {number, _player}, acc ->
+      seat = Map.get(acc.room.seats, number)
+
+      if seat != nil and seat.stack == 0 and Seat.occupied?(seat) do
+        acc
+        |> put_room(acc.game_mode.on_zero_stack(acc.room, seat))
+        |> schedule({:rebuy, number}, acc.room.setting.rebuy_prompt_ms)
+      else
+        acc
+      end
+    end)
+  end
+
+  defp next_button(room) do
+    case in_game_seats(room) do
+      [] ->
+        room.button_seat
+
+      seats ->
+        seats
+        |> Stream.cycle()
+        |> Stream.drop_while(&(&1 <= (room.button_seat || 0)))
+        |> Enum.at(0)
+    end
+  end
+
+  defp big_blind_seat_for(room) do
+    case in_game_seats(room) do
+      [] -> nil
+      seats -> big_blind_seat(room.button_seat, seats)
+    end
+  end
+
+  defp in_game_seats(room) do
+    room |> RoomState.players() |> Enum.map(& &1.number) |> Enum.sort()
+  end
+
+  defp seat_stacks(hand) do
+    Enum.map(hand.players, fn {seat, player} -> %{seat: seat, stack: player.stack} end)
+  end
+
+  defp prompt_payload(hand, ms) do
+    %{
+      seat: hand.to_act,
+      action_seq: hand.seq,
+      deadline_ms: ms,
+      legal_actions: Hand.legal_actions(hand, hand.to_act)
+    }
+  end
+
+  defp fetch_hand(%State{room: %RoomState{hand: nil}}), do: {:error, :no_hand}
+  defp fetch_hand(%State{room: %RoomState{hand: hand}}), do: {:ok, hand}
+
+  defp seat_of(state, user_id) do
+    case RoomState.find_seat(state.room, user_id) do
+      nil -> {:error, :not_seated}
+      seat -> {:ok, seat.number}
+    end
+  end
+
+  # Карманные карты уходят адресно: их получает только владелец места.
+  defp emit({:hole_dealt, by_seat}, state) do
+    Enum.reduce(by_seat, state, fn {seat_number, cards}, acc ->
+      case Map.get(acc.room.seats, seat_number) do
+        nil -> acc
+        seat -> private(acc, seat.user_id, "your_cards", %{seat: seat_number, cards: cards})
+      end
+    end)
+  end
+
+  # Подсказка о ходе уходит из `arm_action_timer`: только там известен дедлайн.
+  defp emit({:action_prompt, _payload}, state), do: state
+
+  defp emit({event, payload}, state) do
+    broadcast(state, Atom.to_string(event), payload)
+    state
+  end
+
+  defp private(state, user_id, event, payload) do
+    PubSub.broadcast(
+      @pubsub,
+      topic(state.room.room_id),
+      {:table_private, user_id, event, Map.put(payload, :room_id, state.room.room_id)}
+    )
+
     state
   end
 

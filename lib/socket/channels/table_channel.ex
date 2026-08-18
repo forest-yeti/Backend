@@ -55,6 +55,24 @@ defmodule Socket.Channels.TableChannel do
     end
   end
 
+  def handle_in("action", payload, socket) do
+    case Message.fetch_action(payload) do
+      {:ok, action} ->
+        socket.assigns.room_id
+        |> Tables.act(socket.assigns.user_id, action, Message.action_seq(payload))
+        |> Message.reply(socket)
+
+      {:error, code} ->
+        Message.error_reply(code, socket)
+    end
+  end
+
+  def handle_in("show_cards", _payload, socket) do
+    socket.assigns.room_id
+    |> Tables.show_cards(socket.assigns.user_id)
+    |> Message.reply(socket)
+  end
+
   def handle_in("leave_seat", _payload, socket) do
     socket.assigns.room_id
     |> Tables.leave_seat(socket.assigns.user_id)
@@ -95,6 +113,13 @@ defmodule Socket.Channels.TableChannel do
   @impl true
   def handle_info({:table_event, event, payload}, socket) do
     push(socket, event, TableView.event(event, payload))
+    {:noreply, socket}
+  end
+
+  # Приватное событие адресовано одному игроку: остальные каналы его молча
+  # пропускают. Карманные карты не должны попасть в общий топик даже на миг.
+  def handle_info({:table_private, user_id, event, payload}, socket) do
+    if socket.assigns.user_id == user_id, do: push(socket, event, payload)
     {:noreply, socket}
   end
 

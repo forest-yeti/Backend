@@ -48,6 +48,8 @@ defmodule Socket.Channels.TableChannelTest do
     end
   end
 
+  defp room_pid(room_id), do: BlockPoker.Tables.TableRegistry.whereis(room_id)
+
   defp token(user) do
     {:ok, %{token: token}} = BlockPoker.Accounts.start_session(user)
     token
@@ -184,6 +186,54 @@ defmodule Socket.Channels.TableChannelTest do
     assert snapshot.you.seated
     assert snapshot.you.seat == 4
     assert snapshot.you.status == :playing
+  end
+
+  test "раздача стартует, карты уходят адресно, ход подсказывается", %{
+    room_id: room_id,
+    buy_in: buy_in
+  } do
+    %{channel: first} = connect_player(room_id)
+    %{channel: second} = connect_player(room_id)
+
+    ref = push(first, "join_seat", %{"seat" => 1, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+    ref = push(second, "join_seat", %{"seat" => 2, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+
+    :ok = TableServer.fire_timer(room_pid(room_id), :button_draw)
+
+    assert_push "hand_started", %{}
+    assert_push "action_prompt", prompt
+    assert prompt.legal_actions.fold
+
+    # Карманные карты приходят каждому свои и не уходят в общий топик.
+    assert_push "your_cards", %{cards: cards}
+    assert length(cards) == 2
+
+    ref = push(first, "table_state", %{})
+    assert_reply ref, :ok, snapshot
+    assert snapshot.hand.street == :preflop
+    assert length(snapshot.you.hole_cards) == 2
+  end
+
+  test "чужого хода не бывает: действие вне очереди отклоняется", %{
+    room_id: room_id,
+    buy_in: buy_in
+  } do
+    %{channel: first} = connect_player(room_id)
+    %{channel: second} = connect_player(room_id)
+
+    ref = push(first, "join_seat", %{"seat" => 1, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+    ref = push(second, "join_seat", %{"seat" => 2, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+
+    :ok = TableServer.fire_timer(room_pid(room_id), :button_draw)
+    assert_push "action_prompt", prompt
+
+    waiting = if prompt.seat == 1, do: second, else: first
+    ref = push(waiting, "action", %{"type" => "call"})
+    assert_reply ref, :error, %{code: "not_your_turn"}
   end
 
   test "table_state отдаёт снапшот с местом игрока", %{room_id: room_id, buy_in: buy_in} do

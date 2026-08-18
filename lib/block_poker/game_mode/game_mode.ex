@@ -35,6 +35,10 @@ defmodule BlockPoker.GameMode do
   @callback take_buy_in(RoomState.t(), Ecto.UUID.t(), pos_integer(), String.t()) ::
               :ok | {:error, atom()}
 
+  @doc "Рейк с банка: в кэше по шаблону лимита, в турнире всегда 0."
+  @callback rake(setting :: term(), pot :: non_neg_integer(), players :: pos_integer(), keyword()) ::
+              non_neg_integer()
+
   @doc "Вернуть фишки игроку: в кэше — cash-out в кошелёк, в турнире — no-op."
   @callback return_chips(RoomState.t(), Ecto.UUID.t(), non_neg_integer(), String.t()) ::
               :ok | {:error, atom()}

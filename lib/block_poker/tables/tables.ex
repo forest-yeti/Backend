@@ -106,6 +106,19 @@ defmodule BlockPoker.Tables do
     end
   end
 
+  @doc "Игровое действие: fold, check, call, {:raise, to}, :all_in."
+  @spec act(Ecto.UUID.t(), Ecto.UUID.t(), term(), non_neg_integer() | nil) ::
+          :ok | {:error, error()}
+  def act(room_id, user_id, action, seq) do
+    with {:ok, pid} <- fetch_room(room_id), do: TableServer.act(pid, user_id, action, seq)
+  end
+
+  @doc "Показать свои карты по желанию — сбросив или дойдя до вскрытия."
+  @spec show_cards(Ecto.UUID.t(), Ecto.UUID.t()) :: :ok | {:error, error()}
+  def show_cards(room_id, user_id) do
+    with {:ok, pid} <- fetch_room(room_id), do: TableServer.show_cards(pid, user_id)
+  end
+
   @spec sit_out(Ecto.UUID.t(), Ecto.UUID.t()) :: :ok | {:error, error()}
   def sit_out(room_id, user_id) do
     with {:ok, pid} <- fetch_room(room_id), do: TableServer.sit_out(pid, user_id)

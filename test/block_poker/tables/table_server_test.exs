@@ -75,7 +75,7 @@ defmodule BlockPoker.Tables.TableServerTest do
       assert [button, button] = buttons
     end
 
-    test "раздача не стартует раньше button_draw_animation_ms" do
+    test "раздача стартует не раньше конца button_draw_animation_ms" do
       %{pid: pid, room_id: room_id} = start_room!()
       Phoenix.PubSub.subscribe(BlockPoker.PubSub, TableServer.topic(room_id))
 
@@ -88,7 +88,8 @@ defmodule BlockPoker.Tables.TableServerTest do
 
       :ok = TableServer.fire_timer(pid, :button_draw)
 
-      assert TableServer.state(pid).phase == :idle
+      # Анимация кончилась — кнопка назначена и сразу началась раздача.
+      assert TableServer.state(pid).phase == :hand
       assert_received {:table_event, "button_ready", _payload}
     end
 

@@ -15,6 +15,7 @@ defmodule Socket.Views.TableView do
 
   alias BlockPoker.CashGames.CashGameSetting
   alias BlockPoker.Engine.Card
+  alias BlockPoker.Engine.Hand
   alias BlockPoker.Tables.{RoomState, Seat}
   alias Socket.Views.LobbyView
 
@@ -36,6 +37,7 @@ defmodule Socket.Views.TableView do
       visuals: LobbyView.visuals(room.setting),
       seats: room |> RoomState.seats() |> Enum.map(&seat(&1, user_id)),
       button_draw: button_draw(room),
+      hand: hand(room),
       you: you(room, user_id)
     }
   end
@@ -71,6 +73,38 @@ defmodule Socket.Views.TableView do
     Enum.map(cards, fn %{seat: seat, card: card} -> %{seat: seat, card: Card.to_map(card)} end)
   end
 
+  # Публичная часть раздачи: борд, банк, чей ход. Карманных карт здесь нет
+  # и быть не может — они уходят только владельцу места.
+  defp hand(%RoomState{hand: nil}), do: nil
+
+  defp hand(%RoomState{hand: hand} = room) do
+    %{
+      street: hand.street,
+      board: Enum.map(hand.board, &Card.to_map/1),
+      pot: hand.pot,
+      bet: hand.bet,
+      to_act: hand.to_act,
+      action_seq: hand.seq,
+      deadline_ms: remaining(room.deadline_at),
+      seats:
+        Map.new(hand.players, fn {seat, player} ->
+          {seat,
+           %{
+             committed: player.committed,
+             total: player.total,
+             status: player.status,
+             cards: if(player.show?, do: Enum.map(player.hole, &Card.to_map/1))
+           }}
+        end)
+    }
+  end
+
+  defp remaining(nil), do: nil
+
+  defp remaining(deadline_at) do
+    max(deadline_at - System.monotonic_time(:millisecond), 0)
+  end
+
   @spec seat(Seat.t(), Ecto.UUID.t()) :: map()
   def seat(%Seat{} = seat, _user_id) do
     %{
@@ -101,6 +135,34 @@ defmodule Socket.Views.TableView do
           can_post: seat.can_post,
           missed_blinds: seat.missed_blinds
         }
+        |> Map.merge(private_hand(room, seat.number))
+    end
+  end
+
+  # Свои карты, своя комбинация и свои легальные действия. Единственное
+  # место, где приватное вообще попадает в снапшот, — и только владельцу.
+  defp private_hand(%RoomState{hand: nil}, _seat), do: %{}
+
+  defp private_hand(%RoomState{hand: hand}, seat) do
+    case Map.get(hand.players, seat) do
+      nil ->
+        %{}
+
+      player ->
+        %{
+          hole_cards: Enum.map(player.hole, &Card.to_map/1),
+          combination: combination(hand, seat),
+          in_hand: player.status != :folded,
+          legal_actions: Hand.legal_actions(hand, seat)
+        }
+    end
+  end
+
+  # Комбинация появляется с флопа: раньше пяти карт просто не набирается.
+  defp combination(hand, seat) do
+    case Hand.combination(hand, seat) do
+      nil -> nil
+      rank -> %{category: rank.category, cards: Enum.map(rank.cards, &Card.to_map/1)}
     end
   end
 end

@@ -27,6 +27,11 @@ defmodule BlockPoker.ErrorCode do
           | :room_closing
           | :zero_stack
           | :reservation_lost
+          | :not_your_turn
+          | :illegal_action
+          | :stale_action
+          | :no_hand
+          | :hand_finished
           | :wallet_not_found
           | :internal_error
 
@@ -51,6 +56,11 @@ defmodule BlockPoker.ErrorCode do
     room_closing: {409, "Комната закрывается"},
     zero_stack: {409, "Нулевой стек: сначала докупитесь"},
     reservation_lost: {409, "Резерв места истёк, попробуйте снова"},
+    not_your_turn: {409, "Сейчас не ваш ход"},
+    illegal_action: {422, "Такое действие сейчас недопустимо"},
+    stale_action: {409, "Состояние стола изменилось, повторите действие"},
+    no_hand: {409, "Раздача не идёт"},
+    hand_finished: {409, "Раздача уже закончилась"},
     wallet_not_found: {404, "Кошелёк не найден"},
     internal_error: {500, "Внутренняя ошибка"}
   }

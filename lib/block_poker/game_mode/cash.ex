@@ -66,6 +66,7 @@ defmodule BlockPoker.GameMode.Cash do
   а не в настройке: поля рейка в шаблоне есть, но при игровых фишках
   игнорируются.
   """
+  @impl true
   @spec rake(CashGameSetting.t(), pot :: non_neg_integer(), players :: pos_integer(), keyword()) ::
           non_neg_integer()
   def rake(setting, pot, players, opts \\ [])
