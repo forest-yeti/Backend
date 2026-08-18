@@ -135,14 +135,15 @@ defmodule BlockPoker.Tables.LobbyTest do
   end
 
   test "снапшот показывает все включённые шаблоны, включая пустые" do
-    first = setting_fixture(%{sort_order: 1, small_blind: 5, big_blind: 10})
-    second = setting_fixture(%{sort_order: 0, small_blind: 25, big_blind: 50})
+    higher = setting_fixture(%{small_blind: 25, big_blind: 50})
+    lower = setting_fixture(%{small_blind: 5, big_blind: 10})
     lobby = start_lobby!()
 
     ids = lobby |> Lobby.snapshot() |> Enum.map(& &1.setting.id)
 
-    # Сортировка — по sort_order, а не по порядку создания.
-    assert Enum.find_index(ids, &(&1 == second.id)) < Enum.find_index(ids, &(&1 == first.id))
+    # Порядок витрины задаёт `LobbyQuery`: младший лимит выше старшего,
+    # независимо от порядка создания строк.
+    assert Enum.find_index(ids, &(&1 == lower.id)) < Enum.find_index(ids, &(&1 == higher.id))
   end
 
   test "quick_seat на хедз-апе подсаживает к ждущему, а не в пустую комнату" do

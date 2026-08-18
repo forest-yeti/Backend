@@ -24,7 +24,7 @@ defmodule BlockPoker.Tables.Lobby do
 
   alias BlockPoker.CashGames
   alias BlockPoker.CashGames.CashGameSetting
-  alias BlockPoker.Tables.{RoomState, TableRegistry, TableServer, TableSupervisor}
+  alias BlockPoker.Tables.{LobbyQuery, RoomState, TableRegistry, TableServer, TableSupervisor}
   alias Phoenix.PubSub
 
   @pubsub BlockPoker.PubSub
@@ -59,8 +59,10 @@ defmodule BlockPoker.Tables.Lobby do
   def reload(server \\ __MODULE__), do: GenServer.call(server, :reload)
 
   @doc "Агрегированная витрина лобби: шаблоны с их комнатами."
-  @spec snapshot(GenServer.server()) :: [map()]
-  def snapshot(server \\ __MODULE__), do: GenServer.call(server, :snapshot)
+  @spec snapshot(GenServer.server(), LobbyQuery.t()) :: [map()]
+  def snapshot(server \\ __MODULE__, query \\ %LobbyQuery{}) do
+    GenServer.call(server, {:snapshot, query})
+  end
 
   @doc "Комната со свободными местами для шаблона — по инварианту она одна."
   @spec open_room(GenServer.server(), Ecto.UUID.t()) ::
@@ -106,7 +108,9 @@ defmodule BlockPoker.Tables.Lobby do
     {:reply, :ok, state}
   end
 
-  def handle_call(:snapshot, _from, state), do: {:reply, build_snapshot(state), state}
+  def handle_call({:snapshot, query}, _from, state) do
+    {:reply, build_snapshot(state, query), state}
+  end
 
   def handle_call(:settings, _from, state), do: {:reply, Map.values(state.settings), state}
 
@@ -301,12 +305,12 @@ defmodule BlockPoker.Tables.Lobby do
 
   # --- витрина -------------------------------------------------------------
 
-  defp build_snapshot(state) do
+  defp build_snapshot(state, query) do
     state.settings
     |> Map.values()
     |> Enum.filter(& &1.enabled)
-    |> Enum.sort_by(&{&1.sort_order, &1.small_blind, &1.max_players})
     |> Enum.map(&setting_snapshot(state, &1))
+    |> then(&LobbyQuery.apply(query, &1))
   end
 
   defp setting_snapshot(state, setting) do
@@ -315,8 +319,21 @@ defmodule BlockPoker.Tables.Lobby do
     %{
       setting: setting,
       rooms: rooms,
-      players_total: Enum.reduce(rooms, 0, &(&1.seats_taken + &2))
+      players_total: Enum.reduce(rooms, 0, &(&1.seats_taken + &2)),
+      # Занятость лимита — заполненность комнаты, в которую посадит быстрый
+      # вход: именно её игрок видит как «6/9» напротив строки лобби.
+      seats_taken: featured_seats_taken(rooms),
+      max_players: setting.max_players,
+      limit_tier: LobbyQuery.limit_tier(setting),
+      table_size: LobbyQuery.table_size(setting)
     }
+  end
+
+  defp featured_seats_taken(rooms) do
+    rooms
+    |> Enum.filter(&open?/1)
+    |> Enum.map(& &1.seats_taken)
+    |> Enum.max(fn -> 0 end)
   end
 
   defp broadcast_update(state, setting_id) do

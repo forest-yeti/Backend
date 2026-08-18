@@ -103,4 +103,85 @@ defmodule Socket.Channels.LobbyChannelTest do
     ref = push(channel, "quick_seat", %{"setting_id" => setting.id, "buy_in" => "много"})
     assert_reply ref, :error, %{code: "validation_failed"}
   end
+
+  defp join_lobby(params) do
+    user = user_fixture()
+    {:ok, %{token: token}} = BlockPoker.Accounts.start_session(user)
+    {:ok, socket} = connect(UserSocket, %{"token" => token})
+    {:ok, snapshot, channel} = subscribe_and_join(socket, "lobby", params)
+    %{user: user, channel: channel, snapshot: snapshot}
+  end
+
+  # Шаблон на реальные деньги нужен рядом с игровым: фильтры и порядок
+  # видно только там, где валют больше одной.
+  defp main_setting! do
+    setting = setting_fixture(%{name: "NL10", currency: :main, small_blind: 5, big_blind: 10})
+    :ok = Lobby.reload()
+    setting
+  end
+
+  test "по умолчанию main идёт выше play_money", %{setting: play} do
+    main = main_setting!()
+
+    %{snapshot: snapshot} = join_lobby()
+    ids = Enum.map(snapshot.settings, & &1.setting_id)
+
+    assert Enum.find_index(ids, &(&1 == main.id)) < Enum.find_index(ids, &(&1 == play.id))
+  end
+
+  test "фильтр по валюте и категории отдаёт только подходящие лимиты", %{setting: play} do
+    main = main_setting!()
+
+    %{channel: channel} = join_lobby()
+
+    ref =
+      push(channel, "list", %{
+        "currencies" => ["main"],
+        "limit_tiers" => ["micro"],
+        "game_types" => ["texas_holdem"]
+      })
+
+    assert_reply ref, :ok, snapshot
+
+    ids = Enum.map(snapshot.settings, & &1.setting_id)
+    assert main.id in ids
+    refute play.id in ids
+  end
+
+  test "витрина приходит с категориями и списком допустимых фильтров" do
+    main = main_setting!()
+
+    %{snapshot: snapshot} = join_lobby()
+    [shown] = Enum.filter(snapshot.settings, &(&1.setting_id == main.id))
+
+    assert shown.limit_tier == :micro
+    assert shown.table_size == :six_max
+    assert shown.seats_taken == 0
+    assert :play_money in snapshot.filters.currencies
+    assert :high_roller in snapshot.filters.limit_tiers
+  end
+
+  test "неизвестное значение фильтра отвергается кодом" do
+    %{channel: channel} = join_lobby()
+
+    ref = push(channel, "list", %{"currencies" => ["bitcoin"]})
+    assert_reply ref, :error, %{code: "validation_failed"}
+  end
+
+  test "отфильтрованный лимит не шлёт подписчику lobby_delta", %{
+    setting: setting,
+    buy_in: buy_in
+  } do
+    _main = main_setting!()
+
+    # Один подписчик на всю проверку: пуши каналов приходят в почтовый ящик
+    # теста общим потоком, и второй, нефильтрованный, сокет её бы обнулил.
+    %{channel: watcher} = join_lobby(%{"currencies" => ["main"]})
+
+    ref = push(watcher, "quick_seat", %{"setting_id" => setting.id, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+
+    # Занятость игрового лимита изменилась, но подписчик смотрит на main.
+    refute_push "lobby_delta", _delta
+  end
 end

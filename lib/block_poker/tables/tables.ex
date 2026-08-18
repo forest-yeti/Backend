@@ -19,14 +19,45 @@ defmodule BlockPoker.Tables do
   """
 
   alias BlockPoker.Accounts
+  alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.GameMode
-  alias BlockPoker.Tables.{Lobby, RoomState, TableRegistry, TableServer}
+  alias BlockPoker.Tables.{Lobby, LobbyQuery, RoomState, TableRegistry, TableServer}
 
   @type entry :: :wait_bb | :post
   @type error :: atom()
 
-  @spec lobby_snapshot() :: [map()]
-  def lobby_snapshot, do: Lobby.snapshot()
+  @doc """
+  Разбор фильтров и сортировки лобби из сырого payload.
+
+  Отдельно от `lobby_snapshot/1` потому, что разобранный запрос нужен каналу
+  дважды: на первичной выдаче и на каждом `lobby_delta` — чтобы не слать
+  подписчику лимиты, которые он отфильтровал.
+  """
+  @spec lobby_query(map() | nil) :: {:ok, LobbyQuery.t()} | {:error, :validation_failed}
+  def lobby_query(params \\ nil), do: LobbyQuery.parse(params)
+
+  @spec lobby_snapshot(LobbyQuery.t()) :: [map()]
+  def lobby_snapshot(query \\ %LobbyQuery{}), do: Lobby.snapshot(Lobby, query)
+
+  @doc """
+  Допустимые значения фильтров и сортировок — их же клиент рисует в панели.
+  Список приходит с сервера, чтобы новая категория не требовала релиза
+  клиента с захардкоженным списком.
+  """
+  @spec lobby_filters() :: map()
+  def lobby_filters do
+    %{
+      game_types: VariantRegistry.ids(),
+      currencies: LobbyQuery.currencies(),
+      table_sizes: LobbyQuery.table_sizes(),
+      limit_tiers: LobbyQuery.limit_tiers(),
+      sort_fields: LobbyQuery.sort_fields()
+    }
+  end
+
+  @doc "Проходит ли обновление лимита фильтр подписчика."
+  @spec lobby_visible?(LobbyQuery.t(), map()) :: boolean()
+  def lobby_visible?(query, snapshot), do: LobbyQuery.matches?(query, snapshot)
 
   @spec room_state(Ecto.UUID.t()) :: {:ok, RoomState.t()} | {:error, :not_found}
   def room_state(room_id) do

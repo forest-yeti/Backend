@@ -8,11 +8,13 @@ defmodule Socket.Views.LobbyView do
 
   alias BlockPoker.CashGames.CashGameSetting
 
-  @spec render([map()]) :: %{settings: [map()]}
-  def render(snapshot), do: %{settings: Enum.map(snapshot, &setting/1)}
+  @spec render([map()]) :: %{settings: [map()], filters: map()}
+  def render(snapshot) do
+    %{settings: Enum.map(snapshot, &setting/1), filters: BlockPoker.Tables.lobby_filters()}
+  end
 
   @spec setting(map()) :: map()
-  def setting(%{setting: setting, rooms: rooms, players_total: players_total}) do
+  def setting(%{setting: setting, rooms: rooms, players_total: players_total} = snapshot) do
     %{
       setting_id: setting.id,
       name: CashGameSetting.display_name(setting),
@@ -23,6 +25,9 @@ defmodule Socket.Views.LobbyView do
       ante: setting.ante,
       ante_type: setting.ante_type,
       max_players: setting.max_players,
+      table_size: entry_field(snapshot, :table_size),
+      limit_tier: entry_field(snapshot, :limit_tier),
+      seats_taken: entry_field(snapshot, :seats_taken),
       min_buy_in: CashGameSetting.min_buy_in_chips(setting),
       max_buy_in: CashGameSetting.max_buy_in_chips(setting),
       players_total: players_total,
@@ -40,6 +45,10 @@ defmodule Socket.Views.LobbyView do
       draining: room.draining?
     }
   end
+
+  # Категория лимита, формат стола и занятость приходят из ядра посчитанными:
+  # арифметике и правилам во view места нет (§3 CLAUDE.md).
+  defp entry_field(snapshot, key), do: Map.get(snapshot, key)
 
   @doc "Косметика стола: клиент рисует сукно и фон по этим значениям."
   @spec visuals(CashGameSetting.t()) :: map()
