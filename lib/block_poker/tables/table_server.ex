@@ -754,8 +754,11 @@ defmodule BlockPoker.Tables.TableServer do
     end)
   end
 
+  # Кнопка двигается по местам, которые **играют раздачу**, а не просто
+  # сидят за столом: ждущий большого блайнда в раздаче не участвует, и
+  # кнопка на его месте оставляла раздачу без малого блайнда.
   defp next_button(room) do
-    case in_game_seats(room) do
+    case playing_seats(room) do
       [] ->
         room.button_seat
 
@@ -768,6 +771,10 @@ defmodule BlockPoker.Tables.TableServer do
     end
   end
 
+  # Большой блайнд, наоборот, считается по всем сидящим: именно так он
+  # доходит до ждущего игрока и вводит его в игру (`activate_big_blind/1`).
+  # Большой блайнд, наоборот, считается по всем сидящим: именно так он
+  # доходит до ждущего игрока и вводит его в игру (`activate_big_blind/1`).
   defp big_blind_seat_for(room) do
     case in_game_seats(room) do
       [] -> nil
@@ -777,6 +784,14 @@ defmodule BlockPoker.Tables.TableServer do
 
   defp in_game_seats(room) do
     room |> RoomState.players() |> Enum.map(& &1.number) |> Enum.sort()
+  end
+
+  defp playing_seats(room) do
+    room |> RoomState.seats() |> Enum.filter(&Seat.in_game?/1) |> Enum.map(& &1.number)
+  end
+
+  defp playing_seats(room) do
+    room |> RoomState.seats() |> Enum.filter(&Seat.in_game?/1) |> Enum.map(& &1.number)
   end
 
   defp seat_stacks(hand) do
@@ -965,11 +980,18 @@ defmodule BlockPoker.Tables.TableServer do
   end
 
   defp big_blind_seat(button_seat, seats) do
-    seats
-    |> Stream.cycle()
-    |> Stream.drop_while(&(&1 != button_seat))
-    |> Enum.take(3)
-    |> List.last()
+    # Кнопки может не оказаться среди этих мест (игрок встал, сел в сит-аут).
+    # Без этой проверки `drop_while` крутится по бесконечному циклу вечно,
+    # и процесс стола встаёт колом — это хуже падения: его никто не заметит.
+    if button_seat in seats do
+      seats
+      |> Stream.cycle()
+      |> Stream.drop_while(&(&1 != button_seat))
+      |> Enum.take(3)
+      |> List.last()
+    else
+      Enum.at(seats, 1, hd(seats))
+    end
   end
 
   # --- вспомогательное -----------------------------------------------------

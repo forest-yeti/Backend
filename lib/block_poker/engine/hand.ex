@@ -617,13 +617,20 @@ defmodule BlockPoker.Engine.Hand do
   end
 
   # На хедз-апе кнопка — малый блайнд и ходит первой до флопа.
+  #
+  # Кнопка при этом может стоять на месте, которое раздачу не играет:
+  # «мёртвая кнопка» — законное состояние живого стола (игрок встал, сел
+  # в сит-аут или ждёт большого блайнда). Брать её место как малый блайнд
+  # в таком случае нельзя — его в раздаче попросту нет.
   defp blind_seat(hand, kind) do
     seats = hand.order
 
     if length(seats) == 2 do
+      small = if hand.button_seat in seats, do: hand.button_seat, else: Enum.at(seats, 0)
+
       case kind do
-        :small -> hand.button_seat
-        :big -> Enum.find(seats, &(&1 != hand.button_seat))
+        :small -> small
+        :big -> Enum.find(seats, &(&1 != small))
       end
     else
       case kind do

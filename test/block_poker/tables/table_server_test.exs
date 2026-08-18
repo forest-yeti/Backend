@@ -518,6 +518,51 @@ defmodule BlockPoker.Tables.TableServerTest do
     end
   end
 
+  describe "кнопка и ждущие блайнда" do
+    test "стол не падает, когда кнопка доходит до ждущего блайнда" do
+      # Живой сценарий: двое играют, третий сел и ждёт большого блайнда.
+      # Кнопка по кругу доходит до него — а раздачу по-прежнему играют двое.
+      %{pid: pid} = start_room!()
+      seat!(pid, "user-1", 1, 400)
+      seat!(pid, "user-2", 2, 400)
+      :ok = TableServer.fire_timer(pid, :button_draw)
+      seat!(pid, "user-3", 3, 400)
+
+      assert TableServer.state(pid).seats[3].waiting_for_bb
+
+      # Несколько кругов: кнопка обязана пройти через место ждущего.
+      for _hand <- 1..6 do
+        play_hand_out(pid)
+        assert Process.alive?(pid), "комната упала на смене раздачи"
+        :ok = TableServer.fire_timer(pid, :next_hand)
+      end
+
+      room = TableServer.state(pid)
+      assert room.phase == :hand, "стол встал и новую раздачу не начал"
+      assert room.hands_played >= 6
+    end
+
+    test "кнопка не встаёт на место, которое не играет раздачу" do
+      %{pid: pid} = start_room!()
+      seat!(pid, "user-1", 1, 400)
+      seat!(pid, "user-2", 2, 400)
+      :ok = TableServer.fire_timer(pid, :button_draw)
+      seat!(pid, "user-3", 3, 400)
+
+      for _hand <- 1..6 do
+        room = TableServer.state(pid)
+
+        if room.hand do
+          assert Map.has_key?(room.hand.players, room.button_seat),
+                 "кнопка на месте #{room.button_seat}, которого нет в раздаче"
+        end
+
+        play_hand_out(pid)
+        :ok = TableServer.fire_timer(pid, :next_hand)
+      end
+    end
+  end
+
   defp leave(pid, user_id) do
     {:ok, %{ref: ref}} = TableServer.begin_leave(pid, user_id)
     :ok = TableServer.finish_leave(pid, ref)

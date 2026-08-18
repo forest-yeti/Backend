@@ -40,6 +40,25 @@ defmodule BlockPoker.Engine.HandTest do
     {hand, events}
   end
 
+  describe "мёртвая кнопка" do
+    test "кнопка на месте, которое не играет раздачу, не роняет движок" do
+      # Живой сценарий: третий игрок сидит в ожидании большого блайнда,
+      # кнопка по кругу дошла до него, а раздачу играют двое. Кнопка при
+      # этом «мёртвая» — среди игроков раздачи её места нет.
+      {hand, events} = start([1000, 1000], button: 3)
+
+      assert Hand.total_chips(hand) == 2000
+      assert length(hand.order) == 2
+
+      # Блайнды всё равно поставлены, и поставлены участниками раздачи.
+      posted = for {:posted, payload} <- events, do: {payload.seat, payload.kind}
+      assert [{small, "small_blind"}, {big, "big_blind"}] = posted
+      assert small in hand.order
+      assert big in hand.order
+      assert small != big
+    end
+  end
+
   defp play_to_showdown(hand) do
     Enum.reduce_while(1..40, hand, fn _step, acc ->
       cond do
