@@ -93,6 +93,25 @@ defmodule BlockPoker.Tables.TableServerTest do
       assert_received {:table_event, "button_ready", _payload}
     end
 
+    test "кнопка переходит по кругу и не подвешивает стол" do
+      # Кнопка на старшем месте — граничный случай: выбор следующей кнопки
+      # обязан завершаться, иначе процесс стола зависает и все вызовы к нему
+      # отваливаются по таймауту.
+      %{pid: pid} = start_room!()
+
+      seat!(pid, "user-1", 1, 400)
+      seat!(pid, "user-2", 2, 400)
+      :ok = TableServer.fire_timer(pid, :button_draw)
+
+      button = TableServer.state(pid).button_seat
+      assert button in [1, 2]
+
+      play_hand_out(pid)
+
+      # Стол по-прежнему отвечает, а кнопка сдвинулась на другое место.
+      assert TableServer.state(pid).button_seat != button
+    end
+
     test "розыгрыш проводится один раз, а не на каждого нового игрока" do
       %{pid: pid, room_id: room_id} = start_room!()
       seat!(pid, "user-1", 1, 400)
@@ -168,5 +187,28 @@ defmodule BlockPoker.Tables.TableServerTest do
   defp leave(pid, user_id) do
     {:ok, %{ref: ref}} = TableServer.begin_leave(pid, user_id)
     :ok = TableServer.finish_leave(pid, ref)
+  end
+
+  # Доигрывает текущую раздачу самыми простыми ходами.
+  defp play_hand_out(pid) do
+    Enum.reduce_while(1..60, :playing, fn _step, _acc ->
+      room = TableServer.state(pid)
+
+      case room.hand do
+        nil ->
+          {:halt, :done}
+
+        hand ->
+          seat = Map.fetch!(room.seats, hand.to_act)
+
+          action =
+            if hand.bet == Map.fetch!(hand.players, hand.to_act).committed,
+              do: :check,
+              else: :call
+
+          :ok = TableServer.act(pid, seat.user_id, action, nil)
+          {:cont, :playing}
+      end
+    end)
   end
 end

@@ -493,10 +493,11 @@ defmodule BlockPoker.Tables.TableServer do
         room.button_seat
 
       seats ->
-        seats
-        |> Stream.cycle()
-        |> Stream.drop_while(&(&1 <= (room.button_seat || 0)))
-        |> Enum.at(0)
+        # Именно поиск с запасным значением, а не бесконечный `Stream.cycle`:
+        # когда кнопка стоит на старшем месте, отбрасывать «меньшие или
+        # равные» пришлось бы вечно, и процесс стола вставал колом.
+        current = room.button_seat || 0
+        Enum.find(seats, hd(seats), &(&1 > current))
     end
   end
 
