@@ -358,6 +358,38 @@ defmodule Socket.Channels.TableChannelTest do
     assert is_integer(server_time)
   end
 
+  describe "уборка канала" do
+    alias Socket.Channels.TableChannel
+
+    test "join отвергнут — terminate не падает на отсутствующем room_id" do
+      # `room_id` появляется в `assigns` только после успешного join; на
+      # отказанном его нет, и уборка обязана это пережить молча.
+      socket = %Phoenix.Socket{assigns: %{user_id: Ecto.UUID.generate()}}
+
+      assert :ok = TableChannel.terminate(:shutdown, socket)
+    end
+
+    test "комнаты уже нет — terminate не падает на мёртвом процессе", %{room_id: room_id} do
+      %{user: user} = connect_player(room_id)
+      pid = room_pid(room_id)
+
+      # Комната падает — это одна из причин, по которым канал закрывается.
+      Process.exit(pid, :kill)
+      wait_until_dead(pid)
+
+      socket = %Phoenix.Socket{assigns: %{user_id: user.id, room_id: room_id}}
+      assert :ok = TableChannel.terminate(:shutdown, socket)
+    end
+
+    defp wait_until_dead(pid, attempts \\ 50) do
+      cond do
+        not Process.alive?(pid) -> :ok
+        attempts == 0 -> flunk("комната так и не завершилась")
+        true -> Process.sleep(10) && wait_until_dead(pid, attempts - 1)
+      end
+    end
+  end
+
   test "table_state отдаёт снапшот с местом игрока", %{room_id: room_id, buy_in: buy_in} do
     %{channel: channel} = connect_player(room_id)
     ref = push(channel, "join_seat", %{"seat" => 5, "buy_in" => buy_in})

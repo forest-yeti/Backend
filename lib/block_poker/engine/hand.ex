@@ -28,6 +28,7 @@ defmodule BlockPoker.Engine.Hand do
           hole: [Card.t()],
           committed: non_neg_integer(),
           total: non_neg_integer(),
+          dead: non_neg_integer(),
           status: status(),
           acted?: boolean(),
           show?: boolean()
@@ -106,6 +107,7 @@ defmodule BlockPoker.Engine.Hand do
            hole: [],
            committed: 0,
            total: 0,
+           dead: 0,
            status: :active,
            acted?: false,
            show?: false
@@ -510,37 +512,61 @@ defmodule BlockPoker.Engine.Hand do
     placements = Showdown.showdown(entries, hand.board, hand.context)
     place_of = Map.new(placements, &{&1.player_id, &1.place})
 
-    {pots, payouts} = split_pots(hand, place_of)
-    rake = hand.pot - Enum.sum(Enum.map(pots, & &1.amount))
+    {pots, payouts, refunded} = split_pots(hand, place_of)
+    rake = hand.pot - Enum.sum(Enum.map(pots, & &1.amount)) - refunded
 
     %{pots: pots, payouts: payouts, rake: rake, showdown?: true, placements: placements}
   end
 
-  # Сайд-поты строятся по уровням вложенного за раздачу: каждый уровень
-  # разыгрывают только те, кто дошёл до него своими фишками.
+  # Сайд-поты строятся по уровням, которые **разыгрывают претенденты**:
+  # только их вложения делят банк на слои. Всё остальное — деньги, которые
+  # в банке лежат, но своего слоя не образуют:
+  #
+  #   * мёртвые (анте, мёртвый взнос за вход, ставки сбросивших) — они
+  #     достаются победителю основного банка;
+  #   * неотвеченная часть ставки — её не покрыл ни один претендент, банком
+  #     она не является и возвращается тому, кто её поставил.
+  #
+  # Считать слои по вложениям **всех** игроков нельзя: сбросивший большой
+  # блайнд с анте вкладывает больше лимперов, и наверху появлялся слой, на
+  # который не претендует никто. Такой банк делился между пустым списком
+  # победителей — то есть на ноль.
   defp split_pots(hand, place_of) do
-    levels =
+    contenders = hand |> players() |> Enum.filter(&Map.has_key?(place_of, &1.seat))
+    dead = hand |> players() |> Enum.reduce(0, &(&1.dead + &2))
+
+    # Потолок банка — вторая по величине ставка за раздачу: выше неё ставку
+    # никто не покрыл, и эти фишки в банк не входят.
+    cap = matched_cap(hand)
+
+    refunds =
       hand
       |> players()
-      |> Enum.map(& &1.total)
+      |> Enum.filter(&(&1.total > cap))
+      |> Map.new(&{&1.seat, &1.total - cap})
+
+    levels =
+      contenders
+      |> Enum.map(&min(&1.total, cap))
       |> Enum.filter(&(&1 > 0))
       |> Enum.uniq()
       |> Enum.sort()
 
     {pots, _prev} =
-      Enum.map_reduce(levels, 0, fn level, prev ->
-        amount =
-          hand
-          |> players()
-          |> Enum.reduce(0, fn player, acc ->
-            acc + min(player.total, level) - min(player.total, prev)
+      levels
+      |> Enum.with_index()
+      |> Enum.map_reduce(0, fn {level, index}, prev ->
+        contributed =
+          Enum.reduce(players(hand), 0, fn player, acc ->
+            total = min(player.total, cap)
+            acc + min(total, level) - min(total, prev)
           end)
 
+        # Мёртвые деньги целиком идут в основной банк: своего слоя у них нет.
+        amount = contributed + if(index == 0, do: dead, else: 0)
+
         eligible =
-          hand
-          |> players()
-          |> Enum.filter(&(&1.total >= level and Map.has_key?(place_of, &1.seat)))
-          |> Enum.map(& &1.seat)
+          contenders |> Enum.filter(&(min(&1.total, cap) >= level)) |> Enum.map(& &1.seat)
 
         best = eligible |> Enum.map(&Map.fetch!(place_of, &1)) |> Enum.min(fn -> nil end)
         winners = Enum.filter(eligible, &(Map.fetch!(place_of, &1) == best))
@@ -549,8 +575,28 @@ defmodule BlockPoker.Engine.Hand do
         {%{amount: amount, winners: winners}, level}
       end)
 
-    pots = Enum.reject(pots, &(&1.amount == 0))
-    {pots, distribute(pots, hand.button_seat, hand.order)}
+    pots = if levels == [], do: [dead_only_pot(hand, contenders, dead)], else: pots
+    pots = Enum.reject(pots, &(&1.amount == 0 or &1.winners == []))
+    payouts = distribute(pots, hand.button_seat, hand.order)
+
+    {pots, Map.merge(payouts, refunds, fn _seat, paid, refund -> paid + refund end),
+     Enum.sum(Map.values(refunds))}
+  end
+
+  defp matched_cap(hand) do
+    case hand |> players() |> Enum.map(& &1.total) |> Enum.sort(:desc) do
+      [] -> 0
+      [only] -> only
+      [_highest, second | _rest] -> second
+    end
+  end
+
+  # Вырожденный случай: ставок не было вовсе, а мёртвые деньги в банке есть.
+  # Разыгрывают их те, кто дошёл до вскрытия.
+  defp dead_only_pot(hand, contenders, dead) do
+    seats = Enum.map(contenders, & &1.seat)
+    {amount, _rake} = take_rake(hand, dead, max(length(seats), 1))
+    %{amount: amount, winners: seats}
   end
 
   # Неделимый остаток достаётся ближайшему от кнопки по часовой стрелке —
@@ -601,6 +647,7 @@ defmodule BlockPoker.Engine.Hand do
 
     # Анте за стол вносит большой блайнд — в банк, но не в счёт своей ставки.
     hand = put_player(hand, %{Map.fetch!(hand.players, seat) | committed: 0})
+    hand = mark_dead(hand, seat, amount)
     {hand, [{:posted, %{seat: seat, kind: "ante", amount: amount, pot: hand.pot}}]}
   end
 
@@ -765,6 +812,15 @@ defmodule BlockPoker.Engine.Hand do
   end
 
   defp players(hand), do: Map.values(hand.players)
+
+  # Деньги, которые лежат в банке, но ставкой игрока не являются. Отдельный
+  # счётчик нужен разбору банка: слои сайд-потов строятся по ставкам, а
+  # мёртвые деньги своего слоя не образуют.
+  defp mark_dead(hand, seat, amount) do
+    player = Map.fetch!(hand.players, seat)
+    put_player(hand, %{player | total: player.total - amount, dead: player.dead + amount})
+  end
+
   defp put_player(hand, player), do: %{hand | players: Map.put(hand.players, player.seat, player)}
 
   defp max_committed(hand),

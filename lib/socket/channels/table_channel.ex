@@ -152,7 +152,22 @@ defmodule Socket.Channels.TableChannel do
   def terminate(_reason, socket) do
     # Разрыв соединения — не cash-out: комната держит место grace-период
     # и решает сама, что делать по его истечении.
-    Tables.disconnect(socket.assigns.room_id, socket.assigns.user_id)
+    #
+    # Уборка обязана быть тихой при любом исходе. Комнаты может не быть
+    # вовсе — она падает, и это как раз одна из причин, по которым канал
+    # закрывается; а `room_id` в `assigns` не появляется, если join отвергли.
+    # Падение здесь ничего не чинит: оно лишь засыпает лог вторичными
+    # ошибками поверх настоящей.
+    case Map.get(socket.assigns, :room_id) do
+      nil -> :ok
+      room_id -> disconnect_quietly(room_id, socket.assigns.user_id)
+    end
+  end
+
+  defp disconnect_quietly(room_id, user_id) do
+    Tables.disconnect(room_id, user_id)
     :ok
+  catch
+    :exit, _reason -> :ok
   end
 end

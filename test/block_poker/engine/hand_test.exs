@@ -51,6 +51,51 @@ defmodule BlockPoker.Engine.HandTest do
     {hand, events}
   end
 
+  describe "мёртвые деньги в банке" do
+    test "анте сброшенного большого блайнда остаётся в банке, а не роняет стол" do
+      # Анте вносит большой блайнд, поэтому его вклад больше, чем у лимперов.
+      # Если он сбрасывает, в банке появляется слой, на который никто из
+      # дошедших до вскрытия не претендует, — и разбор банка делил на ноль.
+      {hand, _events} = start([1000, 1000, 1000], button: 1, ante: 5)
+
+      {hand, _} = act!(hand, 1, :call)
+      {hand, _} = act!(hand, 2, :call)
+      {hand, _} = act!(hand, 3, :fold)
+
+      hand = check_down(hand)
+
+      assert Hand.finished?(hand)
+      assert Hand.total_chips(hand) == 3000
+
+      # Анте и блайнд сброшенного игрока достались победителю.
+      assert Enum.sum(Enum.map(hand.results.pots, & &1.amount)) == 10 + 10 + 15
+    end
+  end
+
+  describe "неотвеченная ставка" do
+    test "лишнее возвращается тому, кто поставил" do
+      # Ставку в 100 никто не покрыл целиком: короткий стек ответил на 60.
+      # Разница — не банк, её обязаны вернуть.
+      {hand, _events} = start([1000, 60, 1000], button: 1, ante: 0)
+
+      {hand, _} = act!(hand, 1, {:raise, 100})
+      {hand, _} = act!(hand, 2, :all_in)
+      {hand, _} = act!(hand, 3, :fold)
+
+      hand = run_out(hand)
+
+      assert Hand.finished?(hand)
+      assert Hand.total_chips(hand) == 2060
+
+      # Банк — только покрытые деньги: 60 + 60 плюс большой блайнд сбросившего.
+      assert Enum.sum(Enum.map(hand.results.pots, & &1.amount)) == 60 + 60 + 10
+
+      # 40 неотвеченных вернулись, а не разыгрались: даже проиграв, ставивший
+      # остаётся с 940, а не с 900.
+      assert hand.players[1].stack >= 940
+    end
+  end
+
   describe "взнос за вход" do
     test "живой взнос — ставка наравне с блайндом" do
       # Место 4 входит вне очереди и платит большой блайнд живым взносом.
@@ -120,6 +165,35 @@ defmodule BlockPoker.Engine.HandTest do
       assert big in hand.order
       assert small != big
     end
+  end
+
+  # Все чекают до вскрытия.
+  defp check_down(hand) do
+    Enum.reduce_while(1..30, hand, fn _step, acc ->
+      cond do
+        Hand.finished?(acc) ->
+          {:halt, acc}
+
+        acc.runout? ->
+          {:ok, acc, _events} = Hand.deal_next(acc)
+          {:cont, acc}
+
+        true ->
+          {acc, _} = act!(acc, acc.to_act, :check)
+          {:cont, acc}
+      end
+    end)
+  end
+
+  defp run_out(hand) do
+    Enum.reduce_while(1..30, hand, fn _step, acc ->
+      if Hand.finished?(acc) do
+        {:halt, acc}
+      else
+        {:ok, acc, _events} = Hand.deal_next(acc)
+        {:cont, acc}
+      end
+    end)
   end
 
   defp play_to_showdown(hand) do
