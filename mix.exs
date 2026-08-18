@@ -51,6 +51,9 @@ defmodule BlockPoker.MixProject do
       {:myxql, ">= 0.0.0"},
       {:oban, "~> 2.19"},
 
+      # Безопасность
+      {:argon2_elixir, "~> 4.1"},
+
       # Наблюдаемость
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},

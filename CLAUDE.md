@@ -551,9 +551,24 @@ E:\OSPanel\modules\MySQL-8.4\bin\mysqld.exe --defaults-file=E:\OSPanel\modules\M
 
 Проверка: `mysql -u root --host=127.127.126.32 -e "SELECT VERSION();"`
 
-### Известное ограничение
+### Сборка NIF (argon2_elixir)
 
-`argon2_elixir` — NIF на C, и `elixir_make` на Windows требует `nmake` из
-Visual C++ Build Tools; MinGW не подходит (`Makefile.win` написан под nmake).
-Зависимость **пока не подключена** — она понадобится на шаге `Accounts`.
-Тогда нужно либо поставить Build Tools, либо выбрать хеш без NIF.
+`argon2_elixir` — NIF на C. На Windows `elixir_make` требует именно `nmake`
+из Visual C++ Build Tools; MinGW не подходит, `Makefile.win` написан под nmake.
+Установлены **VS 2022 Build Tools 17.14** (workload VCTools) в
+`C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`.
+
+`nmake` не лежит в PATH постоянно, поэтому **пересборка NIF** делается из
+окружения vcvars, отдельно для каждого `MIX_ENV`. Из `cmd`:
+
+```
+call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
+mix deps.compile argon2_elixir --force
+set MIX_ENV=test
+mix deps.compile argon2_elixir --force
+```
+
+Собранный NIF лежит в `_build/<env>/lib/argon2_elixir/priv/argon2_nif.dll`.
+Пока он на месте, обычные `mix test`, `mix compile` и `mix phx.server`
+работают из любой оболочки — MSVC им не нужен. Окружение vcvars требуется
+только после `mix deps.clean`, `deps.update` или смены версии Elixir/OTP.
