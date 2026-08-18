@@ -256,6 +256,7 @@ BlockPoker.Supervisor (:one_for_one)
 "join_seat"   %{seat: 3, buy_in: 10_000}
 "leave_seat"  %{}
 "action"      %{type: "raise", amount: 800, hand_id: "...", action_seq: 42}
+"preselect"   %{action: "check_fold"}   # заранее выбранное действие
 "sit_out"     %{}
 "chat"        %{text: "..."}
 ```
@@ -266,7 +267,9 @@ BlockPoker.Supervisor (:one_for_one)
 "table_state"    полный персональный снапшот (после join / реконнекта)
 "table_delta"    инкрементальное событие (ставка, новая улица, вскрытие)
 "your_cards"     приватно, только владельцу
-"action_prompt"  %{deadline_ms: ..., legal_actions: [...]}
+"action_prompt"  %{deadline_ms: ..., time_bank_ms: ..., legal_actions: [...]}
+"time_bank_started" %{seat: ..., time_bank_ms: ...}
+"chat_message"   %{seat: ..., name: ..., text: ..., at: ...}
 "error"          %{code: "...", message: "..."}
 ```
 

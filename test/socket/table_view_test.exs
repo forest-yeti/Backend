@@ -40,6 +40,21 @@ defmodule Socket.Views.TableViewTest do
     refute json =~ "reservation"
   end
 
+  test "чужой преселект в снапшот не попадает", %{room: room} do
+    {:ok, room, _seat} = RoomState.set_preselect(room, "opponent", :fold)
+
+    snapshot = TableView.render(room, "me")
+
+    # Заранее выбранный фолд рассказал бы столу о руке раньше самого хода:
+    # в чужих местах его нет ни в каком виде, а своё поле пустое.
+    refute Jason.encode!(snapshot) =~ "fold"
+    assert Enum.all?(snapshot.seats, &(not Map.has_key?(&1, :preselect)))
+    assert snapshot.you.preselect == nil
+
+    # Свой — виден: игрок должен видеть, что кнопка нажата.
+    assert TableView.render(room, "opponent").you.preselect == :fold
+  end
+
   test "показатели видны по каждому месту, включая чужое", %{room: room} do
     snapshot = TableView.render(room, "me")
     stats = Map.new(snapshot.seats, &{&1.seat, &1.stats})

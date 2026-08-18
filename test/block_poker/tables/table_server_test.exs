@@ -256,6 +256,186 @@ defmodule BlockPoker.Tables.TableServerTest do
     end
   end
 
+  describe "тайм-банк" do
+    defp start_hand_with_clock(players \\ 2) do
+      {clock, advance} = manual_clock()
+      %{pid: pid, room_id: room_id} = start_room!(%{}, clock: clock)
+
+      for number <- 1..players, do: seat!(pid, "user-#{number}", number, 400)
+      :ok = TableServer.fire_timer(pid, :button_draw)
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, TableServer.topic(room_id))
+
+      %{pid: pid, advance: advance}
+    end
+
+    defp acting_seat(pid) do
+      room = TableServer.state(pid)
+      Map.fetch!(room.seats, room.hand.to_act)
+    end
+
+    test "обычное время кончилось — включается банк, а не автофолд" do
+      %{pid: pid} = start_hand_with_clock()
+      before = acting_seat(pid)
+
+      :ok = TableServer.fire_timer(pid, :action)
+
+      assert_received {:table_event, "time_bank_started", payload}
+      assert payload.seat == before.number
+      assert payload.time_bank_ms == 30_000
+
+      # Ход за игрока не сделан: очередь по-прежнему его.
+      assert TableServer.state(pid).hand.to_act == before.number
+    end
+
+    test "списывается ровно продуманное сверх обычного времени" do
+      %{pid: pid, advance: advance} = start_hand_with_clock()
+      seat = acting_seat(pid)
+
+      :ok = TableServer.fire_timer(pid, :action)
+      advance.(4_500)
+      :ok = TableServer.act(pid, seat.user_id, :call, nil)
+
+      assert TableServer.state(pid).seats[seat.number].time_bank == 25_500
+    end
+
+    test "банк догорел — стол ходит за игрока" do
+      %{pid: pid} = start_hand_with_clock()
+
+      # Ход доводится до большого блайнда: за него бесплатный чек, поэтому
+      # раздача продолжается и остаток банка видно до пополнения, которое
+      # приходит только по её завершении.
+      first = acting_seat(pid)
+      :ok = TableServer.act(pid, first.user_id, :call, nil)
+      seat = acting_seat(pid)
+
+      :ok = TableServer.fire_timer(pid, :action)
+      :ok = TableServer.fire_timer(pid, :action)
+
+      room = TableServer.state(pid)
+      assert room.hand.street == :flop
+      assert room.seats[seat.number].time_bank == 0
+    end
+
+    test "за сыгранную раздачу банк пополняется, но не выше потолка" do
+      %{pid: pid, advance: advance} = start_hand_with_clock()
+      seat = acting_seat(pid)
+
+      :ok = TableServer.fire_timer(pid, :action)
+      advance.(15_000)
+      :ok = TableServer.act(pid, seat.user_id, :call, nil)
+      assert TableServer.state(pid).seats[seat.number].time_bank == 15_000
+
+      play_hand_out(pid)
+
+      # 15 000 + пополнение 10 000, потолок 30 000 не превышен.
+      assert TableServer.state(pid).seats[seat.number].time_bank == 25_000
+    end
+  end
+
+  describe "преселект" do
+    defp two_handed_hand do
+      %{pid: pid, room_id: room_id} = start_room!()
+      seat!(pid, "user-1", 1, 400)
+      seat!(pid, "user-2", 2, 400)
+      :ok = TableServer.fire_timer(pid, :button_draw)
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, TableServer.topic(room_id))
+
+      room = TableServer.state(pid)
+      acting = Map.fetch!(room.seats, room.hand.to_act)
+      waiting = room.seats |> Map.values() |> Enum.find(&(&1.number != acting.number))
+
+      %{pid: pid, acting: acting, waiting: waiting}
+    end
+
+    test "выбранный заранее фолд срабатывает, когда доходит очередь" do
+      %{pid: pid, acting: acting, waiting: waiting} = two_handed_hand()
+
+      :ok = TableServer.preselect(pid, waiting.user_id, :fold)
+      :ok = TableServer.act(pid, acting.user_id, :call, nil)
+
+      # Раздача закончилась, не дожидаясь второго игрока: за него сходил
+      # его же выбор.
+      assert TableServer.state(pid).hand == nil
+      assert_received {:table_private, _user, "preselect_applied", %{action: :fold}}
+    end
+
+    test "чек против ставки снимает выбор, а не сбрасывает руку" do
+      %{pid: pid, acting: acting, waiting: waiting} = two_handed_hand()
+
+      :ok = TableServer.preselect(pid, waiting.user_id, :check)
+      :ok = TableServer.act(pid, acting.user_id, {:raise, 40}, nil)
+
+      room = TableServer.state(pid)
+
+      assert room.hand.to_act == waiting.number
+      assert room.seats[waiting.number].preselect == nil
+      assert_received {:table_private, _user, "preselect_cleared", %{reason: "action_changed"}}
+    end
+
+    test "выбор, сделанный в свою очередь, срабатывает сразу" do
+      %{pid: pid, acting: acting} = two_handed_hand()
+
+      :ok = TableServer.preselect(pid, acting.user_id, :fold)
+
+      assert TableServer.state(pid).hand == nil
+    end
+
+    test "новая улица снимает выбор" do
+      %{pid: pid, acting: acting, waiting: waiting} = two_handed_hand()
+
+      :ok = TableServer.preselect(pid, waiting.user_id, :call_any)
+      :ok = TableServer.act(pid, acting.user_id, :call, nil)
+
+      # Выбор сработал на префлопе и на флоп не перенёсся.
+      room = TableServer.state(pid)
+      assert room.hand.street == :flop
+      assert Enum.all?(Map.values(room.seats), &(&1.preselect == nil))
+    end
+  end
+
+  describe "чат" do
+    test "сообщение уходит всем и попадает в историю комнаты" do
+      %{pid: pid, room_id: room_id} = start_room!()
+      seat!(pid, "user-1", 1, 400)
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, TableServer.topic(room_id))
+
+      assert {:ok, message} = TableServer.chat(pid, "user-1", "  привет   стол 
+ ")
+
+      assert message.text == "привет стол"
+      assert message.seat == 1
+      assert_received {:table_event, "chat_message", %{text: "привет стол"}}
+      assert [%{text: "привет стол"}] = TableServer.state(pid).chat
+    end
+
+    test "наблюдатель писать не может" do
+      %{pid: pid} = start_room!()
+      seat!(pid, "user-1", 1, 400)
+
+      assert {:error, :not_seated} = TableServer.chat(pid, "watcher", "всем привет")
+    end
+
+    test "флуд останавливается кодом, а не молча" do
+      {clock, _advance} = manual_clock()
+      %{pid: pid} = start_room!(%{}, clock: clock)
+      seat!(pid, "user-1", 1, 400)
+
+      for n <- 1..5 do
+        assert {:ok, _message} = TableServer.chat(pid, "user-1", "сообщение #{n}")
+      end
+
+      assert {:error, :chat_rate_limited} = TableServer.chat(pid, "user-1", "ещё одно")
+    end
+
+    test "слишком длинное сообщение отвергается" do
+      %{pid: pid} = start_room!()
+      seat!(pid, "user-1", 1, 400)
+
+      long = String.duplicate("я", BlockPoker.Chat.max_length() + 1)
+      assert {:error, :chat_too_long} = TableServer.chat(pid, "user-1", long)
+    end
+  end
+
   defp leave(pid, user_id) do
     {:ok, %{ref: ref}} = TableServer.begin_leave(pid, user_id)
     :ok = TableServer.finish_leave(pid, ref)

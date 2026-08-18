@@ -19,6 +19,7 @@ defmodule BlockPoker.Tables do
   """
 
   alias BlockPoker.Accounts
+  alias BlockPoker.Engine.Preselect
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.GameMode
   alias BlockPoker.Tables.{Lobby, LobbyQuery, RoomState, TableRegistry, TableServer}
@@ -142,6 +143,24 @@ defmodule BlockPoker.Tables do
           :ok | {:error, error()}
   def act(room_id, user_id, action, seq) do
     with {:ok, pid} <- fetch_room(room_id), do: TableServer.act(pid, user_id, action, seq)
+  end
+
+  @doc """
+  Заранее выбранное действие. Пустой выбор снимает предыдущий; разбор
+  строки — в `Engine.Preselect`, потому что набор вариантов доменный.
+  """
+  @spec preselect(Ecto.UUID.t(), Ecto.UUID.t(), term()) :: :ok | {:error, error()}
+  def preselect(room_id, user_id, choice) do
+    with {:ok, pid} <- fetch_room(room_id),
+         {:ok, parsed} <- Preselect.parse(choice) do
+      TableServer.preselect(pid, user_id, parsed)
+    end
+  end
+
+  @doc "Сообщение в чат стола. Писать может сидящий, читать — кто угодно."
+  @spec chat(Ecto.UUID.t(), Ecto.UUID.t(), term()) :: {:ok, map()} | {:error, error()}
+  def chat(room_id, user_id, text) do
+    with {:ok, pid} <- fetch_room(room_id), do: TableServer.chat(pid, user_id, text)
   end
 
   @doc "Показать свои карты по желанию — сбросив или дойдя до вскрытия."

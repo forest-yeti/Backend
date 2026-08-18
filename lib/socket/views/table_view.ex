@@ -40,6 +40,7 @@ defmodule Socket.Views.TableView do
       button_draw: button_draw(room),
       hand: hand(room),
       showdown: room.showdown,
+      chat: room.chat,
       you: you(room, user_id)
     }
   end
@@ -88,6 +89,9 @@ defmodule Socket.Views.TableView do
       to_act: hand.to_act,
       action_seq: hand.seq,
       deadline_ms: remaining(room.deadline_at),
+      # Идёт ли отсчёт из личного запаса: подключившийся в середине хода
+      # должен увидеть тот же таймер, что и остальные.
+      time_bank_running: room.time_bank_at != nil,
       seats:
         Map.new(hand.players, fn {seat, player} ->
           {seat,
@@ -118,6 +122,10 @@ defmodule Socket.Views.TableView do
       stack: seat.stack,
       waiting_for_bb: seat.waiting_for_bb,
       missed_blinds: seat.missed_blinds,
+      # Запас времени публичен: соперник и так видит, что игрок думает
+      # дольше обычного. А вот `preselect` — нет: заранее выбранный фолд
+      # рассказал бы столу о руке раньше самого хода.
+      time_bank: seat.time_bank,
       # Показатели публичны: они выводятся из действий, которые и так видел
       # весь стол. Проценты приходят из ядра посчитанными.
       stats: Stats.summary(seat.stats)
@@ -138,7 +146,9 @@ defmodule Socket.Views.TableView do
           waiting_for_bb: seat.waiting_for_bb,
           post_required: seat.post_required,
           can_post: seat.can_post,
-          missed_blinds: seat.missed_blinds
+          missed_blinds: seat.missed_blinds,
+          time_bank: seat.time_bank,
+          preselect: seat.preselect
         }
         |> Map.merge(private_hand(room, seat.number))
     end

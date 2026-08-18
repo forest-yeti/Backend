@@ -32,6 +32,8 @@ defmodule BlockPoker.ErrorCode do
           | :stale_action
           | :no_hand
           | :hand_finished
+          | :chat_too_long
+          | :chat_rate_limited
           | :wallet_not_found
           | :internal_error
 
@@ -61,6 +63,8 @@ defmodule BlockPoker.ErrorCode do
     stale_action: {409, "Состояние стола изменилось, повторите действие"},
     no_hand: {409, "Раздача не идёт"},
     hand_finished: {409, "Раздача уже закончилась"},
+    chat_too_long: {422, "Сообщение слишком длинное"},
+    chat_rate_limited: {429, "Слишком часто: подождите немного"},
     wallet_not_found: {404, "Кошелёк не найден"},
     internal_error: {500, "Внутренняя ошибка"}
   }

@@ -236,6 +236,67 @@ defmodule Socket.Channels.TableChannelTest do
     assert_reply ref, :error, %{code: "not_your_turn"}
   end
 
+  test "чат доходит до всех за столом", %{room_id: room_id, buy_in: buy_in} do
+    %{channel: first} = connect_player(room_id)
+    %{channel: _second} = connect_player(room_id)
+
+    ref = push(first, "join_seat", %{"seat" => 1, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+
+    ref = push(first, "chat", %{"text" => "  всем удачи  "})
+    assert_reply ref, :ok, %{text: "всем удачи"}
+
+    assert_push "chat_message", %{seat: 1, text: "всем удачи"}
+  end
+
+  test "наблюдатель писать не может", %{room_id: room_id} do
+    %{channel: channel} = connect_player(room_id)
+
+    ref = push(channel, "chat", %{"text" => "привет"})
+    assert_reply ref, :error, %{code: "not_seated"}
+  end
+
+  test "пустое сообщение отвергается формой", %{room_id: room_id, buy_in: buy_in} do
+    %{channel: channel} = connect_player(room_id)
+    ref = push(channel, "join_seat", %{"seat" => 1, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+
+    ref = push(channel, "chat", %{"text" => "   "})
+    assert_reply ref, :error, %{code: "validation_failed"}
+  end
+
+  test "преселект принимается и снимается тем же сообщением", %{
+    room_id: room_id,
+    buy_in: buy_in
+  } do
+    %{channel: channel} = connect_player(room_id)
+    ref = push(channel, "join_seat", %{"seat" => 1, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+
+    ref = push(channel, "preselect", %{"action" => "check_fold"})
+    assert_reply ref, :ok, _payload
+
+    ref = push(channel, "table_state", %{})
+    assert_reply ref, :ok, snapshot
+    assert snapshot.you.preselect == :check_fold
+
+    ref = push(channel, "preselect", %{"action" => "none"})
+    assert_reply ref, :ok, _payload
+
+    ref = push(channel, "table_state", %{})
+    assert_reply ref, :ok, snapshot
+    assert snapshot.you.preselect == nil
+  end
+
+  test "неизвестный преселект отвергается", %{room_id: room_id, buy_in: buy_in} do
+    %{channel: channel} = connect_player(room_id)
+    ref = push(channel, "join_seat", %{"seat" => 1, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+
+    ref = push(channel, "preselect", %{"action" => "raise_pot"})
+    assert_reply ref, :error, %{code: "validation_failed"}
+  end
+
   test "table_state отдаёт снапшот с местом игрока", %{room_id: room_id, buy_in: buy_in} do
     %{channel: channel} = connect_player(room_id)
     ref = push(channel, "join_seat", %{"seat" => 5, "buy_in" => buy_in})

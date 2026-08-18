@@ -31,6 +31,19 @@ defmodule BlockPoker.TablesHelpers do
     end
   end
 
+  @doc """
+  Управляемые часы: тайм-банк считает прошедшее время, и в тестах оно
+  двигается вручную, а не ожиданием (§11 CLAUDE.md).
+
+  Возвращает `{clock, advance}` — функцию часов для комнаты и функцию,
+  сдвигающую их на нужное число миллисекунд.
+  """
+  def manual_clock(start \\ 0) do
+    {:ok, agent} = Agent.start_link(fn -> start end)
+
+    {fn -> Agent.get(agent, & &1) end, fn ms -> Agent.update(agent, &(&1 + ms)) end}
+  end
+
   @doc "Комната с ручными таймерами и детерминированным RNG."
   def start_room!(overrides \\ %{}, opts \\ []) do
     setting = build_setting(overrides)

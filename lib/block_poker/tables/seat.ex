@@ -21,6 +21,12 @@ defmodule BlockPoker.Tables.Seat do
   `waiting_for_bb`, `missed_blinds` и `can_post` — вход в игру (§6 задачи 3).
   Само решение принимает `Engine.EntryRules`, здесь только его результат.
 
+  `time_bank` — личный запас времени сверх обычного времени на ход
+  (`Engine.TimeBank`), `preselect` — заранее выбранное действие
+  (`Engine.Preselect`). Оба живут в месте по той же причине, что и `stats`:
+  это состояние *игрока за этим столом*, а не раздачи, и оно обязано
+  переживать смену улицы и раздачи, но не уход из-за стола.
+
   `stats` — показатели игрока за сессию. Они лежат **в месте**, а не в
   отдельной таблице комнаты, потому что правило сброса в кэше ровно такое:
   сессия заканчивается уходом с места. `Seat.free/1` отдаёт чистое место —
@@ -29,7 +35,7 @@ defmodule BlockPoker.Tables.Seat do
   не место; `Engine.Stats` от этого выбора не зависит.
   """
 
-  alias BlockPoker.Engine.Stats
+  alias BlockPoker.Engine.{Preselect, Stats}
 
   @type status :: :empty | :reserved | :playing | :sitting_out | :disconnected | :leaving
 
@@ -46,6 +52,9 @@ defmodule BlockPoker.Tables.Seat do
           can_post: boolean(),
           missed_blinds: non_neg_integer(),
           hands_sat_out: non_neg_integer(),
+          time_bank: non_neg_integer(),
+          preselect: Preselect.t() | nil,
+          chat_sent_at: [integer()],
           stats: Stats.t()
         }
 
@@ -63,6 +72,10 @@ defmodule BlockPoker.Tables.Seat do
     can_post: false,
     missed_blinds: 0,
     hands_sat_out: 0,
+    time_bank: 0,
+    preselect: nil,
+    # Отметки последних сообщений игрока: по ним считается частота (`Chat`).
+    chat_sent_at: [],
     stats: %Stats{}
   ]
 

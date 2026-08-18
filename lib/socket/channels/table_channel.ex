@@ -67,6 +67,18 @@ defmodule Socket.Channels.TableChannel do
     end
   end
 
+  def handle_in("preselect", payload, socket) do
+    socket.assigns.room_id
+    |> Tables.preselect(socket.assigns.user_id, Map.get(payload, "action"))
+    |> Message.reply(socket)
+  end
+
+  def handle_in("chat", payload, socket) do
+    socket.assigns.room_id
+    |> Tables.chat(socket.assigns.user_id, Map.get(payload, "text"))
+    |> Message.reply(socket)
+  end
+
   def handle_in("show_cards", _payload, socket) do
     socket.assigns.room_id
     |> Tables.show_cards(socket.assigns.user_id)

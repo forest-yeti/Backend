@@ -18,7 +18,7 @@ defmodule BlockPoker.Tables.TableServer do
 
   use GenServer, restart: :temporary
 
-  alias BlockPoker.Engine.{ButtonDraw, Hand, HandStats, Rng, Stats}
+  alias BlockPoker.Engine.{ButtonDraw, Hand, HandStats, Preselect, Rng, Stats}
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.Tables.{RoomState, Seat, TableRegistry}
   alias Phoenix.PubSub
@@ -32,8 +32,8 @@ defmodule BlockPoker.Tables.TableServer do
 
   defmodule State do
     @moduledoc false
-    @enforce_keys [:room, :game_mode, :timer_mode, :rng]
-    defstruct [:room, :game_mode, :timer_mode, :rng, timers: %{}]
+    @enforce_keys [:room, :game_mode, :timer_mode, :rng, :clock]
+    defstruct [:room, :game_mode, :timer_mode, :rng, :clock, timers: %{}]
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -110,6 +110,16 @@ defmodule BlockPoker.Tables.TableServer do
           :ok | {:error, atom()}
   def act(room, user_id, action, seq), do: GenServer.call(room, {:act, user_id, action, seq})
 
+  @doc "Выбрать действие заранее (`nil` — снять выбор)."
+  @spec preselect(GenServer.server(), Ecto.UUID.t(), Preselect.t() | nil) ::
+          :ok | {:error, atom()}
+  def preselect(room, user_id, choice), do: GenServer.call(room, {:preselect, user_id, choice})
+
+  @doc "Сообщение в чат стола."
+  @spec chat(GenServer.server(), Ecto.UUID.t(), String.t()) ::
+          {:ok, map()} | {:error, atom()}
+  def chat(room, user_id, text), do: GenServer.call(room, {:chat, user_id, text})
+
   @doc "Открыть свои карты по желанию."
   @spec show_cards(GenServer.server(), Ecto.UUID.t()) :: :ok | {:error, atom()}
   def show_cards(room, user_id), do: GenServer.call(room, {:show_cards, user_id})
@@ -143,7 +153,10 @@ defmodule BlockPoker.Tables.TableServer do
       room: RoomState.new(room_id, setting),
       game_mode: Keyword.get(opts, :game_mode, BlockPoker.GameMode.Cash),
       timer_mode: Keyword.get(opts, :timers, :real),
-      rng: Keyword.get_lazy(opts, :rng, &Rng.default/0)
+      rng: Keyword.get_lazy(opts, :rng, &Rng.default/0),
+      # Часы инжектируются: тайм-банк считает прошедшее время, и тесты
+      # прогоняют его вручную, а не ожиданием (§11 CLAUDE.md).
+      clock: Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end)
     }
 
     {:ok, state, {:continue, :announce}}
@@ -198,10 +211,37 @@ defmodule BlockPoker.Tables.TableServer do
   def handle_call({:act, user_id, action, seq}, _from, state) do
     with {:ok, hand} <- fetch_hand(state),
          {:ok, seat} <- seat_of(state, user_id),
+         state = settle_time_bank(state, hand.to_act),
          {:ok, hand, events} <- Hand.act(hand, seat, action, seq) do
       {:reply, :ok, apply_hand(state, hand, events)}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:preselect, user_id, choice}, _from, state) do
+    case RoomState.set_preselect(state.room, user_id, choice) do
+      {:ok, room, seat} ->
+        state = put_room(state, room)
+
+        # Выбор мог совпасть с уже наступившей очередью хода: игрок нажал
+        # «фолд» ровно в тот момент, когда ход дошёл до него.
+        {:reply, :ok, apply_pending_preselect(state, seat.number)}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:chat, user_id, text}, _from, state) do
+    case RoomState.push_chat(state.room, user_id, text, now_ms(state), DateTime.utc_now()) do
+      {:ok, room, message} ->
+        state = put_room(state, room)
+        broadcast(state, "chat_message", message)
+        {:reply, {:ok, message}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -368,14 +408,8 @@ defmodule BlockPoker.Tables.TableServer do
   # фолд. Молча зависнуть стол не может.
   defp do_timeout(:action, state) do
     case fetch_hand(state) do
-      {:ok, hand} ->
-        case Hand.timeout(hand) do
-          {:ok, hand, events} -> apply_hand(state, hand, events)
-          {:error, _reason} -> state
-        end
-
-      {:error, _reason} ->
-        state
+      {:ok, hand} -> action_timeout(state, hand, seat_to_act(state, hand))
+      {:error, _reason} -> state
     end
   end
 
@@ -396,6 +430,32 @@ defmodule BlockPoker.Tables.TableServer do
         state
     end
   end
+
+  defp action_timeout(state, hand, %Seat{time_bank: bank} = seat)
+       when bank > 0 do
+    if state.room.time_bank_at == nil do
+      start_time_bank(state, hand, seat)
+    else
+      # Банк догорел до конца: обнуляем остаток и ходим за игрока.
+      state
+      |> put_room(RoomState.drain_time_bank(state.room, seat.number))
+      |> force_action(hand)
+    end
+  end
+
+  defp action_timeout(state, hand, seat) do
+    state |> settle_time_bank(seat && seat.number) |> force_action(hand)
+  end
+
+  defp force_action(state, hand) do
+    case Hand.timeout(hand) do
+      {:ok, hand, events} -> apply_hand(state, hand, events)
+      {:error, _reason} -> state
+    end
+  end
+
+  defp seat_to_act(_state, %Hand{to_act: nil}), do: nil
+  defp seat_to_act(state, hand), do: Map.get(state.room.seats, hand.to_act)
 
   # --- раздача --------------------------------------------------------------
 
@@ -475,11 +535,78 @@ defmodule BlockPoker.Tables.TableServer do
     room = %{state.room | hand: hand, hand_stats: track_stats(state.room.hand_stats, events)}
     state = put_room(state, sync_seats(room, hand))
     state = Enum.reduce(events, state, &emit/2)
+    state = clear_preselects_on_new_street(state, events)
 
     cond do
       Hand.finished?(hand) -> finish_hand(state, hand)
       hand.runout? -> schedule(cancel_timer(state, :action), :runout, @runout_step_ms)
-      true -> arm_action_timer(state, hand)
+      true -> advance_to_actor(state, hand)
+    end
+  end
+
+  # Новая улица — новая обстановка: выбор, сделанный до флопа, к ней уже
+  # не относится, и молча применять его нельзя.
+  defp clear_preselects_on_new_street(state, events) do
+    if Enum.any?(events, &match?({:street_dealt, _payload}, &1)) do
+      put_room(state, RoomState.clear_preselects(state.room))
+    else
+      state
+    end
+  end
+
+  # Очередь дошла до игрока: либо за него ходит его же заранее выбранное
+  # действие, либо стол ждёт и включает таймер.
+  defp advance_to_actor(state, hand) do
+    seat = seat_to_act(state, hand)
+
+    case preselect_decision(hand, seat) do
+      {:act, action} ->
+        apply_preselected(state, hand, seat, action)
+
+      :cancel ->
+        state
+        |> drop_preselect(seat, "action_changed")
+        |> arm_action_timer(hand)
+
+      _none ->
+        arm_action_timer(state, hand)
+    end
+  end
+
+  defp preselect_decision(_hand, nil), do: :none
+
+  defp preselect_decision(hand, seat) do
+    Preselect.resolve(seat.preselect, Hand.legal_actions(hand, seat.number))
+  end
+
+  defp apply_preselected(state, hand, seat, action) do
+    state = put_room(state, RoomState.clear_preselect(state.room, seat.number))
+    private(state, seat.user_id, "preselect_applied", %{seat: seat.number, action: action})
+
+    case Hand.act(hand, seat.number, action, nil) do
+      {:ok, hand, events} -> apply_hand(state, hand, events)
+      # Выбор не подошёл к обстановке — решает игрок, а не стол.
+      {:error, _reason} -> arm_action_timer(state, hand)
+    end
+  end
+
+  defp drop_preselect(state, seat, reason) do
+    state = put_room(state, RoomState.clear_preselect(state.room, seat.number))
+    private(state, seat.user_id, "preselect_cleared", %{seat: seat.number, reason: reason})
+    state
+  end
+
+  # Выбор сделан ровно в тот момент, когда очередь уже дошла до игрока.
+  defp apply_pending_preselect(state, seat_number) do
+    with {:ok, hand} <- fetch_hand(state),
+         true <- hand.to_act == seat_number,
+         seat = Map.get(state.room.seats, seat_number),
+         {:act, action} <- preselect_decision(hand, seat) do
+      state
+      |> settle_time_bank(seat_number)
+      |> apply_preselected(hand, seat, action)
+    else
+      _other -> state
     end
   end
 
@@ -496,17 +623,53 @@ defmodule BlockPoker.Tables.TableServer do
 
   defp arm_action_timer(state, hand) do
     ms = state.room.setting.action_timeout_ms
-    deadline = System.monotonic_time(:millisecond) + ms
-    state = put_room(state, %{state.room | deadline_at: deadline})
-    broadcast(state, "action_prompt", prompt_payload(hand, ms))
+    deadline = now_ms(state) + ms
+    state = put_room(state, %{state.room | deadline_at: deadline, time_bank_at: nil})
+    broadcast(state, "action_prompt", prompt_payload(state, hand, ms))
     schedule(state, :action, ms)
   end
+
+  # Обычное время кончилось. Банк не пуст — игрок продолжает думать за свой
+  # счёт; пуст — стол ходит за него. Ход не делается «на всякий случай»:
+  # это и есть смысл банка.
+  defp start_time_bank(state, hand, seat) do
+    state = put_room(state, RoomState.start_time_bank(state.room, now_ms(state)))
+    deadline = now_ms(state) + seat.time_bank
+    state = put_room(state, %{state.room | deadline_at: deadline})
+
+    broadcast(state, "time_bank_started", %{
+      seat: seat.number,
+      action_seq: hand.seq,
+      time_bank_ms: seat.time_bank,
+      deadline_ms: seat.time_bank
+    })
+
+    schedule(state, :action, seat.time_bank)
+  end
+
+  defp settle_time_bank(state, seat_number) do
+    put_room(state, RoomState.settle_time_bank(state.room, seat_number, now_ms(state)))
+  end
+
+  defp now_ms(%State{clock: clock}), do: clock.()
 
   defp finish_hand(state, hand) do
     state = state |> cancel_timer(:action) |> cancel_timer(:runout)
 
     state = record_stats(state, hand)
-    room = %{state.room | hand: nil, hand_stats: nil, deadline_at: nil, showdown: nil}
+
+    room =
+      %{
+        state.room
+        | hand: nil,
+          hand_stats: nil,
+          deadline_at: nil,
+          time_bank_at: nil,
+          showdown: nil
+      }
+      |> RoomState.clear_preselects()
+      |> RoomState.refill_time_banks(Map.keys(hand.players))
+
     room = state.game_mode.on_hand_finished(room, hand.results)
     room = %{room | button_seat: next_button(room)}
     room = %{room | big_blind_seat: big_blind_seat_for(room)}
@@ -590,11 +753,16 @@ defmodule BlockPoker.Tables.TableServer do
     Enum.map(hand.players, fn {seat, player} -> %{seat: seat, stack: player.stack} end)
   end
 
-  defp prompt_payload(hand, ms) do
+  defp prompt_payload(state, hand, ms) do
+    seat = seat_to_act(state, hand)
+
     %{
       seat: hand.to_act,
       action_seq: hand.seq,
       deadline_ms: ms,
+      # Запас показывается вместе с подсказкой: игрок должен видеть, сколько
+      # у него есть сверху, **до** того, как обычное время кончится.
+      time_bank_ms: (seat && seat.time_bank) || 0,
       legal_actions: Hand.legal_actions(hand, hand.to_act)
     }
   end

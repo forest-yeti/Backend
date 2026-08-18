@@ -12,7 +12,8 @@ defmodule BlockPoker.Tables.RoomState do
   """
 
   alias BlockPoker.CashGames.CashGameSetting
-  alias BlockPoker.Engine.{EntryRules, Stats}
+  alias BlockPoker.Chat
+  alias BlockPoker.Engine.{EntryRules, Preselect, Stats, TimeBank}
   alias BlockPoker.Tables.Seat
 
   @type phase :: :idle | :button_draw | :hand
@@ -36,6 +37,8 @@ defmodule BlockPoker.Tables.RoomState do
           button_draw: button_draw() | nil,
           hand: term() | nil,
           hand_stats: term() | nil,
+          time_bank_at: integer() | nil,
+          chat: [Chat.message()],
           deadline_at: integer() | nil,
           showdown: map() | nil
         }
@@ -71,6 +74,10 @@ defmodule BlockPoker.Tables.RoomState do
     # Счётчик показателей идущей раздачи (`Engine.HandStats`): по её концу
     # прибавка расходится по местам и обнуляется.
     hand_stats: nil,
+    # Момент включения тайм-банка на текущем решении (монотонные мс) либо
+    # `nil`, если игрок думает в пределах обычного времени.
+    time_bank_at: nil,
+    chat: [],
     deadline_at: nil,
     # Открытые при олл-ине карты и шансы: игрок, подключившийся в середине
     # доводки, должен видеть то же, что и остальные.
@@ -108,6 +115,111 @@ defmodule BlockPoker.Tables.RoomState do
   @spec find_seat(t(), Ecto.UUID.t()) :: Seat.t() | nil
   def find_seat(state, user_id) do
     state |> seats() |> Enum.find(&(&1.user_id == user_id))
+  end
+
+  @doc """
+  Выбрать действие заранее. Пустой выбор снимает предыдущий.
+  """
+  @spec set_preselect(t(), Ecto.UUID.t(), Preselect.t() | nil) ::
+          {:ok, t(), Seat.t()} | {:error, atom()}
+  def set_preselect(%__MODULE__{} = state, user_id, choice) do
+    with {:ok, seat} <- fetch_player(state, user_id) do
+      seat = %{seat | preselect: choice}
+      {:ok, put_seat(state, seat), seat}
+    end
+  end
+
+  @doc "Снять выбор одного места."
+  @spec clear_preselect(t(), pos_integer()) :: t()
+  def clear_preselect(%__MODULE__{} = state, seat_number) do
+    case Map.get(state.seats, seat_number) do
+      nil -> state
+      seat -> put_seat(state, %{seat | preselect: nil})
+    end
+  end
+
+  @doc """
+  Снять выбор у всех: новая улица или новая раздача — новая обстановка,
+  и выбор, сделанный в прошлой, к ней не относится.
+  """
+  @spec clear_preselects(t()) :: t()
+  def clear_preselects(%__MODULE__{} = state) do
+    seats = Map.new(state.seats, fn {number, seat} -> {number, %{seat | preselect: nil}} end)
+    %{state | seats: seats}
+  end
+
+  @doc "Включить тайм-банк на текущем решении."
+  @spec start_time_bank(t(), integer()) :: t()
+  def start_time_bank(%__MODULE__{} = state, now), do: %{state | time_bank_at: now}
+
+  @doc """
+  Списать с банка прошедшее время и выключить его.
+
+  Списывается ровно продуманное сверх обычного времени: банк включается
+  только после того, как обычное кончилось.
+  """
+  @spec settle_time_bank(t(), pos_integer() | nil, integer()) :: t()
+  def settle_time_bank(%__MODULE__{time_bank_at: nil} = state, _seat_number, _now), do: state
+
+  def settle_time_bank(%__MODULE__{} = state, seat_number, now) do
+    elapsed = now - state.time_bank_at
+    state = %{state | time_bank_at: nil}
+
+    case Map.get(state.seats, seat_number) do
+      nil -> state
+      seat -> put_seat(state, %{seat | time_bank: TimeBank.spend(seat.time_bank, elapsed)})
+    end
+  end
+
+  @doc """
+  Банк догорел до конца: остаток обнуляется, а не досчитывается по часам.
+
+  Это не оптимизация: таймер срабатывает ровно тогда, когда запас кончился,
+  и любые миллисекунды, оставшиеся от расхождения часов с таймером, — мусор,
+  из-за которого банк «включался» бы ещё раз на пустом месте.
+  """
+  @spec drain_time_bank(t(), pos_integer() | nil) :: t()
+  def drain_time_bank(%__MODULE__{} = state, nil), do: %{state | time_bank_at: nil}
+
+  def drain_time_bank(%__MODULE__{} = state, seat_number) do
+    state = %{state | time_bank_at: nil}
+
+    case Map.get(state.seats, seat_number) do
+      nil -> state
+      seat -> put_seat(state, %{seat | time_bank: 0})
+    end
+  end
+
+  @doc "Пополнить банки сыгравшим раздачу — до потолка шаблона."
+  @spec refill_time_banks(t(), [pos_integer()]) :: t()
+  def refill_time_banks(%__MODULE__{} = state, seat_numbers) do
+    amount = state.setting.time_bank_refill
+    max = state.setting.time_bank_ms
+
+    Enum.reduce(seat_numbers, state, fn number, acc ->
+      case Map.get(acc.seats, number) do
+        nil -> acc
+        seat -> put_seat(acc, %{seat | time_bank: TimeBank.refill(seat.time_bank, amount, max)})
+      end
+    end)
+  end
+
+  @doc """
+  Сообщение в чат: проверка частоты и запись в историю комнаты.
+
+  Писать может только сидящий за столом: наблюдателя стол не знает по имени
+  и не отвечает за него. Читать чат при этом может кто угодно.
+  """
+  @spec push_chat(t(), Ecto.UUID.t(), String.t(), integer(), DateTime.t()) ::
+          {:ok, t(), Chat.message()} | {:error, atom()}
+  def push_chat(%__MODULE__{} = state, user_id, text, now, at) do
+    with {:ok, seat} <- fetch_player(state, user_id),
+         {:ok, sanitized} <- Chat.sanitize(text),
+         {:ok, sent_at} <- Chat.throttle(seat.chat_sent_at, now) do
+      message = %{seat: seat.number, user_id: user_id, name: seat.name, text: sanitized, at: at}
+      state = put_seat(state, %{seat | chat_sent_at: sent_at})
+      {:ok, %{state | chat: Chat.push(state.chat, message)}, message}
+    end
   end
 
   @doc """
@@ -191,6 +303,7 @@ defmodule BlockPoker.Tables.RoomState do
           | status: :playing,
             stack: amount,
             reservation_id: nil,
+            time_bank: TimeBank.initial(state.setting.time_bank_ms),
             waiting_for_bb: decision.status == :waiting_for_bb,
             post_required: decision.status == :post_required,
             can_post: decision.can_post
