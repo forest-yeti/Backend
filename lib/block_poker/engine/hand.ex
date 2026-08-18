@@ -14,7 +14,7 @@ defmodule BlockPoker.Engine.Hand do
   трогает второе.
   """
 
-  alias BlockPoker.Engine.{Card, Deck, HandRank, HandSetup, Rng, Showdown, Variant}
+  alias BlockPoker.Engine.{Card, Deck, Equity, HandRank, HandSetup, Outs, Rng, Showdown, Variant}
 
   @type street :: :preflop | :flop | :turn | :river | :complete
   @type status :: :active | :folded | :all_in
@@ -51,6 +51,7 @@ defmodule BlockPoker.Engine.Hand do
           to_act: pos_integer() | nil,
           aggressor: pos_integer() | nil,
           seq: non_neg_integer(),
+          runout?: boolean(),
           rake_fun: (non_neg_integer(), pos_integer() -> non_neg_integer()) | nil,
           results: map() | nil
         }
@@ -75,7 +76,10 @@ defmodule BlockPoker.Engine.Hand do
     pot: 0,
     bet: 0,
     min_raise: 0,
-    seq: 0
+    seq: 0,
+    # Ставить больше некому: борд доводится до конца с паузами, чтобы игрок
+    # увидел каждую улицу, а не мгновенный итог.
+    runout?: false
   ]
 
   @streets [:preflop, :flop, :turn, :river]
@@ -340,7 +344,7 @@ defmodule BlockPoker.Engine.Hand do
       single_contender?(hand) -> finish(hand)
       street_open?(hand) -> {%{hand | to_act: next_to_act(hand)}, prompt(hand_next(hand))}
       hand.street == :river -> finish(hand)
-      no_more_betting?(hand) -> run_out(hand)
+      no_more_betting?(hand) -> begin_runout(hand)
       true -> next_street(hand)
     end
   end
@@ -360,21 +364,77 @@ defmodule BlockPoker.Engine.Hand do
     end
   end
 
-  # Ставить больше некому — доводим борд до конца и вскрываемся.
-  defp run_out(hand) do
-    {hand, events} =
-      Enum.reduce(remaining_streets(hand), {hand, []}, fn _street, {acc, events} ->
-        {acc, event} = deal_street(acc)
-        {acc, events ++ [event]}
+  # Ставить больше некому. Карты открываются сразу — дальше только случай,
+  # и прятать их незачем; борд доводится по улице за шаг снаружи.
+  defp begin_runout(hand) do
+    hand = %{hand | runout?: true, to_act: nil}
+    {hand, [{:all_in_showdown, showdown_payload(hand)}]}
+  end
+
+  @doc """
+  Следующая улица при доводке борда. Вызывается снаружи по таймеру: пауза
+  между улицами — часть игры, а не украшение.
+  """
+  @spec deal_next(t()) :: {:ok, t(), [tuple()]} | {:error, atom()}
+  def deal_next(%__MODULE__{runout?: false}), do: {:error, :not_running_out}
+  def deal_next(%__MODULE__{street: :complete}), do: {:error, :hand_finished}
+
+  def deal_next(%__MODULE__{street: :river} = hand) do
+    {hand, events} = finish(hand)
+    {:ok, hand, events}
+  end
+
+  def deal_next(%__MODULE__{} = hand) do
+    {hand, event} = deal_street(hand)
+
+    # Эквити пересчитывается на каждой улице: после флопа расклад уже другой.
+    {:ok, hand, [event, {:equity_update, equity_payload(hand)}]}
+  end
+
+  # Карты и шансы всех, кто дошёл до доводки. Ровно то, что показывает
+  # современный рум: открытые руки, проценты и ауты догоняющего.
+  defp showdown_payload(hand) do
+    %{
+      board: board_payload(hand),
+      players:
+        hand
+        |> contenders()
+        |> Enum.map(fn player ->
+          %{seat: player.seat, cards: Enum.map(player.hole, &Card.to_map/1)}
+        end),
+      equity: equity_payload(hand)
+    }
+  end
+
+  # Точный перебор дорог на пяти неизвестных картах, поэтому Монте-Карло
+  # с умеренным числом итераций: полпроцента погрешности игроку незаметны,
+  # а секунда ожидания — очень даже.
+  defp equity_payload(hand) do
+    known = hand |> contenders() |> Enum.map(&{&1.seat, &1.hole})
+
+    if length(known) < 2 do
+      []
+    else
+      result = Equity.equity(known, hand.board, hand.variant, iterations: 20_000, outs: false)
+      outs = Outs.compute(known, hand.board, hand.context)
+
+      Enum.map(result.players, fn player ->
+        %{
+          seat: player.id,
+          win: player.win,
+          tie: player.tie,
+          equity: player.equity,
+          outs: outs |> Map.get(player.id, []) |> Enum.map(&out_payload/1)
+        }
       end)
-
-    {hand, finish_events} = finish(hand)
-    {hand, events ++ finish_events}
+    end
   end
 
-  defp remaining_streets(hand) do
-    @streets |> Enum.drop_while(&(&1 != hand.street)) |> tl()
+  defp out_payload(out) do
+    %{rank: out.rank, count: out.count, cards: Enum.map(out.cards, &Card.to_map/1)}
   end
+
+  defp contenders(hand), do: hand |> players() |> Enum.filter(&(&1.status != :folded))
 
   defp deal_street(hand) do
     street = @streets |> Enum.drop_while(&(&1 != hand.street)) |> Enum.at(1)
@@ -405,6 +465,7 @@ defmodule BlockPoker.Engine.Hand do
       hand
       | street: :complete,
         to_act: nil,
+        runout?: false,
         results: results,
         # Банк уехал в стеки: держать его ещё и в `pot` значило бы удвоить
         # фишки в инварианте. Итоговый размер живёт в `results.pots`.

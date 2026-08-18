@@ -38,6 +38,7 @@ defmodule Socket.Views.TableView do
       seats: room |> RoomState.seats() |> Enum.map(&seat(&1, user_id)),
       button_draw: button_draw(room),
       hand: hand(room),
+      showdown: room.showdown,
       you: you(room, user_id)
     }
   end

@@ -35,7 +35,8 @@ defmodule BlockPoker.Tables.RoomState do
           recent_leavers: %{Ecto.UUID.t() => non_neg_integer()},
           button_draw: button_draw() | nil,
           hand: term() | nil,
-          deadline_at: integer() | nil
+          deadline_at: integer() | nil,
+          showdown: map() | nil
         }
 
   @typedoc """
@@ -66,7 +67,10 @@ defmodule BlockPoker.Tables.RoomState do
     button_draw: nil,
     # Идущая раздача (`Engine.Hand`) и дедлайн текущего хода в монотонных мс.
     hand: nil,
-    deadline_at: nil
+    deadline_at: nil,
+    # Открытые при олл-ине карты и шансы: игрок, подключившийся в середине
+    # доводки, должен видеть то же, что и остальные.
+    showdown: nil
   ]
 
   @spec new(Ecto.UUID.t(), CashGameSetting.t()) :: t()

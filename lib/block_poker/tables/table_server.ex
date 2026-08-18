@@ -26,6 +26,10 @@ defmodule BlockPoker.Tables.TableServer do
   @pubsub BlockPoker.PubSub
   @rooms_topic "tables:rooms"
 
+  # Пауза между улицами при доводке борта и перед следующей раздачей.
+  @runout_step_ms 1_500
+  @next_hand_ms 2_500
+
   defmodule State do
     @moduledoc false
     @enforce_keys [:room, :game_mode, :timer_mode, :rng]
@@ -378,6 +382,21 @@ defmodule BlockPoker.Tables.TableServer do
   # Пауза между раздачами: игрок должен успеть увидеть, чем всё кончилось.
   defp do_timeout(:next_hand, state), do: start_hand(state)
 
+  # Доводка борта при олл-ине: по улице за тик, чтобы игрок успел увидеть
+  # флоп, тёрн и ривер, а не только итог.
+  defp do_timeout(:runout, state) do
+    case fetch_hand(state) do
+      {:ok, hand} ->
+        case Hand.deal_next(hand) do
+          {:ok, hand, events} -> apply_hand(state, hand, events)
+          {:error, _reason} -> state
+        end
+
+      {:error, _reason} ->
+        state
+    end
+  end
+
   # --- раздача --------------------------------------------------------------
 
   defp start_hand(%State{room: %RoomState{phase: :hand}} = state), do: state
@@ -395,7 +414,7 @@ defmodule BlockPoker.Tables.TableServer do
     case state.game_mode.hand_setup(state.room) do
       {:ok, setup} ->
         {hand, events} = Hand.start(setup, state.rng, rake: rake_fun(state))
-        state = put_room(state, %{state.room | phase: :hand, hand: hand})
+        state = put_room(state, %{state.room | phase: :hand, hand: hand, showdown: nil})
 
         broadcast(state, "hand_started", %{
           button_seat: setup.button_seat,
@@ -448,7 +467,11 @@ defmodule BlockPoker.Tables.TableServer do
     state = put_room(state, sync_seats(%{state.room | hand: hand}, hand))
     state = Enum.reduce(events, state, &emit/2)
 
-    if Hand.finished?(hand), do: finish_hand(state, hand), else: arm_action_timer(state, hand)
+    cond do
+      Hand.finished?(hand) -> finish_hand(state, hand)
+      hand.runout? -> schedule(cancel_timer(state, :action), :runout, @runout_step_ms)
+      true -> arm_action_timer(state, hand)
+    end
   end
 
   defp sync_seats(room, hand) do
@@ -471,9 +494,9 @@ defmodule BlockPoker.Tables.TableServer do
   end
 
   defp finish_hand(state, hand) do
-    state = cancel_timer(state, :action)
+    state = state |> cancel_timer(:action) |> cancel_timer(:runout)
 
-    room = %{state.room | hand: nil, deadline_at: nil}
+    room = %{state.room | hand: nil, deadline_at: nil, showdown: nil}
     room = state.game_mode.on_hand_finished(room, hand.results)
     room = %{room | button_seat: next_button(room)}
     room = %{room | big_blind_seat: big_blind_seat_for(room)}
@@ -487,7 +510,7 @@ defmodule BlockPoker.Tables.TableServer do
     announce(state)
 
     if length(RoomState.players(state.room)) >= 2 and state.room.game_started? do
-      schedule(state, :next_hand, 2_000)
+      schedule(state, :next_hand, @next_hand_ms)
     else
       state
     end
@@ -568,6 +591,21 @@ defmodule BlockPoker.Tables.TableServer do
 
   # Подсказка о ходе уходит из `arm_action_timer`: только там известен дедлайн.
   defp emit({:action_prompt, _payload}, state), do: state
+
+  # Открытые карты и шансы держим в состоянии комнаты: подключившийся
+  # в середине доводки увидит их в снапшоте, а не пустой стол.
+  defp emit({:all_in_showdown, payload}, state) do
+    state = put_room(state, %{state.room | showdown: payload})
+    broadcast(state, "all_in_showdown", payload)
+    state
+  end
+
+  defp emit({:equity_update, equity}, state) do
+    showdown = Map.put(state.room.showdown || %{}, :equity, equity)
+    state = put_room(state, %{state.room | showdown: showdown})
+    broadcast(state, "equity_update", %{equity: equity})
+    state
+  end
 
   defp emit({event, payload}, state) do
     broadcast(state, Atom.to_string(event), payload)

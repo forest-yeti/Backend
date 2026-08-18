@@ -42,14 +42,21 @@ defmodule BlockPoker.Engine.HandTest do
 
   defp play_to_showdown(hand) do
     Enum.reduce_while(1..40, hand, fn _step, acc ->
-      if Hand.finished?(acc) do
-        {:halt, acc}
-      else
-        seat = acc.to_act
-        legal = Hand.legal_actions(acc, seat)
-        action = if legal.check, do: :check, else: :call
-        {acc, _events} = act!(acc, seat, action)
-        {:cont, acc}
+      cond do
+        Hand.finished?(acc) ->
+          {:halt, acc}
+
+        # Ставить некому: борд доводится шагами, как это делает стол.
+        acc.runout? ->
+          {:ok, acc, _events} = Hand.deal_next(acc)
+          {:cont, acc}
+
+        true ->
+          seat = acc.to_act
+          legal = Hand.legal_actions(acc, seat)
+          action = if legal.check, do: :check, else: :call
+          {acc, _events} = act!(acc, seat, action)
+          {:cont, acc}
       end
     end)
   end
@@ -165,6 +172,45 @@ defmodule BlockPoker.Engine.HandTest do
              Enum.sum(Enum.map(hand.results.pots, & &1.amount))
 
     assert Hand.total_chips(hand) == 2100
+  end
+
+  test "олл-ин открывает карты, считает шансы и доводит борд по улице за шаг" do
+    {hand, _events} = start([200, 200], button: 1)
+    {hand, _} = act!(hand, 1, :all_in)
+    {_hand, events} = act!(hand, 2, :call)
+
+    # Ставить больше некому — карты открыты сразу, борд ещё пуст.
+    assert [{:all_in_showdown, payload}] = Enum.filter(events, &match?({:all_in_showdown, _}, &1))
+    assert length(payload.players) == 2
+    assert Enum.all?(payload.players, &(length(&1.cards) == 2))
+    assert payload.board == []
+
+    assert length(payload.equity) == 2
+    assert_in_delta Enum.sum(Enum.map(payload.equity, & &1.equity)), 1.0, 0.001
+  end
+
+  test "доводка борда идёт по одной улице и заканчивается вскрытием" do
+    {hand, _events} = start([200, 200], button: 1)
+    {hand, _} = act!(hand, 1, :all_in)
+    {hand, _} = act!(hand, 2, :call)
+
+    assert hand.runout?
+    assert hand.to_act == nil
+
+    {:ok, hand, _} = Hand.deal_next(hand)
+    assert hand.street == :flop and length(hand.board) == 3
+
+    {:ok, hand, _} = Hand.deal_next(hand)
+    assert hand.street == :turn and length(hand.board) == 4
+
+    {:ok, hand, _} = Hand.deal_next(hand)
+    assert hand.street == :river and length(hand.board) == 5
+    refute Hand.finished?(hand)
+
+    {:ok, hand, events} = Hand.deal_next(hand)
+    assert Hand.finished?(hand)
+    assert Enum.any?(events, &match?({:hand_finished, _}, &1))
+    assert Hand.total_chips(hand) == 400
   end
 
   test "время вышло: бесплатно — чек, иначе фолд" do
