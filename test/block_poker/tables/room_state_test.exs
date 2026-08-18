@@ -83,6 +83,22 @@ defmodule BlockPoker.Tables.RoomStateTest do
       assert {:error, :invalid_buy_in} = RoomState.validate_buy_in(room, 601, 400)
     end
 
+    test "докупка обязана довести короткий стек до минимума" do
+      # Баг: проигравший почти всё оставался с 5 фишками, докупал один
+      # большой блайнд и садился играть на 1.5bb за столом с минимумом 40bb.
+      setting = build_setting(%{big_blind: 10, min_buy_in: 40, max_buy_in: 100})
+      room = RoomState.new(Ecto.UUID.generate(), setting)
+
+      assert {:error, :invalid_buy_in} = RoomState.validate_buy_in(room, 10, 5)
+      assert :ok = RoomState.validate_buy_in(room, 395, 5)
+    end
+
+    test "стек выше минимума докупается на любую сумму", %{room: room} do
+      # Дошедший до минимума докупается как угодно: правило про нижнюю
+      # границу стола, а не про размер докупки.
+      assert :ok = RoomState.validate_buy_in(room, 1, 400)
+    end
+
     test "стол без потолка принимает любую сумму сверх минимума" do
       setting = build_setting(%{big_blind: 10, max_buy_in: nil})
       room = RoomState.new(Ecto.UUID.generate(), setting)

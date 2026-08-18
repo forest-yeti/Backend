@@ -334,8 +334,20 @@ defmodule BlockPoker.Tables.RoomState do
   end
 
   @doc """
-  Границы бай-ина в фишках с учётом уже лежащего перед игроком стека:
-  докупка не может поднять стек выше `max_buy_in`.
+  Границы бай-ина в фишках с учётом уже лежащего перед игроком стека.
+
+  Проверяется **итоговый стек**, а не сумма докупки: снизу он не может
+  оказаться меньше `min_buy_in`, сверху — больше `max_buy_in`.
+
+  Нижняя граница считается именно так, а не «только при нулевом стеке»,
+  из-за дырки, которую это оставляло: проигравший почти всё оставался
+  с парой фишек — то есть формально не с нулём — и докупал один большой
+  блайнд, садясь играть на 1.5bb за столом с минимумом в 40bb. Играть
+  коротким стеком, который остался от проигранной раздачи, правила
+  разрешают; **докупать** себе такой стек — нет.
+
+  Дошедшего до минимума правило не касается: его итоговый стек и так выше
+  нижней границы, поэтому докупить он может любую сумму.
   """
   @spec validate_buy_in(t(), non_neg_integer(), non_neg_integer()) ::
           :ok | {:error, :invalid_buy_in}
@@ -345,7 +357,7 @@ defmodule BlockPoker.Tables.RoomState do
 
     cond do
       not (is_integer(amount) and amount > 0) -> {:error, :invalid_buy_in}
-      current_stack == 0 and amount < min -> {:error, :invalid_buy_in}
+      current_stack + amount < min -> {:error, :invalid_buy_in}
       max != nil and current_stack + amount > max -> {:error, :invalid_buy_in}
       true -> :ok
     end
