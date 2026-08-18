@@ -39,7 +39,9 @@ defmodule BlockPoker.Tables.TableServer do
   end
 
   @spec topic(Ecto.UUID.t()) :: String.t()
-  def topic(room_id), do: "table:#{room_id}"
+  # Не "table:<id>": на топик с именем канала Phoenix подписывает канал сам,
+  # и вторая явная подписка доставляла бы каждое событие дважды.
+  def topic(room_id), do: "room_events:#{room_id}"
 
   @doc "Топик, на котором лобби слышит изменения занятости комнат."
   @spec rooms_topic() :: String.t()

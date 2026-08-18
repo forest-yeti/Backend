@@ -28,7 +28,9 @@ defmodule BlockPoker.Tables.Lobby do
   alias Phoenix.PubSub
 
   @pubsub BlockPoker.PubSub
-  @topic "lobby"
+  # Не "lobby": имя канала Phoenix занимает сам, и явная подписка канала
+  # на тот же топик удваивала бы каждый lobby_delta.
+  @topic "lobby_events"
   @default_reload_ms :timer.minutes(1)
 
   defmodule Room do

@@ -38,6 +38,16 @@ defmodule Socket.Channels.TableChannelTest do
     %{user: user, channel: channel}
   end
 
+  defp wait_for_seat_status(room_id, seat, status, attempts \\ 50) do
+    {:ok, room} = BlockPoker.Tables.room_state(room_id)
+
+    cond do
+      Map.fetch!(room.seats, seat).status == status -> :ok
+      attempts == 0 -> flunk("место #{seat} так и не перешло в #{status}")
+      true -> Process.sleep(10) && wait_for_seat_status(room_id, seat, status, attempts - 1)
+    end
+  end
+
   defp token(user) do
     {:ok, %{token: token}} = BlockPoker.Accounts.start_session(user)
     token
@@ -78,6 +88,19 @@ defmodule Socket.Channels.TableChannelTest do
     ref = push(second, "join_seat", %{"seat" => 2, "buy_in" => buy_in})
     assert_reply ref, :ok, _payload
     assert_push "seat_taken", %{seat: 2}
+  end
+
+  test "событие приходит ровно один раз", %{room_id: room_id, buy_in: buy_in} do
+    # Внутренний топик комнаты не должен совпадать с именем канала: на топик
+    # своего имени Phoenix подписывает канал сам, и вторая подписка удваивала
+    # бы каждое событие — клиент перезапрашивал бы снапшот на каждый чих.
+    %{channel: channel} = connect_player(room_id)
+
+    ref = push(channel, "join_seat", %{"seat" => 1, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+
+    assert_push "seat_taken", %{seat: 1}
+    refute_push "seat_taken", %{seat: 1}
   end
 
   test "второму на то же место приходит код seat_taken", %{room_id: room_id, buy_in: buy_in} do
@@ -133,6 +156,34 @@ defmodule Socket.Channels.TableChannelTest do
 
     {:ok, room} = BlockPoker.Tables.room_state(room_id)
     assert Map.fetch!(room.seats, 3).status == :empty
+  end
+
+  test "повторное подключение возвращает игрока на своё место", %{
+    room_id: room_id,
+    buy_in: buy_in
+  } do
+    # Закрытие клиента не освобождает место, но и не должно оставлять игрока
+    # навсегда «без связи»: подключение к столу — это и есть возвращение.
+    %{user: user, channel: channel} = connect_player(room_id)
+
+    ref = push(channel, "join_seat", %{"seat" => 4, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+
+    # Канал слинкован с тестом, поэтому его уход не должен ронять тест.
+    Process.unlink(channel.channel_pid)
+    ref = leave(channel)
+    assert_reply ref, :ok
+    wait_for_seat_status(room_id, 4, :disconnected)
+
+    {:ok, room} = BlockPoker.Tables.room_state(room_id)
+    assert Map.fetch!(room.seats, 4).status == :disconnected
+
+    {:ok, socket} = connect(UserSocket, %{"token" => token(user)})
+    {:ok, snapshot, _channel} = subscribe_and_join(socket, "table:#{room_id}", %{})
+
+    assert snapshot.you.seated
+    assert snapshot.you.seat == 4
+    assert snapshot.you.status == :playing
   end
 
   test "table_state отдаёт снапшот с местом игрока", %{room_id: room_id, buy_in: buy_in} do

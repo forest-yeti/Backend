@@ -24,10 +24,22 @@ defmodule Socket.Channels.TableChannel do
       {:ok, room} ->
         :ok = Phoenix.PubSub.subscribe(BlockPoker.PubSub, TableServer.topic(room_id))
         socket = assign(socket, :room_id, room_id)
+        room = returned_to_seat(room, room_id, socket.assigns.user_id)
         {:ok, TableView.render(room, socket.assigns.user_id), socket}
 
       {:error, code} ->
         {:error, Message.error(code)}
+    end
+  end
+
+  # Подключение к столу — это и есть возвращение игрока: место держалось
+  # grace-период, и без этого вызова оно так и осталось бы `disconnected`,
+  # пока таймер не выключит игрока из игры. Наблюдатель просто не сидит,
+  # для него `reconnect` вернёт `:not_seated`, и снапшот берётся как есть.
+  defp returned_to_seat(room, room_id, user_id) do
+    case Tables.reconnect(room_id, user_id) do
+      {:ok, reconnected} -> reconnected
+      {:error, _reason} -> room
     end
   end
 
