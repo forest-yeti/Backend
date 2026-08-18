@@ -56,11 +56,12 @@ defmodule BlockPoker.Tables.TableServer do
           GenServer.server(),
           Ecto.UUID.t(),
           pos_integer() | :first_free,
-          pos_integer()
+          pos_integer(),
+          RoomState.profile()
         ) ::
           {:ok, %{reservation_id: String.t(), seat: pos_integer()}} | {:error, atom()}
-  def reserve_seat(room, user_id, seat, buy_in) do
-    GenServer.call(room, {:reserve_seat, user_id, seat, buy_in})
+  def reserve_seat(room, user_id, seat, buy_in, profile \\ %{}) do
+    GenServer.call(room, {:reserve_seat, user_id, seat, buy_in, profile})
   end
 
   @spec confirm_seat(GenServer.server(), String.t(), pos_integer(), RoomState.entry()) ::
@@ -144,11 +145,12 @@ defmodule BlockPoker.Tables.TableServer do
 
   def handle_call(:summary, _from, state), do: {:reply, RoomState.summary(state.room), state}
 
-  def handle_call({:reserve_seat, user_id, seat, buy_in}, _from, state) do
+  def handle_call({:reserve_seat, user_id, seat, buy_in, profile}, _from, state) do
     with {:ok, seat_number} <- pick_seat(state.room, seat),
          :ok <- RoomState.validate_buy_in(state.room, buy_in),
          reservation_id = new_ref(),
-         {:ok, room} <- RoomState.reserve(state.room, seat_number, user_id, reservation_id) do
+         {:ok, room} <-
+           RoomState.reserve(state.room, seat_number, user_id, reservation_id, profile) do
       state = put_room(state, room)
       announce(state)
       {:reply, {:ok, %{reservation_id: reservation_id, seat: seat_number}}, state}
@@ -162,7 +164,15 @@ defmodule BlockPoker.Tables.TableServer do
       {:ok, room, seat} ->
         state = state |> put_room(room) |> maybe_start_game()
         announce(state)
-        broadcast(state, "seat_taken", %{seat: seat.number, status: seat.status})
+
+        broadcast(state, "seat_taken", %{
+          seat: seat.number,
+          status: seat.status,
+          user_id: seat.user_id,
+          name: seat.name,
+          avatar: seat.avatar
+        })
+
         {:reply, {:ok, seat}, state}
 
       {:error, reason} ->

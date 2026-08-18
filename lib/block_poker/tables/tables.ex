@@ -18,6 +18,7 @@ defmodule BlockPoker.Tables do
   нет — это и есть инвариант денег.
   """
 
+  alias BlockPoker.Accounts
   alias BlockPoker.GameMode
   alias BlockPoker.Tables.{Lobby, RoomState, TableRegistry, TableServer}
 
@@ -156,7 +157,7 @@ defmodule BlockPoker.Tables do
 
   defp seat_player(pid, room_id, user_id, seat, buy_in, entry) do
     with {:ok, %{reservation_id: reservation_id}} <-
-           TableServer.reserve_seat(pid, user_id, seat, buy_in) do
+           TableServer.reserve_seat(pid, user_id, seat, buy_in, profile(user_id)) do
       room = TableServer.state(pid)
 
       case GameMode.Cash.take_buy_in(room, user_id, buy_in, reservation_id) do
@@ -188,6 +189,15 @@ defmodule BlockPoker.Tables do
         room = TableServer.state(pid)
         GameMode.Cash.return_chips(room, user_id, buy_in, reservation_id)
         {:error, reason}
+    end
+  end
+
+  # Профиль снимается один раз, при посадке: стол показывает игрока ником,
+  # а не UUID, и не ходит в базу на каждый снапшот.
+  defp profile(user_id) do
+    case Accounts.get_user(user_id) do
+      {:ok, user} -> %{name: user.name, avatar: user.avatar}
+      {:error, _reason} -> %{}
     end
   end
 

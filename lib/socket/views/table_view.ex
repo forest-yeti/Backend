@@ -44,6 +44,8 @@ defmodule Socket.Views.TableView do
       seat: seat.number,
       status: seat.status,
       user_id: seat.user_id,
+      name: seat.name,
+      avatar: seat.avatar,
       stack: seat.stack,
       waiting_for_bb: seat.waiting_for_bb,
       missed_blinds: seat.missed_blinds

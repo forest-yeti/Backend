@@ -202,9 +202,11 @@ table.join().receive("ok", (snapshot) => renderTable(snapshot))
   "hands_played": 0,
   "visuals": { "felt_color": "#2A5FA8", "background_color": "#14203A" },
   "seats": [
-    { "seat": 1, "status": "playing", "user_id": "...", "stack": 40000,
+    { "seat": 1, "status": "playing", "user_id": "...", "name": "Player_1",
+      "avatar": "/users/avatars/default.png", "stack": 40000,
       "waiting_for_bb": false, "missed_blinds": 0 },
-    { "seat": 2, "status": "empty", "user_id": null, "stack": 0,
+    { "seat": 2, "status": "empty", "user_id": null, "name": null,
+      "avatar": null, "stack": 0,
       "waiting_for_bb": false, "missed_blinds": 0 }
   ],
   "you": { "seated": true, "seat": 1, "stack": 40000, "status": "playing",
@@ -214,6 +216,8 @@ table.join().receive("ok", (snapshot) => renderTable(snapshot))
 ```
 
 * `seats` — всегда все места стола, включая пустые, отсортированы по номеру.
+* `name` и `avatar` — снимок профиля на момент посадки: у пустого места они
+  `null`. Загрузки аватаров пока нет, `avatar` всегда дефолтный путь.
 * `you.seated: false` — игрок наблюдает, места у него нет. Тогда остальных
   полей `you` нет.
 * `phase` — `idle` (простой), `button_draw` (идёт розыгрыш кнопки),
@@ -292,7 +296,7 @@ table.join().receive("ok", (snapshot) => renderTable(snapshot))
 
 | Событие | Когда | Payload |
 |---|---|---|
-| `seat_taken` | кто-то сел | `{seat, status, room_id}` |
+| `seat_taken` | кто-то сел | `{seat, status, user_id, name, avatar, room_id}` |
 | `seat_left` | кто-то встал | `{room_id}` |
 | `chips_added` | докупка | `{seat, stack, room_id}` |
 | `seat_disconnected` | у игрока оборвалась связь | `{seat, room_id}` |
@@ -403,7 +407,6 @@ table.join().receive("ok", (snapshot) => renderTable(snapshot))
 * чат за столом;
 * лист ожидания на заполненные лимиты;
 * приватные столы (`visibility` в шаблоне есть, но реализован только `public`);
-* аватары и профили за столом — только `user_id`;
 * пуш об изменении баланса кошелька;
 * история раздач.
 

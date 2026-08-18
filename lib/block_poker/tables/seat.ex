@@ -15,6 +15,9 @@ defmodule BlockPoker.Tables.Seat do
       транзакции ещё нет. Место в этот момент занято: отдать его другому,
       пока фишки в полёте, нельзя.
 
+  `name` и `avatar` — снимок профиля на момент посадки: стол показывает игрока
+  ником, а не UUID, и не ходит за этим в базу на каждый снапшот.
+
   `waiting_for_bb`, `missed_blinds` и `can_post` — вход в игру (§6 задачи 3).
   Само решение принимает `Engine.EntryRules`, здесь только его результат.
   """
@@ -24,6 +27,8 @@ defmodule BlockPoker.Tables.Seat do
   @type t :: %__MODULE__{
           number: pos_integer(),
           user_id: Ecto.UUID.t() | nil,
+          name: String.t() | nil,
+          avatar: String.t() | nil,
           status: status(),
           stack: non_neg_integer(),
           reservation_id: String.t() | nil,
@@ -38,6 +43,8 @@ defmodule BlockPoker.Tables.Seat do
   defstruct [
     :number,
     :user_id,
+    :name,
+    :avatar,
     :reservation_id,
     status: :empty,
     stack: 0,

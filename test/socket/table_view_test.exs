@@ -18,9 +18,12 @@ defmodule Socket.Views.TableViewTest do
 
   setup do
     room = RoomState.new(Ecto.UUID.generate(), build_setting(%{max_players: 6}))
-    {:ok, room} = RoomState.reserve(room, 1, "me", "res-1")
+    {:ok, room} = RoomState.reserve(room, 1, "me", "res-1", %{name: "Hero", avatar: "/a.png"})
     {:ok, room, _seat} = RoomState.confirm(room, "res-1", 400, :wait_bb)
-    {:ok, room} = RoomState.reserve(room, 4, "opponent", "res-2")
+
+    {:ok, room} =
+      RoomState.reserve(room, 4, "opponent", "res-2", %{name: "Villain", avatar: "/b.png"})
+
     {:ok, room, _seat} = RoomState.confirm(room, "res-2", 600, :wait_bb)
 
     %{room: room}
@@ -46,6 +49,14 @@ defmodule Socket.Views.TableViewTest do
 
     # Список мест общий и одинаковый: скрывать в нём пока нечего.
     assert Enum.map(mine.seats, & &1.seat) == Enum.map(theirs.seats, & &1.seat)
+  end
+
+  test "место показывает ник и аватар: стол рисуется игроками, а не UUID", %{room: room} do
+    snapshot = TableView.render(room, "me")
+    villain = Enum.find(snapshot.seats, &(&1.seat == 4))
+
+    assert villain.name == "Villain"
+    assert villain.avatar == "/b.png"
   end
 
   test "стеки и статусы видны всем — это публичная информация", %{room: room} do

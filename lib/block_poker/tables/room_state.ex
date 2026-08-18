@@ -18,6 +18,9 @@ defmodule BlockPoker.Tables.RoomState do
   @type phase :: :idle | :button_draw | :hand
   @type entry :: :wait_bb | :post
 
+  @typedoc "Снимок профиля игрока: то, чем стол его показывает."
+  @type profile :: %{optional(:name) => String.t(), optional(:avatar) => String.t()}
+
   @type t :: %__MODULE__{
           room_id: Ecto.UUID.t(),
           setting: CashGameSetting.t(),
@@ -90,14 +93,22 @@ defmodule BlockPoker.Tables.RoomState do
   Резерв места: первый шаг посадки. Место помечается за игроком **до** похода
   в кошелёк, иначе за время транзакции его успеет занять другой.
   """
-  @spec reserve(t(), pos_integer(), Ecto.UUID.t(), String.t()) ::
+  @spec reserve(t(), pos_integer(), Ecto.UUID.t(), String.t(), profile()) ::
           {:ok, t()} | {:error, atom()}
-  def reserve(state, seat_number, user_id, reservation_id) do
+  def reserve(state, seat_number, user_id, reservation_id, profile \\ %{}) do
     with :ok <- ensure_open(state),
          {:ok, seat} <- fetch_seat(state, seat_number),
          :ok <- ensure_free(seat),
          :ok <- ensure_not_seated(state, user_id) do
-      seat = %{seat | status: :reserved, user_id: user_id, reservation_id: reservation_id}
+      seat = %{
+        seat
+        | status: :reserved,
+          user_id: user_id,
+          reservation_id: reservation_id,
+          name: Map.get(profile, :name),
+          avatar: Map.get(profile, :avatar)
+      }
+
       {:ok, put_seat(state, seat)}
     end
   end
