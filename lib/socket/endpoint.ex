@@ -3,7 +3,10 @@ defmodule Socket.Endpoint do
 
   # Основной канал связи с клиентом. Аутентификация соединения — в UserSocket.
   socket "/socket", Socket.UserSocket,
-    websocket: [connect_info: [:peer_data, :x_headers]],
+    websocket: [
+      connect_info: [:peer_data, :x_headers],
+      error_handler: {Socket.UserSocket, :handle_error, []}
+    ],
     longpoll: false
 
   if code_reloading? do

@@ -49,6 +49,19 @@ defmodule Socket.UserSocketTest do
              connect(UserSocket, %{"token" => token_for(user), "protocol_vsn" => "999"})
   end
 
+  test "отказ в handshake отдаётся кодом, а не пустым 403" do
+    conn =
+      UserSocket.handle_error(Plug.Test.conn(:get, "/socket/websocket"), %{code: "token_expired"})
+
+    assert conn.status == 401
+    assert Jason.decode!(conn.resp_body)["code"] == "token_expired"
+
+    assert %{status: 426} =
+             UserSocket.handle_error(Plug.Test.conn(:get, "/socket/websocket"), %{
+               code: "unsupported_protocol_version"
+             })
+  end
+
   test "заблокированный игрок не открывает соединение" do
     user = user_fixture()
     token = token_for(user)
