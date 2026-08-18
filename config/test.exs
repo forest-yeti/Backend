@@ -20,6 +20,10 @@ config :block_poker, Socket.Endpoint,
   secret_key_base: "Oe2fLS+hsnDDaugdWfNotSnViEkm/fPSb7KqR8/9vxs+z0aG07dRAXfoUwV68XJh",
   server: false
 
+# Пул комнат в тестах поднимается явно: при старте он читает БД, а она под
+# Sandbox принадлежит тест-процессу.
+config :block_poker, start_lobby: false
+
 # Print only warnings and errors during test
 config :logger, level: :warning
 

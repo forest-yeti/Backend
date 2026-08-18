@@ -1,0 +1,64 @@
+defmodule Socket.Views.TableViewTest do
+  @moduledoc """
+  Инвариант приватности (§11 CLAUDE.md): в том, что реально уходит в сокет,
+  не должно быть данных, которых игрок знать не должен.
+
+  Проверка идёт по **сырому JSON**, а не по структуре: структура может
+  выглядеть чистой, а в сокет уйдёт лишнее поле — тест обязан ловить именно
+  второе. Карманных карт в этой задаче ещё нет, но точка фильтрации и её
+  проверка существуют с первого дня.
+  """
+
+  use ExUnit.Case, async: true
+
+  import BlockPoker.CashGamesFixtures
+
+  alias BlockPoker.Tables.RoomState
+  alias Socket.Views.TableView
+
+  setup do
+    room = RoomState.new(Ecto.UUID.generate(), build_setting(%{max_players: 6}))
+    {:ok, room} = RoomState.reserve(room, 1, "me", "res-1")
+    {:ok, room, _seat} = RoomState.confirm(room, "res-1", 400, :wait_bb)
+    {:ok, room} = RoomState.reserve(room, 4, "opponent", "res-2")
+    {:ok, room, _seat} = RoomState.confirm(room, "res-2", 600, :wait_bb)
+
+    %{room: room}
+  end
+
+  defp payload(room, user_id), do: room |> TableView.render(user_id) |> Jason.encode!()
+
+  test "в снапшоте нет остатка колоды, seed RNG и резервов", %{room: room} do
+    json = payload(room, "me")
+
+    refute json =~ "deck"
+    refute json =~ "rng"
+    refute json =~ "seed"
+    refute json =~ "reservation"
+  end
+
+  test "снапшот персональный: своё место помечено, чужое — нет", %{room: room} do
+    mine = TableView.render(room, "me")
+    theirs = TableView.render(room, "opponent")
+
+    assert mine.you.seat == 1
+    assert theirs.you.seat == 4
+
+    # Список мест общий и одинаковый: скрывать в нём пока нечего.
+    assert Enum.map(mine.seats, & &1.seat) == Enum.map(theirs.seats, & &1.seat)
+  end
+
+  test "стеки и статусы видны всем — это публичная информация", %{room: room} do
+    snapshot = TableView.render(room, "me")
+
+    assert Enum.find(snapshot.seats, &(&1.seat == 4)).stack == 600
+  end
+
+  test "снапшот сериализуется без потерь и содержит косметику стола", %{room: room} do
+    decoded = room |> payload("me") |> Jason.decode!()
+
+    assert decoded["visuals"]["felt_color"]
+    assert decoded["visuals"]["background_color"]
+    assert decoded["max_players"] == 6
+  end
+end

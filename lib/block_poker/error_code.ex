@@ -17,6 +17,17 @@ defmodule BlockPoker.ErrorCode do
           | :rate_limited
           | :unsupported_protocol_version
           | :insufficient_funds
+          | :seat_taken
+          | :already_seated
+          | :invalid_seat
+          | :invalid_buy_in
+          | :no_seats_available
+          | :not_seated
+          | :hand_in_progress
+          | :room_closing
+          | :zero_stack
+          | :reservation_lost
+          | :wallet_not_found
           | :internal_error
 
   @codes %{
@@ -30,6 +41,17 @@ defmodule BlockPoker.ErrorCode do
     rate_limited: {429, "Слишком много запросов, попробуйте позже"},
     unsupported_protocol_version: {426, "Версия протокола не поддерживается"},
     insufficient_funds: {422, "Недостаточно средств"},
+    seat_taken: {409, "Место уже занято"},
+    already_seated: {409, "Вы уже сидите за этим столом"},
+    invalid_seat: {422, "Такого места за столом нет"},
+    invalid_buy_in: {422, "Сумма бай-ина вне допустимых границ"},
+    no_seats_available: {409, "Свободных мест нет"},
+    not_seated: {409, "Вы не сидите за этим столом"},
+    hand_in_progress: {409, "Действие недоступно во время раздачи"},
+    room_closing: {409, "Комната закрывается"},
+    zero_stack: {409, "Нулевой стек: сначала докупитесь"},
+    reservation_lost: {409, "Резерв места истёк, попробуйте снова"},
+    wallet_not_found: {404, "Кошелёк не найден"},
     internal_error: {500, "Внутренняя ошибка"}
   }
 

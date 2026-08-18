@@ -79,6 +79,48 @@ defmodule BlockPoker.Wallet do
   end
 
   @doc """
+  Бай-ин: фишки уезжают из кошелька на стол.
+
+  Ключ идемпотентности задаёт вызывающий (`"buyin:<reservation_id>"`),
+  поэтому ретрай посадки после обрыва не спишет деньги дважды.
+  """
+  @spec buy_in(Ecto.UUID.t(), :main | :play_money, pos_integer(), String.t(), keyword()) ::
+          {:ok, WalletEntry.t()} | {:error, :not_found | :insufficient_funds | Ecto.Changeset.t()}
+  def buy_in(user_id, currency, amount, idempotency_key, opts \\ []) when amount > 0 do
+    move(user_id, currency, -amount, :buy_in, idempotency_key, opts)
+  end
+
+  @doc "Cash-out: стек возвращается в кошелёк. Нулевой стек записи не порождает."
+  @spec cash_out(Ecto.UUID.t(), :main | :play_money, non_neg_integer(), String.t(), keyword()) ::
+          {:ok, WalletEntry.t() | :noop} | {:error, term()}
+  def cash_out(user_id, currency, amount, idempotency_key, opts \\ [])
+
+  def cash_out(_user_id, _currency, 0, _idempotency_key, _opts), do: {:ok, :noop}
+
+  def cash_out(user_id, currency, amount, idempotency_key, opts) when amount > 0 do
+    move(user_id, currency, amount, :cash_out, idempotency_key, opts)
+  end
+
+  defp move(user_id, currency, amount, type, idempotency_key, opts) do
+    with {:ok, wallet} <- get_wallet(user_id, currency) do
+      Multi.new()
+      |> record_entry(:entry, %{
+        wallet_id: wallet.id,
+        amount: amount,
+        type: type,
+        ref_id: opts[:ref_id],
+        idempotency_key: idempotency_key,
+        meta: opts[:meta]
+      })
+      |> Repo.transaction()
+      |> case do
+        {:ok, %{entry: entry}} -> {:ok, entry}
+        {:error, _step, reason, _changes} -> {:error, reason}
+      end
+    end
+  end
+
+  @doc """
   Добавляет в `multi` шаг записи операции по кошельку.
 
   Единственный путь изменения денег. Внутри одной транзакции:
