@@ -190,16 +190,24 @@ defmodule BlockPoker.Tables.RoomState do
     end
   end
 
-  @doc "Пополнить банки сыгравшим раздачу — до потолка шаблона."
-  @spec refill_time_banks(t(), [pos_integer()]) :: t()
-  def refill_time_banks(%__MODULE__{} = state, seat_numbers) do
+  @doc """
+  Пополнить банки сыгравшим раздачу — до потолка шаблона.
+
+  `owners` — кто сидел на месте, когда раздача начиналась: пополнение
+  принадлежит игроку, а не креслу, и севшему следом не достаётся.
+  """
+  @spec refill_time_banks(t(), %{pos_integer() => Ecto.UUID.t()}) :: t()
+  def refill_time_banks(%__MODULE__{} = state, owners) do
     amount = state.setting.time_bank_refill
     max = state.setting.time_bank_ms
 
-    Enum.reduce(seat_numbers, state, fn number, acc ->
+    Enum.reduce(owners, state, fn {number, user_id}, acc ->
       case Map.get(acc.seats, number) do
-        nil -> acc
-        seat -> put_seat(acc, %{seat | time_bank: TimeBank.refill(seat.time_bank, amount, max)})
+        %Seat{user_id: ^user_id} = seat when user_id != nil ->
+          put_seat(acc, %{seat | time_bank: TimeBank.refill(seat.time_bank, amount, max)})
+
+        _other ->
+          acc
       end
     end)
   end
@@ -243,6 +251,24 @@ defmodule BlockPoker.Tables.RoomState do
       end)
 
     %{state | seats: seats}
+  end
+
+  @doc """
+  Участвует ли место в **идущей** раздаче, то есть претендует ли на банк.
+
+  Считается по раздаче, а не по стеку места: у игрока в олл-ине стек равен
+  нулю, но банк он разыгрывает наравне со всеми, и уйти из-за стола в этот
+  момент значило бы подарить свой выигрыш пустому месту. Сброшенная рука
+  на банк не претендует — такому игроку уходить можно.
+  """
+  @spec in_hand?(t(), pos_integer()) :: boolean()
+  def in_hand?(%__MODULE__{hand: nil}, _seat_number), do: false
+
+  def in_hand?(%__MODULE__{hand: hand}, seat_number) do
+    case Map.get(hand.players, seat_number) do
+      nil -> false
+      player -> player.status != :folded
+    end
   end
 
   @doc "Фишки, лежащие в комнате. Основа инварианта денег (§4 задачи 3)."
@@ -549,9 +575,14 @@ defmodule BlockPoker.Tables.RoomState do
     end
   end
 
+  # Место, с которого игрок уже встал, заморожено: его стек уехал в кошелёк
+  # и подтверждения транзакции ещё нет. Любое действие в этом окне — докупка,
+  # сит-аут, второй уход — работает с местом, которого через миг не будет,
+  # а купленные в этот момент фишки исчезают вместе с ним.
   defp fetch_player(state, user_id) do
     case find_seat(state, user_id) do
       nil -> {:error, :not_seated}
+      %Seat{status: :leaving} -> {:error, :leave_in_progress}
       seat -> {:ok, seat}
     end
   end

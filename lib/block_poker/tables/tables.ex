@@ -104,12 +104,13 @@ defmodule BlockPoker.Tables do
   """
   @spec leave_seat(Ecto.UUID.t(), Ecto.UUID.t()) :: {:ok, map()} | {:error, error()}
   def leave_seat(room_id, user_id) do
+    # Право встать проверяет сам `begin_leave` внутри процесса комнаты.
+    # Спрашивать об этом заранее по снятому снапшоту нельзя: между «посмотрел»
+    # и «встал» комната успевает начать раздачу, и игрок уходит из неё вместе
+    # со своим правом на банк.
     with {:ok, pid} <- fetch_room(room_id),
-         room = TableServer.state(pid),
-         {:ok, seat} <- fetch_seat(room, user_id),
-         :ok <- ensure_can_leave(room, seat),
          {:ok, %{ref: ref, stack: stack}} <- TableServer.begin_leave(pid, user_id) do
-      case GameMode.Cash.return_chips(room, user_id, stack, ref) do
+      case GameMode.Cash.return_chips(TableServer.state(pid), user_id, stack, ref) do
         :ok ->
           TableServer.finish_leave(pid, ref)
           {:ok, %{room_id: room_id, cashed_out: stack}}
@@ -261,17 +262,6 @@ defmodule BlockPoker.Tables do
     case Accounts.get_user(user_id) do
       {:ok, user} -> %{name: user.name, avatar: user.avatar}
       {:error, _reason} -> %{}
-    end
-  end
-
-  defp ensure_can_leave(room, seat) do
-    if GameMode.Cash.can_leave?(room, seat), do: :ok, else: {:error, :hand_in_progress}
-  end
-
-  defp fetch_seat(room, user_id) do
-    case RoomState.find_seat(room, user_id) do
-      nil -> {:error, :not_seated}
-      seat -> {:ok, seat}
     end
   end
 

@@ -38,8 +38,11 @@ defmodule BlockPoker.GameMode.Cash do
   end
 
   @impl true
-  def can_leave?(%RoomState{phase: :hand}, %Seat{} = seat), do: not Seat.in_game?(seat)
-  def can_leave?(%RoomState{}, %Seat{}), do: true
+  # Критерий — участие в идущей раздаче, а не стек места: на олл-ине стек
+  # равен нулю, и проверка по нему выпускала игрока из-за стола вместе
+  # с его правом на банк.
+  def can_leave?(%RoomState{} = state, %Seat{} = seat),
+    do: not RoomState.in_hand?(state, seat.number)
 
   @impl true
   def take_buy_in(%RoomState{} = state, user_id, amount, reservation_id) do

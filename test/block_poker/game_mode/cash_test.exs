@@ -8,7 +8,7 @@ defmodule BlockPoker.GameMode.CashTest do
 
   import BlockPoker.CashGamesFixtures
 
-  alias BlockPoker.Engine.HandSetup
+  alias BlockPoker.Engine.{Hand, HandSetup, Rng}
   alias BlockPoker.Engine.Variant.TexasHoldem
   alias BlockPoker.GameMode.Cash
   alias BlockPoker.Tables.RoomState
@@ -95,11 +95,60 @@ defmodule BlockPoker.GameMode.CashTest do
   test "уход разрешён между раздачами и запрещён участнику текущей" do
     setting = build_setting(%{})
     room = RoomState.new(Ecto.UUID.generate(), setting)
-    room = seat(room, 1, "user-1", 400)
-    seat = RoomState.find_seat(room, "user-1")
+    room = seat(room, 1, "user-1", 400, :post)
+    room = seat(room, 2, "user-2", 400, :post)
+    room = seat(room, 3, "watcher", 400)
+    {:ok, room} = RoomState.sit_out(room, "watcher")
 
-    assert Cash.can_leave?(room, seat)
-    refute Cash.can_leave?(%{room | phase: :hand}, seat)
+    assert Cash.can_leave?(room, RoomState.find_seat(room, "user-1"))
+
+    {:ok, setup} = Cash.hand_setup(room)
+    {hand, _events} = Hand.start(setup, Rng.seeded("тест"))
+    playing = %{room | phase: :hand, hand: hand}
+
+    refute Cash.can_leave?(playing, RoomState.find_seat(playing, "user-1"))
+
+    # Не участник раздачи столу ничем не обязан: сидящий мимо руки волен
+    # встать, не дожидаясь её конца.
+    assert Cash.can_leave?(playing, RoomState.find_seat(playing, "watcher"))
+  end
+
+  test "олл-ин не выпускает игрока из-за стола" do
+    # Стек места на олл-ине равен нулю, и проверка «по стеку» считала такого
+    # игрока непричастным к раздаче — он уходил, а выигранный банк оседал
+    # на пустом месте.
+    setting = build_setting(%{})
+    room = RoomState.new(Ecto.UUID.generate(), setting)
+    room = seat(room, 1, "user-1", 400, :post)
+    room = seat(room, 2, "user-2", 400, :post)
+
+    {:ok, setup} = Cash.hand_setup(room)
+    {hand, _events} = Hand.start(setup, Rng.seeded("тест"))
+    {:ok, hand, _events} = Hand.act(hand, hand.to_act, :all_in, nil)
+
+    all_in = Enum.find(Map.values(hand.players), &(&1.stack == 0))
+    room = %{room | phase: :hand, hand: hand}
+    room = put_in(room.seats[all_in.seat].stack, 0)
+
+    refute Cash.can_leave?(room, RoomState.find_seat(room, "user-#{all_in.seat}"))
+  end
+
+  test "сбросивший руку уходить может" do
+    setting = build_setting(%{})
+    room = RoomState.new(Ecto.UUID.generate(), setting)
+    room = seat(room, 1, "user-1", 400, :post)
+    room = seat(room, 2, "user-2", 400, :post)
+    room = seat(room, 3, "user-3", 400, :post)
+
+    {:ok, setup} = Cash.hand_setup(room)
+    {hand, _events} = Hand.start(setup, Rng.seeded("тест"))
+    folded_seat = hand.to_act
+    {:ok, hand, _events} = Hand.act(hand, folded_seat, :fold, nil)
+
+    room = %{room | phase: :hand, hand: hand}
+
+    # На банк он больше не претендует — держать его за столом незачем.
+    assert Cash.can_leave?(room, RoomState.find_seat(room, "user-#{folded_seat}"))
   end
 
   defp seat(room, number, user_id, stack, entry \\ :wait_bb) do

@@ -264,12 +264,12 @@ defmodule BlockPoker.Tables.TableServer do
   def handle_call({:begin_leave, user_id}, _from, state) do
     ref = new_ref()
 
-    case RoomState.begin_leave(state.room, user_id, ref) do
-      {:ok, room, stack} ->
-        {:reply, {:ok, %{ref: ref, stack: stack}}, put_room(state, room)}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+    # Право встать проверяется **здесь**, внутри процесса, а не вызывающим
+    # по снятому снапшоту: между «посмотрел состояние» и «встал» комната
+    # успевает начать раздачу, и проверка снаружи её не увидит.
+    case ensure_can_leave(state, user_id) do
+      :ok -> do_begin_leave(state, user_id, ref)
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
@@ -290,7 +290,7 @@ defmodule BlockPoker.Tables.TableServer do
   end
 
   def handle_call({:validate_add_chips, user_id, amount}, _from, state) do
-    with {:ok, seat} <- fetch_seat(state.room, user_id),
+    with {:ok, seat} <- fetch_active_seat(state.room, user_id),
          :ok <- ensure_between_hands(state.room),
          :ok <- RoomState.validate_buy_in(state.room, amount, seat.stack) do
       {:reply, {:ok, new_ref()}, state}
@@ -371,6 +371,31 @@ defmodule BlockPoker.Tables.TableServer do
   end
 
   def handle_info(_message, state), do: {:noreply, state}
+
+  defp ensure_can_leave(state, user_id) do
+    case RoomState.find_seat(state.room, user_id) do
+      nil ->
+        {:error, :not_seated}
+
+      %Seat{status: :leaving} ->
+        {:error, :leave_in_progress}
+
+      seat ->
+        if state.game_mode.can_leave?(state.room, seat),
+          do: :ok,
+          else: {:error, :hand_in_progress}
+    end
+  end
+
+  defp do_begin_leave(state, user_id, ref) do
+    case RoomState.begin_leave(state.room, user_id, ref) do
+      {:ok, room, stack} ->
+        {:reply, {:ok, %{ref: ref, stack: stack}}, put_room(state, room)}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
 
   # --- таймеры -------------------------------------------------------------
 
@@ -668,7 +693,7 @@ defmodule BlockPoker.Tables.TableServer do
           showdown: nil
       }
       |> RoomState.clear_preselects()
-      |> RoomState.refill_time_banks(Map.keys(hand.players))
+      |> RoomState.refill_time_banks(owners_of(hand))
 
     room = state.game_mode.on_hand_finished(room, hand.results)
     room = %{room | button_seat: next_button(room)}
@@ -695,12 +720,17 @@ defmodule BlockPoker.Tables.TableServer do
   # Показатели сессии обновляются раз в раздачу, и ровно тогда же уходят
   # клиенту: между раздачами меняться им не от чего.
   defp record_stats(state, hand) do
-    owners = Map.new(hand.players, fn {seat, player} -> {seat, player.id} end)
+    owners = owners_of(hand)
     deltas = HandStats.finish(state.room.hand_stats, hand)
     state = put_room(state, RoomState.record_stats(state.room, deltas, owners))
     broadcast(state, "stats_update", %{seats: stats_payload(state.room)})
     state
   end
+
+  # Кто сидел на месте, когда раздача начиналась. Нужен и показателям, и
+  # пополнению банка: место могло освободиться, и достаться они должны
+  # тому, кто играл, а не тому, кто сел следом.
+  defp owners_of(hand), do: Map.new(hand.players, fn {seat, player} -> {seat, player.id} end)
 
   defp stats_payload(room) do
     room
@@ -953,6 +983,15 @@ defmodule BlockPoker.Tables.TableServer do
 
   defp pick_seat(_room, seat) when is_integer(seat), do: {:ok, seat}
   defp pick_seat(_room, _seat), do: {:error, :invalid_seat}
+
+  # Место, с которого игрок уже встаёт, заморожено: докупленные в это окно
+  # фишки исчезли бы вместе с местом, а деньги из кошелька уже ушли.
+  defp fetch_active_seat(room, user_id) do
+    case fetch_seat(room, user_id) do
+      {:ok, %Seat{status: :leaving}} -> {:error, :leave_in_progress}
+      other -> other
+    end
+  end
 
   defp fetch_seat(room, user_id) do
     case RoomState.find_seat(room, user_id) do

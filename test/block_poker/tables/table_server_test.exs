@@ -436,6 +436,88 @@ defmodule BlockPoker.Tables.TableServerTest do
     end
   end
 
+  describe "деньги на границе ухода" do
+    # Сумма фишек в комнате: стеки мест плюс то, что лежит в банке идущей
+    # раздачи. Ни один сценарий не вправе её изменить (§11 CLAUDE.md).
+    defp chips_total(room) do
+      RoomState.chips_in_play(room) + if room.hand, do: room.hand.pot, else: 0
+    end
+
+    defp all_in_hand(seed) do
+      %{pid: pid} = start_room!(%{max_buy_in: nil}, seed: seed)
+      seat!(pid, "user-1", 1, 400)
+      seat!(pid, "user-2", 2, 400)
+      :ok = TableServer.fire_timer(pid, :button_draw)
+
+      room = TableServer.state(pid)
+      first = Map.fetch!(room.seats, room.hand.to_act)
+      :ok = TableServer.act(pid, first.user_id, :all_in, nil)
+
+      room = TableServer.state(pid)
+      second = room.seats |> Map.values() |> Enum.find(&(&1.number != first.number))
+      :ok = TableServer.act(pid, second.user_id, :call, nil)
+
+      %{pid: pid, all_in: first}
+    end
+
+    test "олл-ин игрок не может встать посреди раздачи" do
+      # Стек места на олл-ине равен нулю, но игрок в раздаче и претендует
+      # на банк: разрешить ему уйти — значит подарить банк пустому месту.
+      %{pid: pid, all_in: seat} = all_in_hand("a")
+
+      assert {:error, :hand_in_progress} = TableServer.begin_leave(pid, seat.user_id)
+    end
+
+    test "фишки не пропадают ни при одном раскладе доводки" do
+      for seed <- ["a", "b", "c", "d", "e", "f"] do
+        %{pid: pid, all_in: seat} = all_in_hand(seed)
+
+        # Попытка уйти на олл-ине — та самая дырка.
+        case TableServer.begin_leave(pid, seat.user_id) do
+          {:ok, %{ref: ref}} -> TableServer.finish_leave(pid, ref)
+          {:error, _reason} -> :ok
+        end
+
+        Enum.each(1..5, fn _step -> TableServer.fire_timer(pid, :runout) end)
+
+        room = TableServer.state(pid)
+        assert chips_total(room) == 800, "seed #{seed}: фишки разошлись"
+
+        # И ни одной фишки на месте, за которым никто не сидит.
+        assert Enum.all?(Map.values(room.seats), &(&1.user_id != nil or &1.stack == 0)),
+               "seed #{seed}: фишки остались на пустом месте"
+      end
+    end
+
+    test "докупка в момент ухода не съедает деньги" do
+      %{pid: pid} = start_room!()
+      seat!(pid, "user-1", 1, 400)
+      seat!(pid, "user-2", 2, 400)
+
+      # Стек уже уехал в кошелёк, подтверждения транзакции ещё нет.
+      {:ok, %{ref: ref, stack: 400}} = TableServer.begin_leave(pid, "user-1")
+
+      assert {:error, :leave_in_progress} =
+               TableServer.validate_add_chips(pid, "user-1", 400)
+
+      assert {:error, :leave_in_progress} = TableServer.commit_add_chips(pid, "user-1", 400)
+
+      :ok = TableServer.finish_leave(pid, ref)
+      assert chips_total(TableServer.state(pid)) == 400
+    end
+
+    test "уходящее место не принимает ничего" do
+      %{pid: pid} = start_room!()
+      seat!(pid, "user-1", 1, 400)
+      {:ok, %{ref: _ref}} = TableServer.begin_leave(pid, "user-1")
+
+      assert {:error, :leave_in_progress} = TableServer.chat(pid, "user-1", "я всё")
+      assert {:error, :leave_in_progress} = TableServer.preselect(pid, "user-1", :fold)
+      assert {:error, :leave_in_progress} = TableServer.sit_out(pid, "user-1")
+      assert {:error, :leave_in_progress} = TableServer.begin_leave(pid, "user-1")
+    end
+  end
+
   defp leave(pid, user_id) do
     {:ok, %{ref: ref}} = TableServer.begin_leave(pid, user_id)
     :ok = TableServer.finish_leave(pid, ref)
