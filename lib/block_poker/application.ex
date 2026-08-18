@@ -12,6 +12,7 @@ defmodule BlockPoker.Application do
       BlockPoker.Repo,
       {DNSCluster, query: Application.get_env(:block_poker, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: BlockPoker.PubSub},
+      Api.RateLimiter,
       # Start a worker by calling: BlockPoker.Worker.start_link(arg)
       # {BlockPoker.Worker, arg},
       # Start to serve requests, typically the last entry

@@ -1,0 +1,138 @@
+defmodule BlockPoker.Accounts do
+  @moduledoc """
+  Контекст учётных записей: регистрация, аутентификация, сессии.
+
+  Наружу отдаёт либо структуры домена, либо коды из `BlockPoker.ErrorCode` —
+  свободного текста в ошибках нет (§3 CLAUDE.md).
+  """
+
+  alias BlockPoker.Accounts.{Tokens, User}
+  alias BlockPoker.Repo
+  alias BlockPoker.Wallet
+  alias Ecto.Multi
+
+  @type session :: %{
+          user: User.t(),
+          token: String.t(),
+          refresh_token: String.t(),
+          expires_in: pos_integer(),
+          wallets: [Wallet.UserWallet.t()]
+        }
+
+  @doc """
+  Регистрация: пользователь и оба кошелька создаются одной транзакцией —
+  либо всё, либо ничего. Дефолтные суммы принадлежат кошельковому контексту.
+  """
+  @spec register(map()) :: {:ok, User.t()} | {:error, Ecto.Changeset.t()}
+  def register(attrs) do
+    Multi.new()
+    |> Multi.insert(:user, User.registration_changeset(%User{}, attrs))
+    |> Wallet.create_default_wallets(:user)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{user: user}} -> {:ok, user}
+      {:error, :user, changeset, _changes} -> {:error, changeset}
+      {:error, _step, changeset, _changes} -> {:error, changeset}
+    end
+  end
+
+  @spec authenticate(String.t(), String.t()) ::
+          {:ok, User.t()} | {:error, :invalid_credentials | :user_blocked}
+  def authenticate(email, password) when is_binary(email) and is_binary(password) do
+    user = Repo.get_by(User, email: User.normalize_email(email))
+
+    cond do
+      is_nil(user) ->
+        # Пустая проверка выравнивает время ответа: иначе по задержке
+        # перебирается список существующих email.
+        Argon2.no_user_verify()
+        {:error, :invalid_credentials}
+
+      not Argon2.verify_pass(password, user.password_hash) ->
+        {:error, :invalid_credentials}
+
+      user.status == :blocked ->
+        {:error, :user_blocked}
+
+      true ->
+        {:ok, user}
+    end
+  end
+
+  def authenticate(_email, _password) do
+    Argon2.no_user_verify()
+    {:error, :invalid_credentials}
+  end
+
+  @spec get_user(Ecto.UUID.t()) :: {:ok, User.t()} | {:error, :not_found}
+  def get_user(id) do
+    case Ecto.UUID.cast(id) do
+      {:ok, uuid} -> id_to_result(Repo.get(User, uuid))
+      :error -> {:error, :not_found}
+    end
+  end
+
+  @doc "Регистрация + сразу выданная пара токенов."
+  @spec register_session(map()) :: {:ok, session()} | {:error, Ecto.Changeset.t()}
+  def register_session(attrs) do
+    with {:ok, user} <- register(attrs), do: start_session(user)
+  end
+
+  @doc "Вход по email и паролю."
+  @spec login(String.t(), String.t()) ::
+          {:ok, session()} | {:error, :invalid_credentials | :user_blocked}
+  def login(email, password) do
+    with {:ok, user} <- authenticate(email, password), do: start_session(user)
+  end
+
+  @doc "Продление сессии по refresh-токену с ротацией самого токена."
+  @spec refresh_session(String.t()) ::
+          {:ok, session()}
+          | {:error, :token_invalid | :token_expired | :token_reused | :user_blocked}
+  def refresh_session(refresh_token) do
+    with {:ok, %{user: user, refresh_token: raw}} <- Tokens.refresh(refresh_token),
+         :ok <- ensure_active(user) do
+      {:ok, build_session(user, raw)}
+    end
+  end
+
+  @doc "Проверка socket-токена при открытии соединения."
+  @spec verify_socket_token(String.t()) ::
+          {:ok, User.t()} | {:error, :token_invalid | :token_expired | :user_blocked}
+  def verify_socket_token(token) do
+    with {:ok, user_id} <- Tokens.verify_socket_token(token),
+         {:ok, user} <- socket_user(user_id),
+         :ok <- ensure_active(user) do
+      {:ok, user}
+    end
+  end
+
+  @spec start_session(User.t()) :: {:ok, session()}
+  def start_session(%User{} = user) do
+    {:ok, refresh_token} = Tokens.issue_refresh_token(user)
+    {:ok, build_session(user, refresh_token)}
+  end
+
+  defp build_session(%User{} = user, refresh_token) do
+    %{
+      user: user,
+      token: Tokens.issue_socket_token(user),
+      refresh_token: refresh_token,
+      expires_in: Tokens.socket_token_ttl(),
+      wallets: Wallet.list_wallets(user.id)
+    }
+  end
+
+  defp socket_user(user_id) do
+    case get_user(user_id) do
+      {:ok, user} -> {:ok, user}
+      {:error, :not_found} -> {:error, :token_invalid}
+    end
+  end
+
+  defp ensure_active(%User{status: :active}), do: :ok
+  defp ensure_active(%User{}), do: {:error, :user_blocked}
+
+  defp id_to_result(nil), do: {:error, :not_found}
+  defp id_to_result(user), do: {:ok, user}
+end

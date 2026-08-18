@@ -9,7 +9,7 @@ import Config
 
 config :block_poker,
   ecto_repos: [BlockPoker.Repo],
-  generators: [timestamp_type: :utc_datetime]
+  generators: [timestamp_type: :utc_datetime_usec, binary_id: true]
 
 # Configure the endpoint
 config :block_poker, Socket.Endpoint,
@@ -20,6 +20,10 @@ config :block_poker, Socket.Endpoint,
     layout: false
   ],
   pubsub_server: BlockPoker.PubSub
+
+# Контекст подписи токенов (`Phoenix.Token`). Вынесен в конфиг, чтобы ядро
+# не зависело от транспорта на этапе компиляции.
+config :block_poker, :token_context, Socket.Endpoint
 
 # Configure Elixir's Logger
 config :logger, :default_formatter,

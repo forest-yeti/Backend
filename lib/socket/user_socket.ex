@@ -9,14 +9,24 @@ defmodule Socket.UserSocket do
 
   use Phoenix.Socket
 
+  alias BlockPoker.Accounts
+  alias Socket.Protocol.Version
+
   # channel "lobby", Socket.LobbyChannel
   # channel "table:*", Socket.TableChannel
   # channel "wallet:*", Socket.WalletChannel
 
   @impl true
-  def connect(_params, _socket, _connect_info) do
-    # TODO: BlockPoker.Accounts.verify_socket_token/1 -> assign(:user_id, id)
-    :error
+  def connect(params, socket, _connect_info) do
+    with :ok <- Version.check(params["protocol_vsn"]),
+         {:ok, user} <- Accounts.verify_socket_token(params["token"] || "") do
+      {:ok,
+       socket
+       |> assign(:user_id, user.id)
+       |> assign(:protocol_vsn, params["protocol_vsn"] || Version.current())}
+    else
+      {:error, code} -> {:error, %{code: Atom.to_string(code)}}
+    end
   end
 
   @impl true
