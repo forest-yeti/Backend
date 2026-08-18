@@ -63,6 +63,7 @@ defmodule BlockPoker.MixProject do
       # Тесты и качество
       {:stream_data, "~> 1.1", only: [:dev, :test]},
       {:mox, "~> 1.2", only: :test},
+      {:benchee, "~> 1.3", only: :dev},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
     ]
@@ -80,6 +81,7 @@ defmodule BlockPoker.MixProject do
       "ecto.setup": ["ecto.create", "ecto.migrate", "run priv/repo/seeds.exs"],
       "ecto.reset": ["ecto.drop", "ecto.setup"],
       test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"],
+      bench: ["run --no-start bench/equity.exs"],
       precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
     ]
   end
