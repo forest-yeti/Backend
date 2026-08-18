@@ -93,6 +93,24 @@ defmodule BlockPoker.Tables.TableServerTest do
       assert_received {:table_event, "button_ready", _payload}
     end
 
+    test "следующая раздача начинается и после того, как кнопка уже разыграна" do
+      # Розыгрыш кнопки бывает один раз за стол, а раздач — много. Игрок,
+      # подсевший позже, должен попадать в новую руку, а не в стоящий стол.
+      %{pid: pid} = start_room!()
+
+      seat!(pid, "user-1", 1, 400)
+      seat!(pid, "user-2", 2, 400)
+      :ok = TableServer.fire_timer(pid, :button_draw)
+      assert TableServer.state(pid).phase == :hand
+
+      play_hand_out(pid)
+      assert TableServer.state(pid).hand == nil
+
+      # Третий садится за уже начатый стол — рука стартует без нового розыгрыша.
+      seat!(pid, "user-3", 3, 400)
+      assert TableServer.state(pid).phase == :hand
+    end
+
     test "кнопка переходит по кругу и не подвешивает стол" do
       # Кнопка на старшем месте — граничный случай: выбор следующей кнопки
       # обязан завершаться, иначе процесс стола зависает и все вызовы к нему

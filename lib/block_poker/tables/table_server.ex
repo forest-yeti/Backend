@@ -382,7 +382,14 @@ defmodule BlockPoker.Tables.TableServer do
 
   defp start_hand(%State{room: %RoomState{phase: :hand}} = state), do: state
 
-  defp start_hand(state) do
+  defp start_hand(state), do: start_hand(state, length(in_game_seats(state.room)))
+
+  # `attempts` — по одному обороту блайндов на каждое занятое место: если за
+  # столом одни ждущие BB, блайнд обязан до кого-то из них дойти, но круг
+  # должен быть конечным.
+  defp start_hand(state, attempts) when attempts <= 0, do: state
+
+  defp start_hand(state, attempts) do
     state = put_room(state, activate_big_blind(state.room))
 
     case state.game_mode.hand_setup(state.room) do
@@ -397,9 +404,23 @@ defmodule BlockPoker.Tables.TableServer do
 
         apply_hand(state, hand, events)
 
+      {:error, :not_enough_players} ->
+        # Игроков за столом хватает, но они ждут блайнда — двигаем блайнды
+        # дальше по кругу, пока большой не дойдёт до кого-то из ждущих.
+        if length(in_game_seats(state.room)) >= 2 do
+          state |> put_room(rotate_blinds(state.room)) |> start_hand(attempts - 1)
+        else
+          state
+        end
+
       {:error, _reason} ->
         state
     end
+  end
+
+  defp rotate_blinds(room) do
+    room = %{room | button_seat: next_button(room)}
+    %{room | big_blind_seat: big_blind_seat_for(room)}
   end
 
   # Игрок, ждавший большого блайнда, вступает ровно тогда, когда блайнд
@@ -605,6 +626,13 @@ defmodule BlockPoker.Tables.TableServer do
 
   # Розыгрыш кнопки проводится только при старте игры за столом: дальше
   # кнопка просто двигается по кругу от раздачи к раздаче (§5 задачи 3).
+  # Кнопка разыграна один раз за стол, а раздач за ним — много. Если игра
+  # уже начата и раздача сейчас не идёт, сажать нового игрока значит начать
+  # следующую руку: иначе стол молча стоит с полным составом.
+  defp maybe_start_game(%State{room: %RoomState{game_started?: true, hand: nil}} = state) do
+    start_hand(state)
+  end
+
   defp maybe_start_game(%State{room: %RoomState{game_started?: true}} = state), do: state
 
   defp maybe_start_game(state) do
