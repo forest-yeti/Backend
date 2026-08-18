@@ -563,6 +563,95 @@ defmodule BlockPoker.Tables.TableServerTest do
     end
   end
 
+  describe "вход за взнос" do
+    defp seated_and_waiting do
+      %{pid: pid} = start_room!()
+      seat!(pid, "user-1", 1, 400)
+      seat!(pid, "user-2", 2, 400)
+      :ok = TableServer.fire_timer(pid, :button_draw)
+      seat!(pid, "user-3", 4, 400)
+
+      seat = TableServer.state(pid).seats[4]
+      assert seat.waiting_for_bb, "третий должен ждать большого блайнда"
+
+      %{pid: pid}
+    end
+
+    test "нажатие «не ждать» вводит игрока в ближайшую раздачу" do
+      %{pid: pid} = seated_and_waiting()
+
+      assert :ok = TableServer.request_post(pid, "user-3", true)
+      # Пока раздача идёт, это только намерение.
+      assert TableServer.state(pid).seats[4].wants_post
+
+      play_hand_out(pid)
+      :ok = TableServer.fire_timer(pid, :next_hand)
+
+      room = TableServer.state(pid)
+      seat = room.seats[4]
+
+      refute seat.waiting_for_bb
+      refute seat.wants_post
+      assert Map.has_key?(room.hand.players, 4), "игрок так и не попал в раздачу"
+    end
+
+    test "взнос уходит в банк, а не появляется из воздуха" do
+      %{pid: pid} = seated_and_waiting()
+      :ok = TableServer.request_post(pid, "user-3", true)
+
+      play_hand_out(pid)
+      :ok = TableServer.fire_timer(pid, :next_hand)
+
+      room = TableServer.state(pid)
+      total = RoomState.chips_in_play(room) + room.hand.pot
+
+      assert total == 1200, "фишки разошлись: #{total}"
+      # Заплатил за вход — стек меньше исходного.
+      assert room.seats[4].stack < 400
+    end
+
+    test "намерение можно снять" do
+      %{pid: pid} = seated_and_waiting()
+
+      assert :ok = TableServer.request_post(pid, "user-3", true)
+      assert :ok = TableServer.request_post(pid, "user-3", false)
+
+      play_hand_out(pid)
+      :ok = TableServer.fire_timer(pid, :next_hand)
+
+      # Ждёт дальше, взнос не списан.
+      room = TableServer.state(pid)
+      assert room.seats[4].waiting_for_bb
+      assert room.seats[4].stack == 400
+    end
+
+    test "играющему кнопка «не ждать» недоступна" do
+      %{pid: pid} = seated_and_waiting()
+
+      assert {:error, :post_not_available} = TableServer.request_post(pid, "user-1", true)
+      assert {:error, :not_seated} = TableServer.request_post(pid, "watcher", true)
+    end
+
+    test "взнос одноразовый и на следующую раздачу не переносится" do
+      %{pid: pid} = seated_and_waiting()
+      :ok = TableServer.request_post(pid, "user-3", true)
+
+      play_hand_out(pid)
+      :ok = TableServer.fire_timer(pid, :next_hand)
+      stack_after_entry = TableServer.state(pid).seats[4].stack
+
+      play_hand_out(pid)
+
+      room = TableServer.state(pid)
+      assert room.seats[4].post == 0
+      assert room.seats[4].dead_post == 0
+
+      # Второй раз за вход он не платит: разница только на блайндах раздачи.
+      assert RoomState.chips_in_play(room) == 1200
+      assert is_integer(stack_after_entry)
+    end
+  end
+
   defp leave(pid, user_id) do
     {:ok, %{ref: ref}} = TableServer.begin_leave(pid, user_id)
     :ok = TableServer.finish_leave(pid, ref)

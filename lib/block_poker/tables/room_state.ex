@@ -118,6 +118,77 @@ defmodule BlockPoker.Tables.RoomState do
   end
 
   @doc """
+  «Не ждать большого блайнда»: игрок готов заплатить за вход вне очереди.
+
+  Сохраняется **намерение**, а не решение. Во что вход обойдётся — живой
+  взнос, мёртвый или ничего, — зависит от того, где к началу раздачи будет
+  кнопка; между нажатием и стартом она успевает сдвинуться, поэтому решение
+  принимается в `resolve_post_intents/1`, а не здесь.
+  """
+  @spec request_post(t(), Ecto.UUID.t(), boolean()) :: {:ok, t(), Seat.t()} | {:error, atom()}
+  def request_post(%__MODULE__{} = state, user_id, wanted?) do
+    with {:ok, seat} <- fetch_player(state, user_id),
+         :ok <- ensure_can_post(seat, wanted?) do
+      seat = %{seat | wants_post: wanted?}
+      {:ok, put_seat(state, seat), seat}
+    end
+  end
+
+  # Ждать нечего тому, кто и так играет: кнопка «не ждать» для него бессмысленна.
+  defp ensure_can_post(_seat, false), do: :ok
+
+  defp ensure_can_post(%Seat{} = seat, true) do
+    cond do
+      not (seat.waiting_for_bb or seat.post_required) -> {:error, :post_not_available}
+      not seat.can_post -> {:error, :post_not_available}
+      true -> :ok
+    end
+  end
+
+  @doc """
+  Превратить намерения в решения — перед стартом раздачи и только там.
+
+  Кнопка к этому моменту уже на своём месте, поэтому и живой взнос, и
+  мёртвый считаются по той обстановке, в которой раздача действительно
+  начнётся.
+  """
+  @spec resolve_post_intents(t()) :: t()
+  def resolve_post_intents(%__MODULE__{} = state) do
+    state
+    |> seats()
+    |> Enum.filter(&(&1.wants_post and (&1.waiting_for_bb or &1.post_required)))
+    |> Enum.reduce(state, &resolve_post_intent(&2, &1))
+  end
+
+  defp resolve_post_intent(state, seat) do
+    decision = entry_decision(state, seat, :post)
+
+    if decision.status == :playing do
+      put_seat(state, %{
+        seat
+        | waiting_for_bb: false,
+          post_required: false,
+          wants_post: false,
+          post: decision.post,
+          dead_post: decision.dead_post
+      })
+    else
+      state
+    end
+  end
+
+  @doc "Взнос сыгран: раздача его забрала, на следующую он не переносится."
+  @spec clear_posts(t(), [pos_integer()]) :: t()
+  def clear_posts(%__MODULE__{} = state, seat_numbers) do
+    Enum.reduce(seat_numbers, state, fn number, acc ->
+      case Map.get(acc.seats, number) do
+        nil -> acc
+        seat -> put_seat(acc, %{seat | post: 0, dead_post: 0})
+      end
+    end)
+  end
+
+  @doc """
   Выбрать действие заранее. Пустой выбор снимает предыдущий.
   """
   @spec set_preselect(t(), Ecto.UUID.t(), Preselect.t() | nil) ::
@@ -332,7 +403,9 @@ defmodule BlockPoker.Tables.RoomState do
             time_bank: TimeBank.initial(state.setting.time_bank_ms),
             waiting_for_bb: decision.status == :waiting_for_bb,
             post_required: decision.status == :post_required,
-            can_post: decision.can_post
+            can_post: decision.can_post,
+            post: decision.post,
+            dead_post: decision.dead_post
         }
 
         {:ok, put_seat(state, seat), seat}

@@ -158,6 +158,15 @@ defmodule BlockPoker.Tables do
     end
   end
 
+  @doc """
+  «Не ждать большого блайнда». Намерение, а не решение: во что обойдётся
+  вход, считает ядро в момент старта раздачи (§6 задачи 3).
+  """
+  @spec request_post(Ecto.UUID.t(), Ecto.UUID.t(), boolean()) :: :ok | {:error, error()}
+  def request_post(room_id, user_id, wanted?) when is_boolean(wanted?) do
+    with {:ok, pid} <- fetch_room(room_id), do: TableServer.request_post(pid, user_id, wanted?)
+  end
+
   @doc "Сообщение в чат стола. Писать может сидящий, читать — кто угодно."
   @spec chat(Ecto.UUID.t(), Ecto.UUID.t(), term()) :: {:ok, map()} | {:error, error()}
   def chat(room_id, user_id, text) do

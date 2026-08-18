@@ -297,6 +297,46 @@ defmodule Socket.Channels.TableChannelTest do
     assert_reply ref, :error, %{code: "validation_failed"}
   end
 
+  test "post_blind — намерение, а не мгновенный вход", %{room_id: room_id, buy_in: buy_in} do
+    %{channel: first} = connect_player(room_id)
+    %{channel: second} = connect_player(room_id)
+    %{channel: third} = connect_player(room_id)
+
+    ref = push(first, "join_seat", %{"seat" => 1, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+    ref = push(second, "join_seat", %{"seat" => 2, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+
+    :ok = TableServer.fire_timer(room_pid(room_id), :button_draw)
+
+    ref = push(third, "join_seat", %{"seat" => 4, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+
+    ref = push(third, "post_blind", %{})
+    assert_reply ref, :ok, _payload
+
+    ref = push(third, "table_state", %{})
+    assert_reply ref, :ok, snapshot
+    assert snapshot.you.wants_post
+
+    # Снять намерение — тем же сообщением.
+    ref = push(third, "post_blind", %{"post" => false})
+    assert_reply ref, :ok, _payload
+
+    ref = push(third, "table_state", %{})
+    assert_reply ref, :ok, snapshot
+    refute snapshot.you.wants_post
+  end
+
+  test "играющему post_blind отвечает кодом", %{room_id: room_id, buy_in: buy_in} do
+    %{channel: channel} = connect_player(room_id)
+    ref = push(channel, "join_seat", %{"seat" => 1, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+
+    ref = push(channel, "post_blind", %{})
+    assert_reply ref, :error, %{code: "post_not_available"}
+  end
+
   test "table_state отдаёт снапшот с местом игрока", %{room_id: room_id, buy_in: buy_in} do
     %{channel: channel} = connect_player(room_id)
     ref = push(channel, "join_seat", %{"seat" => 5, "buy_in" => buy_in})

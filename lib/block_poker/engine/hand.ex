@@ -127,12 +127,15 @@ defmodule BlockPoker.Engine.Hand do
 
     {hand, ante_events} = post_antes(hand, setup)
     {hand, blind_events} = post_blinds(hand)
+    {hand, entry_events} = post_entries(hand, setup)
     hand = deal_hole(hand)
 
     hand = %{hand | bet: max_committed(hand), min_raise: setup.big_blind}
     hand = %{hand | to_act: first_to_act(hand)}
 
-    {hand, ante_events ++ blind_events ++ [{:hole_dealt, hole_payload(hand)}] ++ prompt(hand)}
+    {hand,
+     ante_events ++
+       blind_events ++ entry_events ++ [{:hole_dealt, hole_payload(hand)}] ++ prompt(hand)}
   end
 
   @doc "Легальные действия игрока — единственный источник правды для кнопок."
@@ -599,6 +602,63 @@ defmodule BlockPoker.Engine.Hand do
     # Анте за стол вносит большой блайнд — в банк, но не в счёт своей ставки.
     hand = put_player(hand, %{Map.fetch!(hand.players, seat) | committed: 0})
     {hand, [{:posted, %{seat: seat, kind: "ante", amount: amount, pot: hand.pot}}]}
+  end
+
+  # Взнос за вход вне очереди: игрок, не дожидавшийся своего большого
+  # блайнда, платит столько же, сколько круг стоил бы сидящему.
+  #
+  # Живая часть взноса — ставка наравне с блайндом, мёртвая уходит в банк
+  # и права чека не даёт. Живая при этом не может превысить текущую ставку
+  # круга: взнос — это плата за вход, а не рейз, и остальным отвечать на
+  # него нечем. Всё, что сверх, становится мёртвым.
+  defp post_entries(hand, setup) do
+    setup.players
+    |> Enum.filter(&(entry_amount(&1) > 0))
+    |> Enum.sort_by(& &1.seat)
+    |> Enum.reduce({hand, []}, fn entry, {acc, events} ->
+      player = Map.fetch!(acc.players, entry.seat)
+
+      # Ставка круга берётся из уже поставленных блайндов: `hand.bet`
+      # выставляется позже, по итогам всех обязательных взносов.
+      live = min(Map.get(entry, :post, 0), max(max_committed(acc) - player.committed, 0))
+      dead = entry_amount(entry) - live
+
+      {acc, live_events} = post_live(acc, entry.seat, live)
+      {acc, dead_events} = post_dead(acc, entry.seat, dead)
+
+      {acc, events ++ live_events ++ dead_events}
+    end)
+  end
+
+  defp entry_amount(entry), do: Map.get(entry, :post, 0) + Map.get(entry, :dead_post, 0)
+
+  defp post_live(hand, _seat, 0), do: {hand, []}
+
+  defp post_live(hand, seat, amount) do
+    player = Map.fetch!(hand.players, seat)
+    amount = min(amount, player.stack)
+    hand = commit(hand, player, amount)
+
+    # Взнос — не «ход»: слово за игроком на его очереди останется.
+    hand = put_player(hand, %{Map.fetch!(hand.players, seat) | acted?: false})
+    {hand, [{:posted, %{seat: seat, kind: "post", amount: amount, pot: hand.pot}}]}
+  end
+
+  defp post_dead(hand, _seat, 0), do: {hand, []}
+
+  defp post_dead(hand, seat, amount) do
+    player = Map.fetch!(hand.players, seat)
+    committed = player.committed
+    amount = min(amount, player.stack)
+    hand = commit(hand, player, amount)
+
+    # Мёртвая часть в ставку игрока не идёт: она уже в банке. Ставка
+    # возвращается к тому, что было **до** неё, а не к нулю: живая часть
+    # взноса могла быть внесена тем же игроком мгновением раньше.
+    hand =
+      put_player(hand, %{Map.fetch!(hand.players, seat) | committed: committed, acted?: false})
+
+    {hand, [{:posted, %{seat: seat, kind: "dead_post", amount: amount, pot: hand.pot}}]}
   end
 
   defp post_blinds(hand) do

@@ -52,6 +52,9 @@ defmodule BlockPoker.Tables.Seat do
           can_post: boolean(),
           missed_blinds: non_neg_integer(),
           hands_sat_out: non_neg_integer(),
+          wants_post: boolean(),
+          post: non_neg_integer(),
+          dead_post: non_neg_integer(),
           time_bank: non_neg_integer(),
           preselect: Preselect.t() | nil,
           chat_sent_at: [integer()],
@@ -72,6 +75,14 @@ defmodule BlockPoker.Tables.Seat do
     can_post: false,
     missed_blinds: 0,
     hands_sat_out: 0,
+    # Игрок нажал «не ждать блайнда». Это **намерение**, а не решение:
+    # во что оно обойдётся, зависит от положения кнопки, а она успевает
+    # сдвинуться, поэтому считается оно в момент старта раздачи, а не нажатия.
+    wants_post: false,
+    # Взнос за вход в ближайшую раздачу: живая часть и мёртвая (`EntryRules`).
+    # Одноразовые — раздача их забирает и обнуляет.
+    post: 0,
+    dead_post: 0,
     time_bank: 0,
     preselect: nil,
     # Отметки последних сообщений игрока: по ним считается частота (`Chat`).

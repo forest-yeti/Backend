@@ -278,6 +278,9 @@ table.join().receive("ok", (snapshot) => renderTable(snapshot))
 Если `can_post: false` и `waiting_for_bb: true` — вариантов нет, показывай
 только «ожидание блайнда».
 
+Сама кнопка «не ждать» — сообщение `post_blind`, см. [задачу 11](11_PostBlind.md):
+до неё флаг `can_post` показывал возможность, которой не было.
+
 ### Уход и докупка
 
 ```

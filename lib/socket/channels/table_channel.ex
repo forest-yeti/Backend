@@ -73,6 +73,12 @@ defmodule Socket.Channels.TableChannel do
     |> Message.reply(socket)
   end
 
+  def handle_in("post_blind", payload, socket) do
+    socket.assigns.room_id
+    |> Tables.request_post(socket.assigns.user_id, Map.get(payload, "post", true) == true)
+    |> Message.reply(socket)
+  end
+
   def handle_in("chat", payload, socket) do
     socket.assigns.room_id
     |> Tables.chat(socket.assigns.user_id, Map.get(payload, "text"))

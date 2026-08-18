@@ -257,6 +257,7 @@ BlockPoker.Supervisor (:one_for_one)
 "leave_seat"  %{}
 "action"      %{type: "raise", amount: 800, hand_id: "...", action_seq: 42}
 "preselect"   %{action: "check_fold"}   # заранее выбранное действие
+"post_blind"  %{post: true}            # не ждать большого блайнда
 "sit_out"     %{}
 "chat"        %{text: "..."}
 ```

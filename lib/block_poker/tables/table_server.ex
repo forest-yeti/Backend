@@ -115,6 +115,12 @@ defmodule BlockPoker.Tables.TableServer do
           :ok | {:error, atom()}
   def preselect(room, user_id, choice), do: GenServer.call(room, {:preselect, user_id, choice})
 
+  @doc "«Не ждать большого блайнда»: намерение войти за взнос."
+  @spec request_post(GenServer.server(), Ecto.UUID.t(), boolean()) :: :ok | {:error, atom()}
+  def request_post(room, user_id, wanted?) do
+    GenServer.call(room, {:request_post, user_id, wanted?})
+  end
+
   @doc "Сообщение в чат стола."
   @spec chat(GenServer.server(), Ecto.UUID.t(), String.t()) ::
           {:ok, map()} | {:error, atom()}
@@ -227,6 +233,21 @@ defmodule BlockPoker.Tables.TableServer do
         # Выбор мог совпасть с уже наступившей очередью хода: игрок нажал
         # «фолд» ровно в тот момент, когда ход дошёл до него.
         {:reply, :ok, apply_pending_preselect(state, seat.number)}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:request_post, user_id, wanted?}, _from, state) do
+    case RoomState.request_post(state.room, user_id, wanted?) do
+      {:ok, room, seat} ->
+        state = put_room(state, room)
+        broadcast(state, "seat_posting", %{seat: seat.number, wants_post: seat.wants_post})
+
+        # Стол может стоять в ожидании второго игрока: вошедший за взнос
+        # даёт нужного, и раздача начинается сразу, а не через круг.
+        {:reply, :ok, maybe_start_game(state)}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -494,15 +515,19 @@ defmodule BlockPoker.Tables.TableServer do
   defp start_hand(state, attempts) when attempts <= 0, do: state
 
   defp start_hand(state, attempts) do
+    # Намерения превращаются в решения ровно здесь: кнопка на месте, и
+    # стоимость входа считается по той обстановке, в которой раздача пойдёт.
+    state = put_room(state, RoomState.resolve_post_intents(state.room))
     state = put_room(state, activate_big_blind(state.room))
 
     case state.game_mode.hand_setup(state.room) do
       {:ok, setup} ->
         {hand, events} = Hand.start(setup, state.rng, rake: rake_fun(state))
+        room = RoomState.clear_posts(state.room, Map.keys(hand.players))
 
         state =
           put_room(state, %{
-            state.room
+            room
             | phase: :hand,
               hand: hand,
               hand_stats: HandStats.new(hand),
@@ -784,10 +809,6 @@ defmodule BlockPoker.Tables.TableServer do
 
   defp in_game_seats(room) do
     room |> RoomState.players() |> Enum.map(& &1.number) |> Enum.sort()
-  end
-
-  defp playing_seats(room) do
-    room |> RoomState.seats() |> Enum.filter(&Seat.in_game?/1) |> Enum.map(& &1.number)
   end
 
   defp playing_seats(room) do

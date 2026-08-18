@@ -30,14 +30,77 @@ defmodule BlockPoker.Engine.HandTest do
 
   defp start(stacks, opts \\ []) do
     setup = setup_hand(stacks, opts)
+    setup = %{setup | players: apply_entries(setup.players, Keyword.get(opts, :entries, %{}))}
     {hand, events} = Hand.start(setup, Rng.seeded(<<7::256>>))
     assert Hand.total_chips(hand) == HandSetup.total_chips(setup)
     {hand, events}
   end
 
+  # Взносы за вход: %{seat => {live, dead}}.
+  defp apply_entries(players, entries) do
+    Enum.map(players, fn player ->
+      case Map.get(entries, player.seat) do
+        nil -> player
+        {live, dead} -> %{player | post: live, dead_post: dead}
+      end
+    end)
+  end
+
   defp act!(hand, seat, action) do
     {:ok, hand, events} = Hand.act(hand, seat, action, nil)
     {hand, events}
+  end
+
+  describe "взнос за вход" do
+    test "живой взнос — ставка наравне с блайндом" do
+      # Место 4 входит вне очереди и платит большой блайнд живым взносом.
+      {hand, events} = start([1000, 1000, 1000, 1000], button: 1, entries: %{4 => {10, 0}})
+
+      assert Hand.total_chips(hand) == 4000
+      assert hand.players[4].committed == 10
+      assert hand.players[4].stack == 990
+      assert hand.pot == 5 + 10 + 10
+
+      assert {:posted, %{seat: 4, kind: "post", amount: 10}} =
+               Enum.find(events, &match?({:posted, %{kind: "post"}}, &1))
+
+      # Взнос — не ход: слово за игроком остаётся.
+      refute hand.players[4].acted?
+    end
+
+    test "мёртвый взнос уходит в банк и права чека не даёт" do
+      {hand, events} = start([1000, 1000, 1000, 1000], button: 1, entries: %{4 => {0, 10}})
+
+      assert Hand.total_chips(hand) == 4000
+      assert hand.players[4].stack == 990
+      # В банке он есть, ставкой игрока не считается.
+      assert hand.pot == 5 + 10 + 10
+      assert hand.players[4].committed == 0
+
+      assert {:posted, %{seat: 4, kind: "dead_post", amount: 10}} =
+               Enum.find(events, &match?({:posted, %{kind: "dead_post"}}, &1))
+
+      # Значит, ему всё равно придётся отвечать на большой блайнд.
+      assert Hand.legal_actions(%{hand | to_act: 4}, 4).call == 10
+    end
+
+    test "живая часть не превышает ставку круга: взнос — не рейз" do
+      # Пропущенные блайнды поднимают сумму взноса выше большого блайнда;
+      # лишнее обязано стать мёртвым, иначе вход открывал бы торговлю.
+      {hand, _events} = start([1000, 1000, 1000, 1000], button: 1, entries: %{4 => {20, 0}})
+
+      assert hand.players[4].committed == 10
+      assert hand.players[4].stack == 980
+      assert hand.bet == 10
+      assert Hand.total_chips(hand) == 4000
+    end
+
+    test "фишки не возникают и не исчезают при любом взносе" do
+      for entry <- [{10, 0}, {0, 10}, {10, 10}, {20, 5}] do
+        {hand, _events} = start([1000, 1000, 1000, 1000], button: 1, entries: %{4 => entry})
+        assert Hand.total_chips(hand) == 4000, "взнос #{inspect(entry)} изменил сумму фишек"
+      end
+    end
   end
 
   describe "мёртвая кнопка" do

@@ -97,7 +97,13 @@ defmodule BlockPoker.GameMode.Cash do
       variant: VariantRegistry.fetch!(setting.game_type),
       players:
         Enum.map(players, fn seat ->
-          %{seat: seat.number, id: seat.user_id, stack: seat.stack, post: 0, dead_post: 0}
+          %{
+            seat: seat.number,
+            id: seat.user_id,
+            stack: seat.stack,
+            post: seat.post,
+            dead_post: seat.dead_post
+          }
         end),
       button_seat: state.button_seat || hd(players).number,
       small_blind: setting.small_blind,

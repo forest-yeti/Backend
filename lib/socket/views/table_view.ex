@@ -140,6 +140,7 @@ defmodule Socket.Views.TableView do
       avatar: seat.avatar,
       stack: seat.stack,
       waiting_for_bb: seat.waiting_for_bb,
+      wants_post: seat.wants_post,
       missed_blinds: seat.missed_blinds,
       # Запас времени публичен: соперник и так видит, что игрок думает
       # дольше обычного. А вот `preselect` — нет: заранее выбранный фолд
@@ -165,6 +166,7 @@ defmodule Socket.Views.TableView do
           waiting_for_bb: seat.waiting_for_bb,
           post_required: seat.post_required,
           can_post: seat.can_post,
+          wants_post: seat.wants_post,
           missed_blinds: seat.missed_blinds,
           time_bank: seat.time_bank,
           preselect: seat.preselect
