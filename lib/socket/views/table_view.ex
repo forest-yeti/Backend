@@ -16,6 +16,7 @@ defmodule Socket.Views.TableView do
   alias BlockPoker.CashGames.CashGameSetting
   alias BlockPoker.Engine.Card
   alias BlockPoker.Engine.Hand
+  alias BlockPoker.Engine.Stats
   alias BlockPoker.Tables.{RoomState, Seat}
   alias Socket.Views.LobbyView
 
@@ -116,7 +117,10 @@ defmodule Socket.Views.TableView do
       avatar: seat.avatar,
       stack: seat.stack,
       waiting_for_bb: seat.waiting_for_bb,
-      missed_blinds: seat.missed_blinds
+      missed_blinds: seat.missed_blinds,
+      # Показатели публичны: они выводятся из действий, которые и так видел
+      # весь стол. Проценты приходят из ядра посчитанными.
+      stats: Stats.summary(seat.stats)
     }
   end
 

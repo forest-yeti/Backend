@@ -202,6 +202,60 @@ defmodule BlockPoker.Tables.TableServerTest do
     end
   end
 
+  describe "показатели сессии" do
+    test "копятся по раздачам и уходят пушем в конце каждой" do
+      %{pid: pid, room_id: room_id} = start_room!()
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, TableServer.topic(room_id))
+
+      seat!(pid, "user-1", 1, 400)
+      seat!(pid, "user-2", 2, 400)
+      :ok = TableServer.fire_timer(pid, :button_draw)
+
+      play_hand_out(pid)
+      assert_received {:table_event, "stats_update", payload}
+      assert payload.seats[1].hands == 1
+
+      :ok = TableServer.fire_timer(pid, :next_hand)
+      play_hand_out(pid)
+
+      room = TableServer.state(pid)
+      assert room.seats[1].stats.hands == 2
+      assert room.seats[2].stats.hands == 2
+    end
+
+    test "уход с места обнуляет сессию, а вынужденный сит-аут — нет" do
+      %{pid: pid} = start_room!()
+
+      seat!(pid, "user-1", 1, 400)
+      seat!(pid, "user-2", 2, 400)
+      :ok = TableServer.fire_timer(pid, :button_draw)
+      play_hand_out(pid)
+
+      # Отключение и сит-аут — не конец сессии: игрок остаётся за столом.
+      :ok = TableServer.sit_out(pid, "user-1")
+      assert TableServer.state(pid).seats[1].stats.hands == 1
+
+      leave(pid, "user-1")
+      seat!(pid, "user-1", 1, 400)
+
+      assert TableServer.state(pid).seats[1].stats.hands == 0
+    end
+
+    test "показатели не достаются тому, кто сел на освободившееся место" do
+      %{pid: pid} = start_room!()
+
+      seat!(pid, "user-1", 1, 400)
+      seat!(pid, "user-2", 2, 400)
+      :ok = TableServer.fire_timer(pid, :button_draw)
+      play_hand_out(pid)
+
+      leave(pid, "user-1")
+      seat!(pid, "user-3", 1, 400)
+
+      assert TableServer.state(pid).seats[1].stats.hands == 0
+    end
+  end
+
   defp leave(pid, user_id) do
     {:ok, %{ref: ref}} = TableServer.begin_leave(pid, user_id)
     :ok = TableServer.finish_leave(pid, ref)

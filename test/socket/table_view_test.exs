@@ -40,6 +40,18 @@ defmodule Socket.Views.TableViewTest do
     refute json =~ "reservation"
   end
 
+  test "показатели видны по каждому месту, включая чужое", %{room: room} do
+    snapshot = TableView.render(room, "me")
+    stats = Map.new(snapshot.seats, &{&1.seat, &1.stats})
+
+    # Статистика публична: она выводится из действий, которые видел весь стол.
+    assert stats[1].hands == 0
+    assert stats[4].hands == 0
+    # Пустой выборки нет — процента тоже нет.
+    assert stats[4].vpip == nil
+    assert Jason.encode!(snapshot) =~ "\"vpip\""
+  end
+
   test "снапшот персональный: своё место помечено, чужое — нет", %{room: room} do
     mine = TableView.render(room, "me")
     theirs = TableView.render(room, "opponent")

@@ -18,7 +18,7 @@ defmodule BlockPoker.Tables.TableServer do
 
   use GenServer, restart: :temporary
 
-  alias BlockPoker.Engine.{ButtonDraw, Hand, Rng}
+  alias BlockPoker.Engine.{ButtonDraw, Hand, HandStats, Rng, Stats}
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.Tables.{RoomState, Seat, TableRegistry}
   alias Phoenix.PubSub
@@ -414,7 +414,15 @@ defmodule BlockPoker.Tables.TableServer do
     case state.game_mode.hand_setup(state.room) do
       {:ok, setup} ->
         {hand, events} = Hand.start(setup, state.rng, rake: rake_fun(state))
-        state = put_room(state, %{state.room | phase: :hand, hand: hand, showdown: nil})
+
+        state =
+          put_room(state, %{
+            state.room
+            | phase: :hand,
+              hand: hand,
+              hand_stats: HandStats.new(hand),
+              showdown: nil
+          })
 
         broadcast(state, "hand_started", %{
           button_seat: setup.button_seat,
@@ -464,7 +472,8 @@ defmodule BlockPoker.Tables.TableServer do
   # Пока раздача идёт, источник правды по стекам — она: комната только
   # зеркалит их, чтобы снапшот и лобби не разъезжались с движком.
   defp apply_hand(state, hand, events) do
-    state = put_room(state, sync_seats(%{state.room | hand: hand}, hand))
+    room = %{state.room | hand: hand, hand_stats: track_stats(state.room.hand_stats, events)}
+    state = put_room(state, sync_seats(room, hand))
     state = Enum.reduce(events, state, &emit/2)
 
     cond do
@@ -496,7 +505,8 @@ defmodule BlockPoker.Tables.TableServer do
   defp finish_hand(state, hand) do
     state = state |> cancel_timer(:action) |> cancel_timer(:runout)
 
-    room = %{state.room | hand: nil, deadline_at: nil, showdown: nil}
+    state = record_stats(state, hand)
+    room = %{state.room | hand: nil, hand_stats: nil, deadline_at: nil, showdown: nil}
     room = state.game_mode.on_hand_finished(room, hand.results)
     room = %{room | button_seat: next_button(room)}
     room = %{room | big_blind_seat: big_blind_seat_for(room)}
@@ -514,6 +524,26 @@ defmodule BlockPoker.Tables.TableServer do
     else
       state
     end
+  end
+
+  defp track_stats(hand_stats, events),
+    do: Enum.reduce(events, hand_stats, &HandStats.track(&2, &1))
+
+  # Показатели сессии обновляются раз в раздачу, и ровно тогда же уходят
+  # клиенту: между раздачами меняться им не от чего.
+  defp record_stats(state, hand) do
+    owners = Map.new(hand.players, fn {seat, player} -> {seat, player.id} end)
+    deltas = HandStats.finish(state.room.hand_stats, hand)
+    state = put_room(state, RoomState.record_stats(state.room, deltas, owners))
+    broadcast(state, "stats_update", %{seats: stats_payload(state.room)})
+    state
+  end
+
+  defp stats_payload(room) do
+    room
+    |> RoomState.seats()
+    |> Enum.filter(&Seat.occupied?/1)
+    |> Map.new(&{&1.number, Stats.summary(&1.stats)})
   end
 
   # Проигравший всё не встаёт молча: кэш даёт ему время докупиться.

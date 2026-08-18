@@ -12,7 +12,7 @@ defmodule BlockPoker.Tables.RoomState do
   """
 
   alias BlockPoker.CashGames.CashGameSetting
-  alias BlockPoker.Engine.EntryRules
+  alias BlockPoker.Engine.{EntryRules, Stats}
   alias BlockPoker.Tables.Seat
 
   @type phase :: :idle | :button_draw | :hand
@@ -35,6 +35,7 @@ defmodule BlockPoker.Tables.RoomState do
           recent_leavers: %{Ecto.UUID.t() => non_neg_integer()},
           button_draw: button_draw() | nil,
           hand: term() | nil,
+          hand_stats: term() | nil,
           deadline_at: integer() | nil,
           showdown: map() | nil
         }
@@ -67,6 +68,9 @@ defmodule BlockPoker.Tables.RoomState do
     button_draw: nil,
     # Идущая раздача (`Engine.Hand`) и дедлайн текущего хода в монотонных мс.
     hand: nil,
+    # Счётчик показателей идущей раздачи (`Engine.HandStats`): по её концу
+    # прибавка расходится по местам и обнуляется.
+    hand_stats: nil,
     deadline_at: nil,
     # Открытые при олл-ине карты и шансы: игрок, подключившийся в середине
     # доводки, должен видеть то же, что и остальные.
@@ -104,6 +108,29 @@ defmodule BlockPoker.Tables.RoomState do
   @spec find_seat(t(), Ecto.UUID.t()) :: Seat.t() | nil
   def find_seat(state, user_id) do
     state |> seats() |> Enum.find(&(&1.user_id == user_id))
+  end
+
+  @doc """
+  Разнести показатели сыгранной раздачи по местам.
+
+  `owners` — кто сидел на месте, когда раздача начиналась. Сверка обязательна:
+  игрок с нулевым стеком вправе встать посреди раздачи, и к её концу за
+  местом может сидеть уже другой человек. Чужие показатели ему не достаются.
+  """
+  @spec record_stats(t(), %{pos_integer() => Stats.t()}, %{pos_integer() => Ecto.UUID.t()}) :: t()
+  def record_stats(%__MODULE__{} = state, deltas, owners) do
+    seats =
+      Enum.reduce(deltas, state.seats, fn {number, delta}, seats ->
+        seat = Map.get(seats, number)
+
+        if seat != nil and seat.user_id != nil and seat.user_id == Map.get(owners, number) do
+          Map.put(seats, number, %{seat | stats: Stats.merge(seat.stats, delta)})
+        else
+          seats
+        end
+      end)
+
+    %{state | seats: seats}
   end
 
   @doc "Фишки, лежащие в комнате. Основа инварианта денег (§4 задачи 3)."

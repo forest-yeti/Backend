@@ -20,7 +20,16 @@ defmodule BlockPoker.Tables.Seat do
 
   `waiting_for_bb`, `missed_blinds` и `can_post` — вход в игру (§6 задачи 3).
   Само решение принимает `Engine.EntryRules`, здесь только его результат.
+
+  `stats` — показатели игрока за сессию. Они лежат **в месте**, а не в
+  отдельной таблице комнаты, потому что правило сброса в кэше ровно такое:
+  сессия заканчивается уходом с места. `Seat.free/1` отдаёт чистое место —
+  и счётчики обнуляются сами, без отдельной уборки. В турнире правило другое
+  (сессия — весь турнир, пересадка её не прерывает), и держателем там будет
+  не место; `Engine.Stats` от этого выбора не зависит.
   """
+
+  alias BlockPoker.Engine.Stats
 
   @type status :: :empty | :reserved | :playing | :sitting_out | :disconnected | :leaving
 
@@ -36,7 +45,8 @@ defmodule BlockPoker.Tables.Seat do
           post_required: boolean(),
           can_post: boolean(),
           missed_blinds: non_neg_integer(),
-          hands_sat_out: non_neg_integer()
+          hands_sat_out: non_neg_integer(),
+          stats: Stats.t()
         }
 
   @enforce_keys [:number]
@@ -52,7 +62,8 @@ defmodule BlockPoker.Tables.Seat do
     post_required: false,
     can_post: false,
     missed_blinds: 0,
-    hands_sat_out: 0
+    hands_sat_out: 0,
+    stats: %Stats{}
   ]
 
   @spec new(pos_integer()) :: t()
