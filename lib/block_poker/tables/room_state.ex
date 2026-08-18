@@ -32,7 +32,20 @@ defmodule BlockPoker.Tables.RoomState do
           hands_played: non_neg_integer(),
           game_started?: boolean(),
           action_seq: non_neg_integer(),
-          recent_leavers: %{Ecto.UUID.t() => non_neg_integer()}
+          recent_leavers: %{Ecto.UUID.t() => non_neg_integer()},
+          button_draw: button_draw() | nil
+        }
+
+  @typedoc """
+  Идущий розыгрыш кнопки. Хранится в состоянии, а не только в событии:
+  игрок, посаженный через `quick_seat`, подключается к столу уже после
+  старта розыгрыша и иначе не увидел бы карт — а смысл процедуры в том,
+  чтобы он видел, что позиция досталась не по решению сервера.
+  """
+  @type button_draw :: %{
+          cards: [map()],
+          button_seat: pos_integer(),
+          ends_at: integer()
         }
 
   @enforce_keys [:room_id, :setting, :seats]
@@ -47,7 +60,8 @@ defmodule BlockPoker.Tables.RoomState do
     game_started?: false,
     hands_played: 0,
     action_seq: 0,
-    recent_leavers: %{}
+    recent_leavers: %{},
+    button_draw: nil
   ]
 
   @spec new(Ecto.UUID.t(), CashGameSetting.t()) :: t()

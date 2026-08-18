@@ -94,7 +94,7 @@ defmodule Socket.Channels.TableChannel do
 
   @impl true
   def handle_info({:table_event, event, payload}, socket) do
-    push(socket, event, payload)
+    push(socket, event, TableView.event(event, payload))
     {:noreply, socket}
   end
 

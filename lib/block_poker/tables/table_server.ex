@@ -326,7 +326,7 @@ defmodule BlockPoker.Tables.TableServer do
 
   defp do_timeout(:button_draw, state) do
     # Раздача стартует здесь (задача 4). Пока фиксируем результат розыгрыша.
-    room = %{state.room | phase: :idle}
+    room = %{state.room | phase: :idle, button_draw: nil}
     state = put_room(state, room)
     broadcast(state, "button_ready", %{button_seat: room.button_seat})
     state
@@ -390,16 +390,22 @@ defmodule BlockPoker.Tables.TableServer do
     variant = VariantRegistry.fetch!(state.room.setting.game_type)
     {button_seat, drawn, rng} = ButtonDraw.draw(seats, variant, state.rng)
 
+    animation_ms = state.room.setting.button_draw_animation_ms
+
     room = %{
       state.room
       | button_seat: button_seat,
         big_blind_seat: big_blind_seat(button_seat, seats),
         game_started?: true,
-        phase: :button_draw
+        phase: :button_draw,
+        button_draw: %{
+          cards: drawn,
+          button_seat: button_seat,
+          ends_at: System.monotonic_time(:millisecond) + animation_ms
+        }
     }
 
     state = %{state | room: room, rng: rng}
-    animation_ms = state.room.setting.button_draw_animation_ms
 
     broadcast(state, "button_draw", %{
       cards: drawn,
@@ -419,6 +425,7 @@ defmodule BlockPoker.Tables.TableServer do
         | game_started?: false,
           button_seat: nil,
           big_blind_seat: nil,
+          button_draw: nil,
           phase: :idle
       }
 

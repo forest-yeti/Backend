@@ -14,6 +14,7 @@ defmodule Socket.Views.TableView do
   """
 
   alias BlockPoker.CashGames.CashGameSetting
+  alias BlockPoker.Engine.Card
   alias BlockPoker.Tables.{RoomState, Seat}
   alias Socket.Views.LobbyView
 
@@ -34,8 +35,40 @@ defmodule Socket.Views.TableView do
       hands_played: room.hands_played,
       visuals: LobbyView.visuals(room.setting),
       seats: room |> RoomState.seats() |> Enum.map(&seat(&1, user_id)),
+      button_draw: button_draw(room),
       you: you(room, user_id)
     }
+  end
+
+  # Розыгрыш кнопки в снапшоте: игрок, севший через `quick_seat`, подключается
+  # к столу уже после старта розыгрыша и событие не застаёт. Карты открытые
+  # и одинаковые для всех — прятать их нельзя.
+  defp button_draw(%RoomState{button_draw: nil}), do: nil
+
+  defp button_draw(%RoomState{button_draw: draw}) do
+    remaining = draw.ends_at - System.monotonic_time(:millisecond)
+
+    if remaining > 0 do
+      %{cards: drawn_cards(draw.cards), button_seat: draw.button_seat, animation_ms: remaining}
+    else
+      nil
+    end
+  end
+
+  @doc """
+  Событие стола на пути в сокет. Карта внутри ядра — целое число ради
+  скорости эквити-калькулятора; наружу она обязана уходить парой
+  `%{rank, suit}`, иначе клиент получает бессмысленное `18`.
+  """
+  @spec event(String.t(), map()) :: map()
+  def event("button_draw", payload) do
+    Map.update(payload, :cards, [], &drawn_cards/1)
+  end
+
+  def event(_name, payload), do: payload
+
+  defp drawn_cards(cards) do
+    Enum.map(cards, fn %{seat: seat, card: card} -> %{seat: seat, card: Card.to_map(card)} end)
   end
 
   @spec seat(Seat.t(), Ecto.UUID.t()) :: map()

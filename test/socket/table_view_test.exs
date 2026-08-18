@@ -59,6 +59,25 @@ defmodule Socket.Views.TableViewTest do
     assert villain.avatar == "/b.png"
   end
 
+  test "карта уходит парой rank/suit, а не внутренним числом", %{room: room} do
+    # Внутри ядра карта — целое ради скорости эквити; на границе с сокетом
+    # она обязана стать %{rank, suit}, иначе клиент получит бессмысленное 18.
+    event =
+      TableView.event("button_draw", %{
+        button_seat: 1,
+        animation_ms: 3000,
+        cards: [%{seat: 1, card: 18}, %{seat: 4, card: 4}]
+      })
+
+    assert event.cards == [
+             %{seat: 1, card: %{rank: 6, suit: "D"}},
+             %{seat: 4, card: %{rank: 3, suit: "S"}}
+           ]
+
+    # Событие без карт проходит насквозь и ничего не выдумывает.
+    assert TableView.event("seat_left", %{room_id: room.room_id}) == %{room_id: room.room_id}
+  end
+
   test "стеки и статусы видны всем — это публичная информация", %{room: room} do
     snapshot = TableView.render(room, "me")
 
