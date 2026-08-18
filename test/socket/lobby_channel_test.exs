@@ -90,6 +90,14 @@ defmodule Socket.Channels.LobbyChannelTest do
     assert Enum.count(shown.rooms, &(&1.seats_taken < &1.max_players)) == 1
   end
 
+  test "ping отвечает и в лобби: замер не привязан к столу" do
+    %{channel: channel} = join_lobby()
+    sent_at = System.system_time(:millisecond)
+
+    ref = push(channel, "ping", %{"t" => sent_at})
+    assert_reply ref, :ok, %{client_time: ^sent_at}
+  end
+
   test "неизвестный шаблон отвергается кодом", %{buy_in: buy_in} do
     %{channel: channel} = join_lobby()
 

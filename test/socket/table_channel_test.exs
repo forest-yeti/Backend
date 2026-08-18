@@ -337,6 +337,27 @@ defmodule Socket.Channels.TableChannelTest do
     assert_reply ref, :error, %{code: "post_not_available"}
   end
 
+  test "ping возвращает метку клиента и время сервера", %{room_id: room_id} do
+    %{channel: channel} = connect_player(room_id)
+    sent_at = System.system_time(:millisecond)
+
+    ref = push(channel, "ping", %{"t" => sent_at})
+    assert_reply ref, :ok, pong
+
+    # Метка возвращается как есть: круговую задержку считает клиент, у него
+    # одни часы на оба конца замера.
+    assert pong.client_time == sent_at
+    assert is_integer(pong.server_time)
+  end
+
+  test "ping работает и без метки — тогда это просто проверка живости", %{room_id: room_id} do
+    %{channel: channel} = connect_player(room_id)
+
+    ref = push(channel, "ping", %{})
+    assert_reply ref, :ok, %{client_time: nil, server_time: server_time}
+    assert is_integer(server_time)
+  end
+
   test "table_state отдаёт снапшот с местом игрока", %{room_id: room_id, buy_in: buy_in} do
     %{channel: channel} = connect_player(room_id)
     ref = push(channel, "join_seat", %{"seat" => 5, "buy_in" => buy_in})

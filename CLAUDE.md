@@ -260,6 +260,7 @@ BlockPoker.Supervisor (:one_for_one)
 "post_blind"  %{post: true}            # не ждать большого блайнда
 "sit_out"     %{}
 "chat"        %{text: "..."}
+"ping"        %{t: 1755528000123}      # замер задержки, любой топик
 ```
 
 Сервер → клиент:

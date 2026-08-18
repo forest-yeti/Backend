@@ -75,6 +75,23 @@ defmodule Socket.Protocol.Message do
   def entry(%{"entry" => "post"}), do: :post
   def entry(_payload), do: :wait_bb
 
+  @doc """
+  Ответ на измерение задержки.
+
+  Ядро тут ни при чём: замер — свойство соединения, а не игры, поэтому
+  вся «логика» сводится к тому, чтобы вернуть клиенту его же метку и
+  добавить своё время. Круговую задержку считает клиент: только у него
+  есть оба конца замера, и только его часы участвуют в обеих отметках.
+
+  Серверное время отдаётся отдельным полем — по нему клиент оценивает
+  расхождение часов. Игровые сроки на нём считать нельзя: дедлайны ходов
+  приходят остатком в миллисекундах и в чужих часах не нуждаются.
+  """
+  @spec pong(map()) :: map()
+  def pong(payload) do
+    %{client_time: Map.get(payload, "t"), server_time: System.system_time(:millisecond)}
+  end
+
   @doc "Результат вызова контекста → ответ канала."
   @spec reply(term(), Phoenix.Socket.t()) :: {:reply, term(), Phoenix.Socket.t()}
   def reply(:ok, socket), do: {:reply, :ok, socket}

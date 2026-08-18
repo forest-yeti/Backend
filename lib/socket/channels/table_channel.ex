@@ -79,6 +79,11 @@ defmodule Socket.Channels.TableChannel do
     |> Message.reply(socket)
   end
 
+  # Замер задержки: канал отвечает сам, не тревожа ни комнату, ни контекст.
+  def handle_in("ping", payload, socket) do
+    {:reply, {:ok, Message.pong(payload)}, socket}
+  end
+
   def handle_in("chat", payload, socket) do
     socket.assigns.room_id
     |> Tables.chat(socket.assigns.user_id, Map.get(payload, "text"))

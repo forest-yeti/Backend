@@ -43,6 +43,11 @@ defmodule Socket.Channels.LobbyChannel do
     end
   end
 
+  # Замер задержки: канал отвечает сам, не тревожа ни комнату, ни контекст.
+  def handle_in("ping", payload, socket) do
+    {:reply, {:ok, Message.pong(payload)}, socket}
+  end
+
   def handle_in("quick_seat", payload, socket) do
     with {:ok, setting_id} <- Message.fetch_id(payload, "setting_id"),
          {:ok, buy_in} <- Message.fetch_amount(payload, "buy_in") do
