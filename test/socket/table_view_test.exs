@@ -40,6 +40,18 @@ defmodule Socket.Views.TableViewTest do
     refute json =~ "reservation"
   end
 
+  test "тайминги комнаты приходят в снапшоте, а не зашиты в клиент", %{room: room} do
+    snapshot = TableView.render(room, "me")
+
+    # Клиенту нечего хардкодить: и обычное время на ход, и потолок банка
+    # принадлежат шаблону комнаты и в разных форматах разные.
+    assert snapshot.timings.action_timeout_ms == room.setting.action_timeout_ms
+    assert snapshot.timings.time_bank_ms == room.setting.time_bank_ms
+    assert snapshot.timings.time_bank_refill == room.setting.time_bank_refill
+    assert snapshot.timings.disconnect_grace_ms == room.setting.disconnect_grace_ms
+    assert snapshot.timings.rebuy_prompt_ms == room.setting.rebuy_prompt_ms
+  end
+
   test "чужой преселект в снапшот не попадает", %{room: room} do
     {:ok, room, _seat} = RoomState.set_preselect(room, "opponent", :fold)
 

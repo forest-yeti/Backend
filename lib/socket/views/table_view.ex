@@ -31,6 +31,7 @@ defmodule Socket.Views.TableView do
       big_blind: room.setting.big_blind,
       ante: room.setting.ante,
       max_players: room.setting.max_players,
+      timings: timings(room.setting),
       action_seq: room.action_seq,
       phase: room.phase,
       button_seat: room.button_seat,
@@ -42,6 +43,24 @@ defmodule Socket.Views.TableView do
       showdown: room.showdown,
       chat: room.chat,
       you: you(room, user_id)
+    }
+  end
+
+  @doc """
+  Тайминги комнаты: всё, по чему клиент рисует обратный отсчёт.
+
+  Они приходят в снапшоте, а не зашиты в клиент, потому что принадлежат
+  шаблону комнаты: у хедз-апа, турнира и sit-n-go они разные, а правит их
+  оператор в БД без релиза клиента.
+  """
+  @spec timings(CashGameSetting.t()) :: map()
+  def timings(setting) do
+    %{
+      action_timeout_ms: setting.action_timeout_ms,
+      time_bank_ms: setting.time_bank_ms,
+      time_bank_refill: setting.time_bank_refill,
+      disconnect_grace_ms: setting.disconnect_grace_ms,
+      rebuy_prompt_ms: setting.rebuy_prompt_ms
     }
   end
 
