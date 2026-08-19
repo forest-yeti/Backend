@@ -247,12 +247,18 @@ defmodule BlockPoker.Tables.Lobby do
     end
   end
 
+  # Закрыть комнату может только она сама: `seats_taken` в лобби — снимок,
+  # приехавший броадкастом, и он отстаёт от резерва места. Закрытие по нему
+  # уносит комнату вместе с игроком, который сел в этот самый момент, и его
+  # уже списанным бай-ином.
   defp close_room(state, room) do
-    if room_closable?(room) do
-      TableSupervisor.stop_room(room.pid)
-      %{state | rooms: Map.delete(state.rooms, room.room_id)}
-    else
-      drain_room(state, room)
+    case TableServer.close_if_idle(room.pid) do
+      :ok ->
+        TableSupervisor.stop_room(room.pid)
+        %{state | rooms: Map.delete(state.rooms, room.room_id)}
+
+      {:error, :busy} ->
+        drain_room(state, room)
     end
   end
 
@@ -267,8 +273,6 @@ defmodule BlockPoker.Tables.Lobby do
     end
   end
 
-  defp room_closable?(room), do: room.seats_taken == 0
-
   defp update_room(state, summary) do
     case Map.fetch(state.rooms, summary.room_id) do
       :error ->
@@ -277,7 +281,11 @@ defmodule BlockPoker.Tables.Lobby do
       {:ok, room} ->
         room = %{room | seats_taken: summary.seats_taken, draining?: summary.draining?}
 
-        if room.draining? and room.seats_taken == 0 do
+        # Опустевшая `:draining`-комната уходит — но спрашивают об этом её,
+        # а не снапшот: между рассылкой «мест занято 0» и этой проверкой
+        # комната успевает принять резерв.
+        if room.draining? and room.seats_taken == 0 and
+             TableServer.close_if_idle(room.pid) == :ok do
           TableSupervisor.stop_room(room.pid)
           %{state | rooms: Map.delete(state.rooms, room.room_id)}
         else

@@ -46,6 +46,16 @@ defmodule BlockPoker.Tables.Seat do
 
   @type status :: :empty | :reserved | :playing | :sitting_out | :disconnected | :leaving
 
+  @typedoc """
+  Последняя докупка места: её ключ и во что она превратилась.
+
+  `:pending` — деньги ушли из кошелька (или уходят прямо сейчас), фишки ещё
+  не зачислены; `:settled` — зачислены. Ключ переживает зачисление именно
+  ради повторного вызова: списание по нему уже случилось, и повтор обязан
+  ответить «готово», а не вернуть деньги, которых на столе нет.
+  """
+  @type add_chips :: %{ref: String.t(), amount: pos_integer(), status: :pending | :settled}
+
   @type t :: %__MODULE__{
           number: pos_integer(),
           user_id: Ecto.UUID.t() | nil,
@@ -65,6 +75,7 @@ defmodule BlockPoker.Tables.Seat do
           dead_post: non_neg_integer(),
           time_bank: non_neg_integer(),
           preselect: Preselect.t() | nil,
+          add_chips: add_chips() | nil,
           chat_sent_at: [integer()],
           reacted_at: integer() | nil,
           stats: Stats.t()
@@ -95,6 +106,10 @@ defmodule BlockPoker.Tables.Seat do
     dead_post: 0,
     time_bank: 0,
     preselect: nil,
+    # Докупка, начатая с этого места: ключ идемпотентности и её судьба.
+    # Живёт в месте, а не в комнате, потому что докупка принадлежит игроку
+    # за этим креслом и уходит вместе с ним (`free/1`).
+    add_chips: nil,
     # Отметки последних сообщений игрока: по ним считается частота (`Chat`).
     chat_sent_at: [],
     # Момент последней реакции (монотонные мс): по нему считается кулдаун

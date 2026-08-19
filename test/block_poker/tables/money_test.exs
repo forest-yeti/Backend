@@ -166,7 +166,7 @@ defmodule BlockPoker.Tables.MoneyTest do
 
     before = balance(user)
 
-    {:ok, ref} = TableServer.validate_add_chips(pid, user.id, 100)
+    {:ok, ref} = TableServer.begin_add_chips(pid, user.id, 100)
     room = TableServer.state(pid)
     :ok = GameMode.Cash.take_buy_in(room, user.id, 100, ref)
     assert balance(user) == before - 100
@@ -180,6 +180,30 @@ defmodule BlockPoker.Tables.MoneyTest do
 
     assert balance(user) == before
     assert Enum.count(entries(user), &(&1.type == :cash_out)) == 1
+  end
+
+  test "двойной клик по «докупить» списывает деньги один раз", %{user: user} do
+    # Двойной клик — это два запроса, оба успевшие пройти проверку до того,
+    # как первый зачислил фишки. Через `add_chips/3` его не воспроизвести:
+    # вызов синхронный, поэтому шаги разложены руками в том же порядке.
+    %{room_id: room_id, pid: pid, buy_in: buy_in} = start_test_room(%{auto_start: false})
+    {:ok, _result} = Tables.join_seat(room_id, user.id, 3, buy_in)
+
+    before = balance(user)
+
+    {:ok, first} = TableServer.begin_add_chips(pid, user.id, 100)
+    {:ok, second} = TableServer.begin_add_chips(pid, user.id, 100)
+    assert first == second, "второй клик получил новый ключ идемпотентности"
+
+    :ok = GameMode.Cash.take_buy_in(TableServer.state(pid), user.id, 100, first)
+    :ok = GameMode.Cash.take_buy_in(TableServer.state(pid), user.id, 100, second)
+
+    assert {:ok, _result} = Tables.commit_add_chips(pid, room_id, user.id, 100, first)
+    assert {:ok, _result} = Tables.commit_add_chips(pid, room_id, user.id, 100, second)
+
+    assert balance(user) == before - 100, "докупка списана дважды"
+    assert Enum.count(entries(user), &(&1.type == :buy_in and &1.amount == -100)) == 1
+    assert RoomState.chips_in_play(TableServer.state(pid)) == buy_in + 100
   end
 
   test "quick_seat сажает по шаблону и списывает бай-ин один раз", %{user: user} do

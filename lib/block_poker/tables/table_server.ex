@@ -90,16 +90,27 @@ defmodule BlockPoker.Tables.TableServer do
   @spec cancel_leave(GenServer.server(), String.t(), non_neg_integer()) :: :ok
   def cancel_leave(room, ref, stack), do: GenServer.call(room, {:cancel_leave, ref, stack})
 
-  @spec validate_add_chips(GenServer.server(), Ecto.UUID.t(), pos_integer()) ::
+  @doc """
+  Первый шаг докупки: условия проверены, ключ идемпотентности закреплён
+  за местом. Повтор той же суммы до зачисления получает **тот же** ключ —
+  на нём и держится защита от двойного списания.
+  """
+  @spec begin_add_chips(GenServer.server(), Ecto.UUID.t(), pos_integer()) ::
           {:ok, String.t()} | {:error, atom()}
-  def validate_add_chips(room, user_id, amount) do
-    GenServer.call(room, {:validate_add_chips, user_id, amount})
+  def begin_add_chips(room, user_id, amount) do
+    GenServer.call(room, {:begin_add_chips, user_id, amount})
   end
 
-  @spec commit_add_chips(GenServer.server(), Ecto.UUID.t(), pos_integer()) ::
-          {:ok, Seat.t()} | {:error, atom()}
-  def commit_add_chips(room, user_id, amount) do
-    GenServer.call(room, {:commit_add_chips, user_id, amount})
+  @spec commit_add_chips(GenServer.server(), Ecto.UUID.t(), String.t()) ::
+          {:ok, Seat.t()} | {:already_credited, Seat.t()} | {:error, atom()}
+  def commit_add_chips(room, user_id, ref) do
+    GenServer.call(room, {:commit_add_chips, user_id, ref})
+  end
+
+  @doc "Докупка сорвалась и деньги возвращены: снять ключ с места."
+  @spec abort_add_chips(GenServer.server(), Ecto.UUID.t(), String.t()) :: :ok
+  def abort_add_chips(room, user_id, ref) do
+    GenServer.call(room, {:abort_add_chips, user_id, ref})
   end
 
   @spec sit_out(GenServer.server(), Ecto.UUID.t()) :: :ok | {:error, atom()}
@@ -151,6 +162,21 @@ defmodule BlockPoker.Tables.TableServer do
   @doc "Перевод комнаты в `:draining`: шаблон выключен, новых игроков не пускаем."
   @spec drain(GenServer.server()) :: :ok
   def drain(room), do: GenServer.call(room, :drain)
+
+  @doc """
+  Запереть комнату под закрытие, если ей нечего терять.
+
+  Решает **сама комната**, а не лобби по своему кэшу занятости: кэш приходит
+  асинхронным `{:room_changed, ...}` и отстаёт от резерва места, поэтому
+  «пусто» в лобби и «пусто» на самом деле — разные вещи, и между ними
+  помещается посадка с уже списанным бай-ином.
+
+  Успех переводит комнату в `:draining` тем же вызовом: после него `reserve`
+  отвечает `:room_closing`, и посадка не проскочит в зазор между ответом
+  и `terminate_child`.
+  """
+  @spec close_if_idle(GenServer.server()) :: :ok | {:error, :busy}
+  def close_if_idle(room), do: GenServer.call(room, :close_if_idle)
 
   @doc """
   Прогон таймера вручную — только для тестов: реальное время в тестах
@@ -332,18 +358,15 @@ defmodule BlockPoker.Tables.TableServer do
     {:reply, :ok, put_room(state, RoomState.cancel_leave(state.room, ref, stack))}
   end
 
-  def handle_call({:validate_add_chips, user_id, amount}, _from, state) do
-    with {:ok, seat} <- fetch_active_seat(state.room, user_id),
-         :ok <- ensure_between_hands(state.room),
-         :ok <- RoomState.validate_buy_in(state.room, amount, seat.stack) do
-      {:reply, {:ok, new_ref()}, state}
-    else
+  def handle_call({:begin_add_chips, user_id, amount}, _from, state) do
+    case RoomState.begin_add_chips(state.room, user_id, amount, new_ref()) do
+      {:ok, room, ref} -> {:reply, {:ok, ref}, put_room(state, room)}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
-  def handle_call({:commit_add_chips, user_id, amount}, _from, state) do
-    case RoomState.add_chips(state.room, user_id, amount) do
+  def handle_call({:commit_add_chips, user_id, ref}, _from, state) do
+    case RoomState.commit_add_chips(state.room, user_id, ref) do
       {:ok, room, seat} ->
         state =
           state |> put_room(room) |> cancel_timer({:rebuy, seat.number}) |> maybe_start_game()
@@ -352,9 +375,19 @@ defmodule BlockPoker.Tables.TableServer do
         broadcast(state, "chips_added", %{seat: seat.number, stack: seat.stack})
         {:reply, {:ok, seat}, state}
 
+      # Ключ уже отработал: фишки на столе, второй раз их зачислять нечего
+      # и возвращать нечего. Повтор отличается от первого вызова только тем,
+      # что стол уже ничего не меняет.
+      {:already_credited, seat} ->
+        {:reply, {:already_credited, seat}, state}
+
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
+  end
+
+  def handle_call({:abort_add_chips, user_id, ref}, _from, state) do
+    {:reply, :ok, put_room(state, RoomState.abort_add_chips(state.room, user_id, ref))}
   end
 
   def handle_call({:sit_out, user_id}, _from, state) do
@@ -413,6 +446,14 @@ defmodule BlockPoker.Tables.TableServer do
     state = put_room(state, RoomState.mark_draining(state.room))
     announce(state)
     {:reply, :ok, state}
+  end
+
+  def handle_call(:close_if_idle, _from, state) do
+    if RoomState.closable?(state.room) do
+      {:reply, :ok, put_room(state, RoomState.mark_draining(state.room))}
+    else
+      {:reply, {:error, :busy}, state}
+    end
   end
 
   def handle_call({:fire_timer, key}, _from, state) do
@@ -551,6 +592,12 @@ defmodule BlockPoker.Tables.TableServer do
   defp start_hand(state, attempts) when attempts <= 0, do: state
 
   defp start_hand(state, attempts) do
+    # Кнопка проверяется **здесь**, а не только по концу прошлой раздачи:
+    # между раздачами игрок вправе встать, и кнопка остаётся на месте,
+    # которое эту раздачу не играет. Позиции тогда считаются от пустого
+    # кресла — блайнды платят не те.
+    state = put_room(state, ensure_button_in_play(state.room))
+
     # Намерения превращаются в решения ровно здесь: кнопка на месте, и
     # стоимость входа считается по той обстановке, в которой раздача пойдёт.
     state = put_room(state, RoomState.resolve_post_intents(state.room))
@@ -594,6 +641,20 @@ defmodule BlockPoker.Tables.TableServer do
   defp rotate_blinds(room) do
     room = %{room | button_seat: next_button(room)}
     %{room | big_blind_seat: big_blind_seat_for(room)}
+  end
+
+  # Кнопка стоит на месте, которое раздачу не играет (игрок встал, ушёл
+  # в сит-аут или проиграл стек) — двигаем её дальше по кругу вместе
+  # с блайндами. Стоящую на играющем месте кнопку не трогаем: раз в раздачу
+  # она уже сдвинулась в `finish_hand/2`.
+  defp ensure_button_in_play(room) do
+    seats = playing_seats(room)
+
+    if seats == [] or room.button_seat in seats do
+      room
+    else
+      rotate_blinds(room)
+    end
   end
 
   # Игрок, ждавший большого блайнда, вступает ровно тогда, когда блайнд
@@ -1067,25 +1128,6 @@ defmodule BlockPoker.Tables.TableServer do
 
   defp pick_seat(_room, seat) when is_integer(seat), do: {:ok, seat}
   defp pick_seat(_room, _seat), do: {:error, :invalid_seat}
-
-  # Место, с которого игрок уже встаёт, заморожено: докупленные в это окно
-  # фишки исчезли бы вместе с местом, а деньги из кошелька уже ушли.
-  defp fetch_active_seat(room, user_id) do
-    case fetch_seat(room, user_id) do
-      {:ok, %Seat{status: :leaving}} -> {:error, :leave_in_progress}
-      other -> other
-    end
-  end
-
-  defp fetch_seat(room, user_id) do
-    case RoomState.find_seat(room, user_id) do
-      nil -> {:error, :not_seated}
-      seat -> {:ok, seat}
-    end
-  end
-
-  defp ensure_between_hands(%RoomState{phase: :hand}), do: {:error, :hand_in_progress}
-  defp ensure_between_hands(_room), do: :ok
 
   defp reply_with(state, {:ok, room}) do
     state = put_room(state, room)

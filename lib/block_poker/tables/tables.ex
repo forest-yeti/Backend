@@ -184,14 +184,34 @@ defmodule BlockPoker.Tables do
   раздачу или потерять место по grace-периоду. Поэтому зачисление проверяет
   условия заново и вправе отказать — а списанные деньги в этом случае
   возвращаются в кошелёк.
+
+  Ключ идемпотентности выдаёт **комната** и закрепляет его за местом, а не
+  генерирует заново на каждый вызов: двойной клик по «докупить» проходит
+  проверку дважды до первого зачисления, и с новым ключом это два списания
+  подряд. Повтор той же суммы получает тот же ключ — кошелёк по нему уже
+  списал, а зачисление по отработавшему ключу возвращает «готово», а не
+  вторую пачку фишек.
   """
   @spec add_chips(Ecto.UUID.t(), Ecto.UUID.t(), pos_integer()) :: {:ok, map()} | {:error, error()}
   def add_chips(room_id, user_id, amount) do
     with {:ok, pid} <- fetch_room(room_id),
-         {:ok, ref} <- TableServer.validate_add_chips(pid, user_id, amount),
+         {:ok, ref} <- TableServer.begin_add_chips(pid, user_id, amount),
          room = TableServer.state(pid),
-         :ok <- GameMode.Cash.take_buy_in(room, user_id, amount, ref) do
+         :ok <- take_buy_in(pid, room, user_id, amount, ref) do
       commit_add_chips(pid, room_id, user_id, amount, ref)
+    end
+  end
+
+  # Списание не прошло: ключ надо снять с места, иначе следующая попытка
+  # упрётся в «предыдущая докупка ещё не завершена» при пустом кошельке.
+  defp take_buy_in(pid, room, user_id, amount, ref) do
+    case GameMode.Cash.take_buy_in(room, user_id, amount, ref) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        TableServer.abort_add_chips(pid, user_id, ref)
+        {:error, reason}
     end
   end
 
@@ -203,8 +223,14 @@ defmodule BlockPoker.Tables do
   @spec commit_add_chips(pid(), Ecto.UUID.t(), Ecto.UUID.t(), pos_integer(), String.t()) ::
           {:ok, map()} | {:error, error()}
   def commit_add_chips(pid, room_id, user_id, amount, ref) do
-    case TableServer.commit_add_chips(pid, user_id, amount) do
+    case TableServer.commit_add_chips(pid, user_id, ref) do
       {:ok, seat} ->
+        {:ok, %{room_id: room_id, seat: seat.number, stack: seat.stack}}
+
+      # Повтор по уже отработавшему ключу: фишки на столе с первого раза,
+      # второго списания не было (кошелёк снял дубль по `idempotency_key`),
+      # и возвращать нечего. Игроку это неотличимо от успеха — им и является.
+      {:already_credited, seat} ->
         {:ok, %{room_id: room_id, seat: seat.number, stack: seat.stack}}
 
       # Между проверкой и зачислением стол начал раздачу или место ушло —
@@ -212,6 +238,7 @@ defmodule BlockPoker.Tables do
       # ни на столе.
       {:error, reason} ->
         return_lost_chips(TableServer.state(pid), user_id, amount, ref)
+        TableServer.abort_add_chips(pid, user_id, ref)
         {:error, reason}
     end
   end

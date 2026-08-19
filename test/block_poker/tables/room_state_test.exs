@@ -202,7 +202,8 @@ defmodule BlockPoker.Tables.RoomStateTest do
 
     test "докупка возвращает его в игру", %{room: room} do
       room = RoomState.zero_stack(room, 2)
-      {:ok, room, seat} = RoomState.add_chips(room, "user-1", 400)
+      {:ok, room, "ref-1"} = RoomState.begin_add_chips(room, "user-1", 400, "ref-1")
+      {:ok, room, seat} = RoomState.commit_add_chips(room, "user-1", "ref-1")
 
       assert seat.status == :playing
       assert Map.fetch!(room.seats, 2).stack == 400
@@ -220,7 +221,8 @@ defmodule BlockPoker.Tables.RoomStateTest do
     {:ok, room, _seat} = RoomState.confirm(room, "res-1", 500, :wait_bb)
     room = %{room | phase: :hand}
 
-    assert {:error, :hand_in_progress} = RoomState.add_chips(room, "user-1", 100)
+    assert {:error, :hand_in_progress} =
+             RoomState.begin_add_chips(room, "user-1", 100, "ref-1")
   end
 
   test "комната закрывается только пустой и без фишек", %{room: room} do

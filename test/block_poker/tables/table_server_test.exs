@@ -497,10 +497,10 @@ defmodule BlockPoker.Tables.TableServerTest do
       # Стек уже уехал в кошелёк, подтверждения транзакции ещё нет.
       {:ok, %{ref: ref, stack: 400}} = TableServer.begin_leave(pid, "user-1")
 
-      assert {:error, :leave_in_progress} =
-               TableServer.validate_add_chips(pid, "user-1", 400)
+      assert {:error, :leave_in_progress} = TableServer.begin_add_chips(pid, "user-1", 400)
 
-      assert {:error, :leave_in_progress} = TableServer.commit_add_chips(pid, "user-1", 400)
+      assert {:error, :leave_in_progress} =
+               TableServer.commit_add_chips(pid, "user-1", "ref-1")
 
       :ok = TableServer.finish_leave(pid, ref)
       assert chips_total(TableServer.state(pid)) == 400
@@ -649,6 +649,127 @@ defmodule BlockPoker.Tables.TableServerTest do
       # Второй раз за вход он не платит: разница только на блайндах раздачи.
       assert RoomState.chips_in_play(room) == 1200
       assert is_integer(stack_after_entry)
+    end
+  end
+
+  describe "кнопка между раздачами" do
+    test "кнопка не остаётся на месте, покинутом между раздачами" do
+      %{pid: pid} = start_room!()
+      seat!(pid, "user-1", 1, 400)
+      seat!(pid, "user-2", 3, 400)
+      seat!(pid, "user-3", 5, 400)
+      seat!(pid, "user-4", 6, 400)
+
+      # Несколько раздач подряд: подсевшие ждут большого блайнда, и пока он
+      # до них не дошёл, за столом играют не все. Уход кнопки виден только
+      # когда оставшихся хватает на раздачу без неё.
+      :ok = TableServer.fire_timer(pid, :button_draw)
+      play_hand_out(pid)
+
+      for _hand <- 1..4 do
+        :ok = TableServer.fire_timer(pid, :next_hand)
+        play_hand_out(pid)
+      end
+
+      room = TableServer.state(pid)
+      button = room.button_seat
+      leaving = Map.fetch!(room.seats, button)
+
+      # Уход разрешён между раздачами — и уходит именно тот, на ком кнопка.
+      leave(pid, leaving.user_id)
+
+      :ok = TableServer.fire_timer(pid, :next_hand)
+      room = TableServer.state(pid)
+
+      assert room.hand != nil, "раздача не началась"
+      refute room.button_seat == button, "кнопка осталась на пустом месте"
+
+      assert Map.has_key?(room.hand.players, room.button_seat),
+             "кнопка на месте, которое раздачу не играет"
+    end
+  end
+
+  describe "идемпотентность докупки" do
+    setup do
+      # Без автостарта: проверяется докупка, и раздача, начавшаяся под рукой,
+      # меняла бы стеки блайндами.
+      %{pid: pid} = start_room!(%{auto_start: false})
+      seat!(pid, "user-1", 1, 400)
+      seat!(pid, "user-2", 2, 400)
+      %{pid: pid}
+    end
+
+    test "двойной клик до зачисления получает тот же ключ", %{pid: pid} do
+      {:ok, first} = TableServer.begin_add_chips(pid, "user-1", 100)
+      {:ok, second} = TableServer.begin_add_chips(pid, "user-1", 100)
+
+      assert first == second, "второй клик выдал новый ключ — это второе списание"
+    end
+
+    test "зачисление по ключу происходит ровно один раз", %{pid: pid} do
+      {:ok, ref} = TableServer.begin_add_chips(pid, "user-1", 100)
+
+      assert {:ok, seat} = TableServer.commit_add_chips(pid, "user-1", ref)
+      assert seat.stack == 500
+
+      assert {:already_credited, seat} = TableServer.commit_add_chips(pid, "user-1", ref)
+      assert seat.stack == 500, "повтор зачислил фишки второй раз"
+      assert RoomState.chips_in_play(TableServer.state(pid)) == 900
+    end
+
+    test "другая сумма поверх незавершённой докупки отклоняется", %{pid: pid} do
+      {:ok, _ref} = TableServer.begin_add_chips(pid, "user-1", 100)
+
+      assert {:error, :add_chips_in_progress} = TableServer.begin_add_chips(pid, "user-1", 200)
+    end
+
+    test "сорвавшаяся докупка освобождает ключ", %{pid: pid} do
+      {:ok, ref} = TableServer.begin_add_chips(pid, "user-1", 100)
+      :ok = TableServer.abort_add_chips(pid, "user-1", ref)
+
+      assert {:ok, other} = TableServer.begin_add_chips(pid, "user-1", 200)
+      refute other == ref
+    end
+
+    test "после зачисления докупаться можно снова", %{pid: pid} do
+      {:ok, ref} = TableServer.begin_add_chips(pid, "user-1", 100)
+      {:ok, _seat} = TableServer.commit_add_chips(pid, "user-1", ref)
+
+      assert {:ok, next} = TableServer.begin_add_chips(pid, "user-1", 100)
+      refute next == ref
+      assert {:ok, seat} = TableServer.commit_add_chips(pid, "user-1", next)
+      assert seat.stack == 600
+    end
+  end
+
+  describe "закрытие комнаты" do
+    test "пустая комната запирается и больше никого не сажает" do
+      %{pid: pid} = start_room!()
+
+      assert :ok = TableServer.close_if_idle(pid)
+      assert TableServer.state(pid).draining?
+      assert {:error, :room_closing} = TableServer.reserve_seat(pid, "user-1", 1, 400)
+    end
+
+    test "комната с зарезервированным местом закрыться не даёт" do
+      %{pid: pid} = start_room!()
+      {:ok, _reservation} = TableServer.reserve_seat(pid, "user-1", 1, 400)
+
+      # Лобби об этом резерве ещё не знает: снапшот занятости приезжает
+      # броадкастом и отстаёт. Решает комната, и она отказывает.
+      assert {:error, :busy} = TableServer.close_if_idle(pid)
+      refute TableServer.state(pid).draining?
+    end
+
+    test "комната с фишками на уходящем месте закрыться не даёт" do
+      %{pid: pid} = start_room!()
+      seat!(pid, "user-1", 1, 400)
+      {:ok, %{ref: ref}} = TableServer.begin_leave(pid, "user-1")
+
+      assert {:error, :busy} = TableServer.close_if_idle(pid)
+
+      :ok = TableServer.finish_leave(pid, ref)
+      assert :ok = TableServer.close_if_idle(pid)
     end
   end
 

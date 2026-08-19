@@ -545,14 +545,70 @@ defmodule BlockPoker.Tables.RoomState do
     end
   end
 
-  @doc "Докупка. Разрешена между раздачами в любой момент, до `max_buy_in`."
-  @spec add_chips(t(), Ecto.UUID.t(), non_neg_integer()) ::
-          {:ok, t(), Seat.t()} | {:error, atom()}
-  def add_chips(state, user_id, amount) do
+  @doc """
+  Начало докупки: проверка условий и **закрепление ключа** за местом.
+
+  Ключ живёт в месте, а не выдаётся заново на каждый вызов, потому что между
+  проверкой и зачислением лежит поход в кошелёк. Двойной клик по «докупить»
+  успевает пройти проверку дважды **до** первого зачисления — с новым ключом
+  на каждый вызов это два списания подряд. Пока докупка не зачислена, повтор
+  на ту же сумму получает тот же ключ: кошелёк по нему уже списал и второй
+  раз не спишет.
+
+  Другая сумма поверх незавершённой докупки — не повтор, а второй запрос, и
+  он отклоняется: какая из двух сумм окажется на столе, иначе решала бы гонка.
+  """
+  @spec begin_add_chips(t(), Ecto.UUID.t(), pos_integer(), String.t()) ::
+          {:ok, t(), String.t()} | {:error, atom()}
+  def begin_add_chips(state, user_id, amount, ref) do
     with {:ok, seat} <- fetch_player(state, user_id),
          :ok <- ensure_between_hands(state),
+         {:ok, ref} <- reuse_ref(seat, amount, ref),
          :ok <- validate_buy_in(state, amount, seat.stack) do
-      seat = %{seat | stack: seat.stack + amount}
+      seat = %{seat | add_chips: %{ref: ref, amount: amount, status: :pending}}
+      {:ok, put_seat(state, seat), ref}
+    end
+  end
+
+  defp reuse_ref(%Seat{add_chips: %{status: :pending, amount: amount, ref: ref}}, amount, _new),
+    do: {:ok, ref}
+
+  defp reuse_ref(%Seat{add_chips: %{status: :pending}}, _amount, _new),
+    do: {:error, :add_chips_in_progress}
+
+  defp reuse_ref(%Seat{}, _amount, ref), do: {:ok, ref}
+
+  @doc """
+  Зачисление докупки. Разрешена между раздачами в любой момент, до `max_buy_in`.
+
+  Сумма берётся из закреплённого ключа, а не из аргумента: зачисляется ровно
+  то, что было списано. Повтор по уже зачисленному ключу — `:already_credited`,
+  а не второе зачисление и не ошибка: деньги по нему на столе, и возвращать
+  их вызывающему нечего.
+  """
+  @spec commit_add_chips(t(), Ecto.UUID.t(), String.t()) ::
+          {:ok, t(), Seat.t()} | {:already_credited, Seat.t()} | {:error, atom()}
+  def commit_add_chips(state, user_id, ref) do
+    with {:ok, seat} <- fetch_player(state, user_id) do
+      case seat.add_chips do
+        %{ref: ^ref, status: :pending, amount: amount} -> credit(state, seat, ref, amount)
+        %{ref: ^ref, status: :settled} -> {:already_credited, seat}
+        _other -> {:error, :add_chips_lost}
+      end
+    end
+  end
+
+  # Условия проверяются заново: пока деньги шли через кошелёк, стол успевает
+  # начать раздачу. Отказ здесь — это уже списанные фишки, и возвращает их
+  # вызывающий (`Tables.commit_add_chips/5`).
+  defp credit(state, seat, ref, amount) do
+    with :ok <- ensure_between_hands(state),
+         :ok <- validate_buy_in(state, amount, seat.stack) do
+      seat = %{
+        seat
+        | stack: seat.stack + amount,
+          add_chips: %{ref: ref, amount: amount, status: :settled}
+      }
 
       seat =
         if seat.stack > 0 and seat.status == :sitting_out,
@@ -560,6 +616,22 @@ defmodule BlockPoker.Tables.RoomState do
           else: seat
 
       {:ok, put_seat(state, seat), seat}
+    end
+  end
+
+  @doc """
+  Докупка не состоялась: ключ снимается с места, чтобы следующая попытка
+  не упёрлась в `:add_chips_in_progress`. Деньги к этому моменту уже
+  возвращены в кошелёк вызывающим.
+  """
+  @spec abort_add_chips(t(), Ecto.UUID.t(), String.t()) :: t()
+  def abort_add_chips(state, user_id, ref) do
+    case find_seat(state, user_id) do
+      %Seat{add_chips: %{ref: ^ref, status: :pending}} = seat ->
+        put_seat(state, %{seat | add_chips: nil})
+
+      _other ->
+        state
     end
   end
 
