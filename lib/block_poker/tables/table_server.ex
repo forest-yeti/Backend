@@ -18,7 +18,7 @@ defmodule BlockPoker.Tables.TableServer do
 
   use GenServer, restart: :temporary
 
-  alias BlockPoker.Engine.{ButtonDraw, Hand, HandStats, Preselect, Rng, Stats}
+  alias BlockPoker.Engine.{ButtonDraw, Hand, HandStats, Preselect, Rabbit, Rng, Stats}
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.Tables.{RoomState, Seat, TableRegistry}
   alias Phoenix.PubSub
@@ -29,6 +29,9 @@ defmodule BlockPoker.Tables.TableServer do
   # Пауза между улицами при доводке борта и перед следующей раздачей.
   @runout_step_ms 1_500
   @next_hand_ms 2_500
+  # Насколько показ rabbit-карт отодвигает следующую раздачу: ровно столько,
+  # чтобы их успели рассмотреть, и не настолько, чтобы стол простаивал.
+  @rabbit_extra_ms 1_000
 
   defmodule State do
     @moduledoc false
@@ -145,6 +148,10 @@ defmodule BlockPoker.Tables.TableServer do
   @doc "Открыть свои карты по желанию."
   @spec show_cards(GenServer.server(), Ecto.UUID.t()) :: :ok | {:error, atom()}
   def show_cards(room, user_id), do: GenServer.call(room, {:show_cards, user_id})
+
+  @doc "Показать карты, которые пришли бы дальше, если бы раздача доигралась."
+  @spec rabbit_hunt(GenServer.server(), Ecto.UUID.t()) :: :ok | {:error, atom()}
+  def rabbit_hunt(room, user_id), do: GenServer.call(room, {:rabbit_hunt, user_id})
 
   @doc "Ручной запуск стола в комнате без автостарта."
   @spec start_game(GenServer.server(), Ecto.UUID.t()) :: :ok | {:error, atom()}
@@ -321,6 +328,32 @@ defmodule BlockPoker.Tables.TableServer do
       {:reply, :ok, apply_hand(state, hand, events)}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  # Карты уходят **адресно каждому сидящему**, а не в общий топик: за столом
+  # их видят все игроки, наблюдатель — никто. Broadcast сделал бы обратное.
+  def handle_call({:rabbit_hunt, user_id}, _from, state) do
+    case RoomState.reveal_rabbit(state.room, user_id, now_ms(state), @rabbit_extra_ms) do
+      {:ok, room, runout} ->
+        state = put_room(state, room)
+
+        state =
+          Enum.reduce(
+            seated_users(room),
+            state,
+            &private(&2, &1, "rabbit_cards", %{streets: runout})
+          )
+
+        {:reply, :ok, extend_pause(state)}
+
+      # Карты уже открыты: повтор доигрывает только запросившему и паузу
+      # не двигает — иначе кнопка стала бы способом тормозить стол.
+      {:revealed, runout} ->
+        {:reply, :ok, private(state, user_id, "rabbit_cards", %{streets: runout})}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -614,7 +647,8 @@ defmodule BlockPoker.Tables.TableServer do
             | phase: :hand,
               hand: hand,
               hand_stats: HandStats.new(hand),
-              showdown: nil
+              showdown: nil,
+              rabbit: nil
           })
 
         broadcast(state, "hand_started", %{
@@ -820,6 +854,7 @@ defmodule BlockPoker.Tables.TableServer do
     room = state.game_mode.on_hand_finished(room, hand.results)
     room = %{room | button_seat: next_button(room)}
     room = %{room | big_blind_seat: big_blind_seat_for(room)}
+    room = put_rabbit(room, hand, now_ms(state))
 
     state =
       state
@@ -835,6 +870,27 @@ defmodule BlockPoker.Tables.TableServer do
       state
     end
   end
+
+  # Снимок заводится только там, где раздача кончилась фолдом на неполном
+  # борде: решает это чистый `Engine.Rabbit`, а не условие в оболочке.
+  defp put_rabbit(room, hand, now) do
+    case Rabbit.runout(hand) do
+      {:ok, runout} -> RoomState.put_rabbit(room, runout, now + @next_hand_ms)
+      {:error, _reason} -> RoomState.clear_rabbit(room)
+    end
+  end
+
+  # Пауза догоняет продлённое окно. Если следующая раздача не запланирована
+  # (игроков меньше двух, игра остановлена), двигать нечего.
+  defp extend_pause(%State{room: %RoomState{rabbit: rabbit}} = state) do
+    if Map.has_key?(state.timers, :next_hand) do
+      schedule(state, :next_hand, max(rabbit.expires_at - now_ms(state), 0))
+    else
+      state
+    end
+  end
+
+  defp seated_users(room), do: room |> RoomState.players() |> Enum.map(& &1.user_id)
 
   defp track_stats(hand_stats, events),
     do: Enum.reduce(events, hand_stats, &HandStats.track(&2, &1))

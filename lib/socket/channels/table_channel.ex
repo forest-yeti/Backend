@@ -102,6 +102,12 @@ defmodule Socket.Channels.TableChannel do
     |> Message.reply(socket)
   end
 
+  def handle_in("rabbit_hunt", _payload, socket) do
+    socket.assigns.room_id
+    |> Tables.rabbit_hunt(socket.assigns.user_id)
+    |> Message.reply(socket)
+  end
+
   def handle_in("leave_seat", _payload, socket) do
     socket.assigns.room_id
     |> Tables.leave_seat(socket.assigns.user_id)

@@ -46,7 +46,21 @@ defmodule BlockPoker.Tables.RoomState do
           time_bank_at: integer() | nil,
           chat: [Chat.message()],
           deadline_at: integer() | nil,
-          showdown: map() | nil
+          showdown: map() | nil,
+          rabbit: rabbit() | nil
+        }
+
+  @typedoc """
+  Снимок для rabbit hunting: карты недостающих улиц прошедшей раздачи.
+
+  Хранится **только результат** — сами карты, а не хвост колоды: остаток
+  колоды рядом с живой комнатой не нужен никому, а утечь может. Снимок
+  заводится по концу раздачи, живёт до старта следующей и обнуляется ею.
+  """
+  @type rabbit :: %{
+          runout: [map()],
+          expires_at: integer(),
+          revealed?: boolean()
         }
 
   @typedoc """
@@ -87,7 +101,9 @@ defmodule BlockPoker.Tables.RoomState do
     deadline_at: nil,
     # Открытые при олл-ине карты и шансы: игрок, подключившийся в середине
     # доводки, должен видеть то же, что и остальные.
-    showdown: nil
+    showdown: nil,
+    # Снимок rabbit hunting прошедшей раздачи; живёт паузу между раздачами.
+    rabbit: nil
   ]
 
   @spec new(Ecto.UUID.t(), CashGameSetting.t()) :: t()
@@ -372,6 +388,78 @@ defmodule BlockPoker.Tables.RoomState do
   @spec can_react?(t(), Ecto.UUID.t()) :: boolean()
   def can_react?(%__MODULE__{} = state, user_id) do
     match?({:ok, _seat}, fetch_player(state, user_id))
+  end
+
+  @doc """
+  Заложить снимок rabbit hunting на паузу между раздачами.
+
+  `runout` — уже посчитанные `Engine.Rabbit` карты, а не колода: комната
+  хранит ровно то, что имеет право показать.
+  """
+  @spec put_rabbit(t(), [map()], integer()) :: t()
+  def put_rabbit(%__MODULE__{} = state, runout, expires_at) do
+    %{state | rabbit: %{runout: runout, expires_at: expires_at, revealed?: false}}
+  end
+
+  @spec clear_rabbit(t()) :: t()
+  def clear_rabbit(%__MODULE__{} = state), do: %{state | rabbit: nil}
+
+  @doc """
+  Показать карты, которые пришли бы дальше.
+
+  Право проверяется **здесь**: смотреть может только занявший место, и
+  только пока идёт пауза после раздачи, законченной фолдом. Наблюдателю
+  отказ — за столом он не сидит.
+
+  Первый показ продлевает окно на `extra`: карты открылись всем сразу, и
+  следующая раздача не должна стартовать раньше, чем их успели увидеть.
+  Повторный запрос ничего не продлевает и новых карт не открывает — он
+  идемпотентен, иначе нажатие «ещё раз» откладывало бы игру бесконечно.
+  """
+  @spec reveal_rabbit(t(), Ecto.UUID.t(), integer(), non_neg_integer()) ::
+          {:ok, t(), [map()]} | {:revealed, [map()]} | {:error, atom()}
+  def reveal_rabbit(%__MODULE__{} = state, user_id, now, extra) do
+    with {:ok, _seat} <- fetch_player(state, user_id),
+         {:ok, rabbit} <- fetch_rabbit(state, now) do
+      if rabbit.revealed? do
+        {:revealed, rabbit.runout}
+      else
+        rabbit = %{rabbit | revealed?: true, expires_at: rabbit.expires_at + extra}
+        {:ok, %{state | rabbit: rabbit}, rabbit.runout}
+      end
+    end
+  end
+
+  @doc """
+  Что игрок видит про rabbit hunting: доступна ли кнопка и открытые карты.
+
+  Возвращается только сидящему — вызывается из личной части снапшота.
+  """
+  @spec rabbit_view(t(), integer()) :: map() | nil
+  def rabbit_view(%__MODULE__{} = state, now) do
+    case fetch_rabbit(state, now) do
+      {:ok, rabbit} ->
+        %{
+          available: not rabbit.revealed?,
+          expires_ms: rabbit.expires_at - now,
+          cards: if(rabbit.revealed?, do: rabbit.runout)
+        }
+
+      {:error, _reason} ->
+        nil
+    end
+  end
+
+  # Окно закрыто, если снимка нет, оно истекло или раздача уже идёт:
+  # во время раздачи показывать «что будет дальше» нельзя ни при каких
+  # обстоятельствах — это и есть та дырка, ради которой всё проверяется.
+  defp fetch_rabbit(%__MODULE__{rabbit: nil}, _now), do: {:error, :rabbit_unavailable}
+
+  defp fetch_rabbit(%__MODULE__{hand: hand}, _now) when not is_nil(hand),
+    do: {:error, :rabbit_unavailable}
+
+  defp fetch_rabbit(%__MODULE__{rabbit: rabbit}, now) do
+    if now < rabbit.expires_at, do: {:ok, rabbit}, else: {:error, :rabbit_unavailable}
   end
 
   @doc """

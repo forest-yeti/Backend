@@ -308,6 +308,16 @@ defmodule BlockPoker.Tables do
   @spec reactions() :: [String.t()]
   def reactions, do: Reactions.ids()
 
+  @doc """
+  Rabbit hunting: показать карты, которые пришли бы, доиграй раздача до
+  ривера. Доступно сидящим за столом в паузу после раздачи, законченной
+  фолдом; наблюдателю — нет.
+  """
+  @spec rabbit_hunt(Ecto.UUID.t(), Ecto.UUID.t()) :: :ok | {:error, error()}
+  def rabbit_hunt(room_id, user_id) do
+    with {:ok, pid} <- fetch_room(room_id), do: TableServer.rabbit_hunt(pid, user_id)
+  end
+
   @doc "Показать свои карты по желанию — сбросив или дойдя до вскрытия."
   @spec show_cards(Ecto.UUID.t(), Ecto.UUID.t()) :: :ok | {:error, error()}
   def show_cards(room_id, user_id) do

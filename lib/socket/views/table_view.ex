@@ -183,7 +183,10 @@ defmodule Socket.Views.TableView do
           # Право на ручной запуск считает ядро; роль игрока наружу не уходит
           # ни здесь, ни где-либо ещё.
           can_start_manual: RoomState.can_start_manual?(room, user_id),
-          can_react: RoomState.can_react?(room, user_id)
+          can_react: RoomState.can_react?(room, user_id),
+          # Rabbit hunting — только сидящему: наблюдатель этих карт не
+          # получает ни в снапшоте, ни событием.
+          rabbit: RoomState.rabbit_view(room, System.monotonic_time(:millisecond))
         }
         |> Map.merge(private_hand(room, seat.number))
     end

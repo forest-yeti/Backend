@@ -40,6 +40,7 @@ defmodule BlockPoker.ErrorCode do
           | :chat_too_long
           | :chat_rate_limited
           | :reaction_rate_limited
+          | :rabbit_unavailable
           | :wallet_not_found
           | :internal_error
 
@@ -77,6 +78,7 @@ defmodule BlockPoker.ErrorCode do
     chat_too_long: {422, "Сообщение слишком длинное"},
     chat_rate_limited: {429, "Слишком часто: подождите немного"},
     reaction_rate_limited: {429, "Реакцию можно отправить раз в минуту"},
+    rabbit_unavailable: {409, "Посмотреть карты сейчас нельзя"},
     wallet_not_found: {404, "Кошелёк не найден"},
     internal_error: {500, "Внутренняя ошибка"}
   }

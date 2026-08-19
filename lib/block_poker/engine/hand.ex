@@ -233,6 +233,27 @@ defmodule BlockPoker.Engine.Hand do
   def finished?(%__MODULE__{street: :complete}), do: true
   def finished?(%__MODULE__{}), do: false
 
+  @doc """
+  Улицы, которых борду не хватает до конца, и число карт на каждой.
+
+  Живёт здесь, а не у вызывающего: состав борда — правило варианта, и
+  второй его копии в кодовой базе быть не должно.
+  """
+  @spec board_plan(t()) :: [{street(), pos_integer()}]
+  def board_plan(%__MODULE__{board: board, variant: variant}) do
+    dealt = length(board)
+    target = variant.board_size()
+
+    [:flop, :turn, :river]
+    |> Enum.map_reduce(0, fn street, size ->
+      count = Map.fetch!(@board_cards, street)
+      {{street, size, count}, size + count}
+    end)
+    |> elem(0)
+    |> Enum.filter(fn {_street, size, count} -> size >= dealt and size + count <= target end)
+    |> Enum.map(fn {street, _size, count} -> {street, count} end)
+  end
+
   # --- действия -------------------------------------------------------------
 
   defp apply_action(hand, player, :fold) do
