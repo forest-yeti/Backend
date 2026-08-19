@@ -96,6 +96,14 @@ defmodule Socket.Protocol.Message do
   @spec reply(term(), Phoenix.Socket.t()) :: {:reply, term(), Phoenix.Socket.t()}
   def reply(:ok, socket), do: {:reply, :ok, socket}
   def reply({:ok, result}, socket) when is_map(result), do: {:reply, {:ok, result}, socket}
+
+  # Отказ с числом: столько миллисекунд осталось ждать. Клиент показывает
+  # таймер вместо ошибки — по кнопке, которая молча не работает, игрок жмёт
+  # ещё раз, и отказов становится больше.
+  def reply({:error, {code, retry_after_ms}}, socket) when is_integer(retry_after_ms) do
+    {:reply, {:error, error(code, %{retry_after_ms: retry_after_ms})}, socket}
+  end
+
   def reply({:error, code}, socket), do: error_reply(code, socket)
 
   @spec error_reply(atom(), Phoenix.Socket.t()) :: {:reply, {:error, map()}, Phoenix.Socket.t()}
@@ -107,9 +115,9 @@ defmodule Socket.Protocol.Message do
   Код ошибки → payload для клиента. Неизвестный контексту код наружу не
   уходит: клиент ветвится по закрытому списку, а не по случайному атому.
   """
-  @spec error(atom()) :: %{code: String.t(), message: String.t()}
-  def error(code) do
+  @spec error(atom(), map()) :: %{code: String.t(), message: String.t()}
+  def error(code, extra \\ %{}) do
     code = if ErrorCode.valid?(code), do: code, else: :internal_error
-    %{code: Atom.to_string(code), message: ErrorCode.message(code)}
+    Map.merge(%{code: Atom.to_string(code), message: ErrorCode.message(code)}, extra)
   end
 end

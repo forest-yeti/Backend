@@ -64,7 +64,7 @@ defmodule Socket.Channels.TableChannelTest do
     assert snapshot.room_id == room_id
     assert snapshot.max_players == 6
     assert length(snapshot.seats) == 6
-    assert snapshot.you == %{seated: false}
+    assert snapshot.you == %{seated: false, can_react: false}
     # Косметика стола приезжает вместе со снапшотом.
     assert snapshot.visuals.felt_color == setting.felt_color
   end
@@ -385,6 +385,71 @@ defmodule Socket.Channels.TableChannelTest do
 
     ref = push(channel, "post_blind", %{})
     assert_reply ref, :error, %{code: "post_not_available"}
+  end
+
+  test "реакция доезжает до всех за столом и держит кулдаун", %{
+    room_id: room_id,
+    buy_in: buy_in
+  } do
+    %{channel: first} = connect_player(room_id)
+    %{channel: second} = connect_player(room_id)
+
+    ref = push(first, "join_seat", %{"seat" => 1, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+    ref = push(second, "join_seat", %{"seat" => 2, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+
+    ref = push(first, "reaction", %{"id" => "fire"})
+    assert_reply ref, :ok, _payload
+
+    # Видят все в топике, включая самого отправителя.
+    assert_push "reaction", %{seat: 1, id: "fire"}
+
+    # Вторая в ту же минуту — отказ с остатком времени, а не молчание.
+    ref = push(first, "reaction", %{"id" => "gg"})
+    assert_reply ref, :error, %{code: "reaction_rate_limited", retry_after_ms: remaining}
+    assert remaining > 0
+
+    # Сосед не ограничен чужим кулдауном.
+    ref = push(second, "reaction", %{"id" => "gg"})
+    assert_reply ref, :ok, _payload
+  end
+
+  test "неизвестный id реакции отвергается", %{room_id: room_id, buy_in: buy_in} do
+    %{channel: channel} = connect_player(room_id)
+    ref = push(channel, "join_seat", %{"seat" => 1, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+
+    for id <- ["rocket", "🔥", "", nil] do
+      ref = push(channel, "reaction", %{"id" => id})
+      assert_reply ref, :error, %{code: "validation_failed"}
+    end
+  end
+
+  test "наблюдателю реакции недоступны", %{room_id: room_id} do
+    %{channel: channel} = connect_player(room_id)
+
+    ref = push(channel, "reaction", %{"id" => "fire"})
+    assert_reply ref, :error, %{code: "not_seated"}
+  end
+
+  test "реакция не переигрывается при реконнекте", %{room_id: room_id, buy_in: buy_in} do
+    %{channel: first} = connect_player(room_id)
+    ref = push(first, "join_seat", %{"seat" => 1, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+
+    ref = push(first, "reaction", %{"id" => "fire"})
+    assert_reply ref, :ok, _payload
+    assert_push "reaction", %{id: "fire"}
+
+    # Подключившийся следом получает снапшот без чужих смайликов.
+    %{channel: second} = connect_player(room_id)
+    ref = push(second, "table_state", %{})
+    assert_reply ref, :ok, snapshot
+
+    assert snapshot.reactions == BlockPoker.Reactions.ids()
+    refute snapshot.you.can_react
+    refute_push "reaction", _payload
   end
 
   test "ping возвращает метку клиента и время сервера", %{room_id: room_id} do

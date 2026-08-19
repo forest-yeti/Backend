@@ -14,6 +14,7 @@ defmodule BlockPoker.Tables.RoomState do
   alias BlockPoker.CashGames.CashGameSetting
   alias BlockPoker.Chat
   alias BlockPoker.Engine.{EntryRules, Preselect, Stats, TimeBank}
+  alias BlockPoker.Reactions
   alias BlockPoker.Tables.Seat
 
   @type phase :: :idle | :button_draw | :hand
@@ -345,6 +346,31 @@ defmodule BlockPoker.Tables.RoomState do
       state = put_seat(state, %{seat | chat_sent_at: sent_at})
       {:ok, %{state | chat: Chat.push(state.chat, message)}, message}
     end
+  end
+
+  @doc """
+  Реакция за столом: проверка кулдауна и событие для броадкаста.
+
+  Слать может любой занявший место — по тому же правилу, что и чат: реакция
+  всплывает над аватаром, а у наблюдателя аватара за столом нет. Ни в
+  историю, ни в снапшот она не попадает: реакция — жест, а не сообщение,
+  и подключившийся не должен получать пачку чужих смайликов залпом.
+  """
+  @spec push_reaction(t(), Ecto.UUID.t(), term(), integer(), DateTime.t()) ::
+          {:ok, t(), Reactions.event()} | {:error, atom() | {atom(), pos_integer()}}
+  def push_reaction(%__MODULE__{} = state, user_id, id, now, at) do
+    with {:ok, seat} <- fetch_player(state, user_id),
+         {:ok, id} <- Reactions.fetch(id),
+         {:ok, reacted_at} <- Reactions.throttle(seat.reacted_at, now) do
+      event = %{seat: seat.number, user_id: user_id, id: id, at: at}
+      {:ok, put_seat(state, %{seat | reacted_at: reacted_at}), event}
+    end
+  end
+
+  @doc "Может ли игрок слать реакции — тем же правилом, что и решает `push_reaction/5`."
+  @spec can_react?(t(), Ecto.UUID.t()) :: boolean()
+  def can_react?(%__MODULE__{} = state, user_id) do
+    match?({:ok, _seat}, fetch_player(state, user_id))
   end
 
   @doc """

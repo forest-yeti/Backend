@@ -37,6 +37,7 @@ defmodule BlockPoker.ErrorCode do
           | :hand_finished
           | :chat_too_long
           | :chat_rate_limited
+          | :reaction_rate_limited
           | :wallet_not_found
           | :internal_error
 
@@ -71,6 +72,7 @@ defmodule BlockPoker.ErrorCode do
     hand_finished: {409, "Раздача уже закончилась"},
     chat_too_long: {422, "Сообщение слишком длинное"},
     chat_rate_limited: {429, "Слишком часто: подождите немного"},
+    reaction_rate_limited: {429, "Реакцию можно отправить раз в минуту"},
     wallet_not_found: {404, "Кошелёк не найден"},
     internal_error: {500, "Внутренняя ошибка"}
   }

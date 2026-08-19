@@ -126,6 +126,11 @@ defmodule BlockPoker.Tables.TableServer do
           {:ok, map()} | {:error, atom()}
   def chat(room, user_id, text), do: GenServer.call(room, {:chat, user_id, text})
 
+  @doc "Реакция за столом: короткий жест, который видят все в топике."
+  @spec react(GenServer.server(), Ecto.UUID.t(), term()) ::
+          :ok | {:error, atom() | {atom(), pos_integer()}}
+  def react(room, user_id, id), do: GenServer.call(room, {:react, user_id, id})
+
   @doc "Открыть свои карты по желанию."
   @spec show_cards(GenServer.server(), Ecto.UUID.t()) :: :ok | {:error, atom()}
   def show_cards(room, user_id), do: GenServer.call(room, {:show_cards, user_id})
@@ -252,6 +257,19 @@ defmodule BlockPoker.Tables.TableServer do
         # Стол может стоять в ожидании второго игрока: вошедший за взнос
         # даёт нужного, и раздача начинается сразу, а не через круг.
         {:reply, :ok, maybe_start_game(state)}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  # Реакция никуда не сохраняется: она уходит в топик и на этом кончается.
+  def handle_call({:react, user_id, id}, _from, state) do
+    case RoomState.push_reaction(state.room, user_id, id, now_ms(state), DateTime.utc_now()) do
+      {:ok, room, event} ->
+        state = put_room(state, room)
+        broadcast(state, "reaction", event)
+        {:reply, :ok, state}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}

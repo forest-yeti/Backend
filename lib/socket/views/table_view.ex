@@ -42,6 +42,8 @@ defmodule Socket.Views.TableView do
       hand: hand(room),
       showdown: room.showdown,
       chat: room.chat,
+      # Панель реакций рисуется ровно этим списком и в этом порядке.
+      reactions: BlockPoker.Tables.reactions(),
       you: you(room, user_id)
     }
   end
@@ -154,8 +156,10 @@ defmodule Socket.Views.TableView do
 
   defp you(room, user_id) do
     case RoomState.find_seat(room, user_id) do
+      # Наблюдателю поле тоже приходит: клиент прячет панель по одному
+      # признаку, а не по «сижу ли я» плюс «есть ли ключ».
       nil ->
-        %{seated: false}
+        %{seated: false, can_react: false}
 
       seat ->
         %{
@@ -172,7 +176,8 @@ defmodule Socket.Views.TableView do
           preselect: seat.preselect,
           # Право на ручной запуск считает ядро; роль игрока наружу не уходит
           # ни здесь, ни где-либо ещё.
-          can_start_manual: RoomState.can_start_manual?(room, user_id)
+          can_start_manual: RoomState.can_start_manual?(room, user_id),
+          can_react: RoomState.can_react?(room, user_id)
         }
         |> Map.merge(private_hand(room, seat.number))
     end

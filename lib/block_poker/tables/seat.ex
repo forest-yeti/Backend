@@ -66,6 +66,7 @@ defmodule BlockPoker.Tables.Seat do
           time_bank: non_neg_integer(),
           preselect: Preselect.t() | nil,
           chat_sent_at: [integer()],
+          reacted_at: integer() | nil,
           stats: Stats.t()
         }
 
@@ -96,6 +97,9 @@ defmodule BlockPoker.Tables.Seat do
     preselect: nil,
     # Отметки последних сообщений игрока: по ним считается частота (`Chat`).
     chat_sent_at: [],
+    # Момент последней реакции (монотонные мс): по нему считается кулдаун
+    # (`Reactions`). Одна отметка, а не список, — реакция разрешена одна.
+    reacted_at: nil,
     stats: %Stats{}
   ]
 

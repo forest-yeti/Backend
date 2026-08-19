@@ -24,6 +24,7 @@ defmodule BlockPoker.Tables do
   alias BlockPoker.Engine.Preselect
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.GameMode
+  alias BlockPoker.Reactions
   alias BlockPoker.Tables.{Lobby, LobbyQuery, RoomState, TableRegistry, TableServer}
 
   @type entry :: :wait_bb | :post
@@ -220,6 +221,20 @@ defmodule BlockPoker.Tables do
   def chat(room_id, user_id, text) do
     with {:ok, pid} <- fetch_room(room_id), do: TableServer.chat(pid, user_id, text)
   end
+
+  @doc """
+  Реакция за столом. Эфемерна: в историю не попадает и при реконнекте
+  не переигрывается.
+  """
+  @spec react(Ecto.UUID.t(), Ecto.UUID.t(), term()) ::
+          :ok | {:error, error() | {error(), pos_integer()}}
+  def react(room_id, user_id, id) do
+    with {:ok, pid} <- fetch_room(room_id), do: TableServer.react(pid, user_id, id)
+  end
+
+  @doc "Доступный набор реакций в порядке отображения."
+  @spec reactions() :: [String.t()]
+  def reactions, do: Reactions.ids()
 
   @doc "Показать свои карты по желанию — сбросив или дойдя до вскрытия."
   @spec show_cards(Ecto.UUID.t(), Ecto.UUID.t()) :: :ok | {:error, error()}

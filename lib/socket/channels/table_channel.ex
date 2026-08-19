@@ -84,6 +84,12 @@ defmodule Socket.Channels.TableChannel do
     {:reply, {:ok, Message.pong(payload)}, socket}
   end
 
+  def handle_in("reaction", payload, socket) do
+    socket.assigns.room_id
+    |> Tables.react(socket.assigns.user_id, Map.get(payload, "id"))
+    |> Message.reply(socket)
+  end
+
   def handle_in("chat", payload, socket) do
     socket.assigns.room_id
     |> Tables.chat(socket.assigns.user_id, Map.get(payload, "text"))

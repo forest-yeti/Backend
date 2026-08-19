@@ -261,6 +261,7 @@ BlockPoker.Supervisor (:one_for_one)
 "start_game"  %{}                      # ручной старт стола без автостарта
 "sit_out"     %{}
 "chat"        %{text: "..."}
+"reaction"    %{id: "fire"}             # эмодзи-реакция над аватаром
 "ping"        %{t: 1755528000123}      # замер задержки, любой топик
 "find_by_code" %{code: "a1b2c3"}        # поиск закрытой комнаты, топик lobby
 ```
@@ -274,6 +275,7 @@ BlockPoker.Supervisor (:one_for_one)
 "action_prompt"  %{deadline_ms: ..., time_bank_ms: ..., legal_actions: [...]}
 "time_bank_started" %{seat: ..., time_bank_ms: ...}
 "chat_message"   %{seat: ..., name: ..., text: ..., at: ...}
+"reaction"       %{seat: ..., user_id: ..., id: ..., at: ...}
 "error"          %{code: "...", message: "..."}
 ```
 
