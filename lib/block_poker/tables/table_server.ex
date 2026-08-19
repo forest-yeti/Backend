@@ -130,6 +130,10 @@ defmodule BlockPoker.Tables.TableServer do
   @spec show_cards(GenServer.server(), Ecto.UUID.t()) :: :ok | {:error, atom()}
   def show_cards(room, user_id), do: GenServer.call(room, {:show_cards, user_id})
 
+  @doc "Ручной запуск стола в комнате без автостарта."
+  @spec start_game(GenServer.server(), Ecto.UUID.t()) :: :ok | {:error, atom()}
+  def start_game(room, user_id), do: GenServer.call(room, {:start_game, user_id})
+
   @spec sit_in(GenServer.server(), Ecto.UUID.t()) :: :ok | {:error, atom()}
   def sit_in(room, user_id), do: GenServer.call(room, {:sit_in, user_id})
 
@@ -337,6 +341,20 @@ defmodule BlockPoker.Tables.TableServer do
 
   def handle_call({:sit_out, user_id}, _from, state) do
     reply_with(state, RoomState.sit_out(state.room, user_id))
+  end
+
+  # Стол без автостарта ждёт этой команды ровно один раз — на розыгрыш
+  # кнопки. Дальше раздачи идут сами, как за любым другим столом.
+  def handle_call({:start_game, user_id}, _from, state) do
+    case RoomState.validate_manual_start(state.room, user_id) do
+      :ok ->
+        state = start_button_draw(state, playable_seats(state.room))
+        announce(state)
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:sit_in, user_id}, _from, state) do
@@ -937,15 +955,20 @@ defmodule BlockPoker.Tables.TableServer do
 
   defp maybe_start_game(%State{room: %RoomState{game_started?: true}} = state), do: state
 
-  defp maybe_start_game(state) do
-    seats = state.room |> RoomState.players() |> Enum.map(& &1.number) |> Enum.sort()
+  # Комната с `auto_start: false` сама не стартует, сколько бы игроков за ней
+  # ни собралось: первую кнопку разыгрывает администратор командой `start_game`.
+  defp maybe_start_game(%State{room: room} = state) do
+    seats = playable_seats(room)
 
-    if length(seats) >= 2 do
+    if RoomState.auto_start?(room) and length(seats) >= 2 do
       start_button_draw(state, seats)
     else
       state
     end
   end
+
+  defp playable_seats(room),
+    do: room |> RoomState.players() |> Enum.map(& &1.number) |> Enum.sort()
 
   defp start_button_draw(state, seats) do
     variant = VariantRegistry.fetch!(state.room.setting.game_type)

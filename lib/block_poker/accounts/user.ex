@@ -15,6 +15,7 @@ defmodule BlockPoker.Accounts.User do
   @type t :: %__MODULE__{}
 
   @statuses [:active, :blocked]
+  @roles [:default, :admin]
   @default_avatar "/users/avatars/default.png"
 
   @name_format ~r/\A[A-Za-z0-9_-]+\z/
@@ -35,6 +36,11 @@ defmodule BlockPoker.Accounts.User do
     field :avatar, :string, default: @default_avatar
     field :status, Ecto.Enum, values: @statuses, default: :active
 
+    # Роль — служебное поле сервера, и клиенту она не отдаётся ни при каких
+    # условиях (§9 CLAUDE.md): наружу уходит лишь то, что роль разрешает
+    # конкретному игроку за конкретным столом. Назначается `mix user.role`.
+    field :role, Ecto.Enum, values: @roles, default: :default
+
     field :password_hash, :string, redact: true
     field :password, :string, virtual: true, redact: true
 
@@ -48,6 +54,21 @@ defmodule BlockPoker.Accounts.User do
 
   @spec statuses() :: [atom()]
   def statuses, do: @statuses
+
+  @spec roles() :: [atom()]
+  def roles, do: @roles
+
+  @doc "Changeset смены роли: единственный путь сделать игрока администратором."
+  @spec role_changeset(t(), atom() | String.t()) :: Ecto.Changeset.t()
+  def role_changeset(user, role) do
+    user
+    |> cast(%{role: role}, [:role])
+    |> validate_required([:role])
+  end
+
+  @spec admin?(t()) :: boolean()
+  def admin?(%__MODULE__{role: :admin}), do: true
+  def admin?(%__MODULE__{}), do: false
 
   @doc """
   Changeset регистрации.

@@ -169,7 +169,10 @@ defmodule Socket.Views.TableView do
           wants_post: seat.wants_post,
           missed_blinds: seat.missed_blinds,
           time_bank: seat.time_bank,
-          preselect: seat.preselect
+          preselect: seat.preselect,
+          # Право на ручной запуск считает ядро; роль игрока наружу не уходит
+          # ни здесь, ни где-либо ещё.
+          can_start_manual: RoomState.can_start_manual?(room, user_id)
         }
         |> Map.merge(private_hand(room, seat.number))
     end

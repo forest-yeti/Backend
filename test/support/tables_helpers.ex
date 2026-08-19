@@ -71,11 +71,16 @@ defmodule BlockPoker.TablesHelpers do
   Посадка без похода в кошелёк: тесты уровня 2 проверяют комнату, а не
   деньги. Деньги проверяются на уровне 3, где есть настоящая БД.
   """
-  def seat!(pid, user_id, seat, buy_in, entry \\ :wait_bb) do
+  def seat!(pid, user_id, seat, buy_in, entry \\ :wait_bb, profile \\ %{}) do
     {:ok, %{reservation_id: reservation_id}} =
-      TableServer.reserve_seat(pid, user_id, seat, buy_in)
+      TableServer.reserve_seat(pid, user_id, seat, buy_in, profile)
 
     {:ok, seat} = TableServer.confirm_seat(pid, reservation_id, buy_in, entry)
     seat
+  end
+
+  @doc "Посадка администратора: роль снимается с профиля при посадке."
+  def seat_admin!(pid, user_id, seat, buy_in, entry \\ :wait_bb) do
+    seat!(pid, user_id, seat, buy_in, entry, %{role: :admin})
   end
 end

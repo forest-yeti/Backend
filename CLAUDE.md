@@ -258,6 +258,7 @@ BlockPoker.Supervisor (:one_for_one)
 "action"      %{type: "raise", amount: 800, hand_id: "...", action_seq: 42}
 "preselect"   %{action: "check_fold"}   # заранее выбранное действие
 "post_blind"  %{post: true}            # не ждать большого блайнда
+"start_game"  %{}                      # ручной старт стола без автостарта
 "sit_out"     %{}
 "chat"        %{text: "..."}
 "ping"        %{t: 1755528000123}      # замер задержки, любой топик

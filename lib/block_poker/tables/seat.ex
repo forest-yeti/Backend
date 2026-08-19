@@ -15,6 +15,11 @@ defmodule BlockPoker.Tables.Seat do
       транзакции ещё нет. Место в этот момент занято: отдать его другому,
       пока фишки в полёте, нельзя.
 
+  `role` — снимок роли учётки на момент посадки, рядом с ником и аватаром и
+  по той же причине: стол не ходит в базу за правами на каждый снапшот. Роль
+  сама по себе клиенту не отдаётся никогда — из неё считается лишь то, что
+  игроку разрешено (§9 CLAUDE.md).
+
   `name` и `avatar` — снимок профиля на момент посадки: стол показывает игрока
   ником, а не UUID, и не ходит за этим в базу на каждый снапшот.
 
@@ -37,6 +42,8 @@ defmodule BlockPoker.Tables.Seat do
 
   alias BlockPoker.Engine.{Preselect, Stats}
 
+  @type role :: :default | :admin
+
   @type status :: :empty | :reserved | :playing | :sitting_out | :disconnected | :leaving
 
   @type t :: %__MODULE__{
@@ -44,6 +51,7 @@ defmodule BlockPoker.Tables.Seat do
           user_id: Ecto.UUID.t() | nil,
           name: String.t() | nil,
           avatar: String.t() | nil,
+          role: role(),
           status: status(),
           stack: non_neg_integer(),
           reservation_id: String.t() | nil,
@@ -68,6 +76,7 @@ defmodule BlockPoker.Tables.Seat do
     :name,
     :avatar,
     :reservation_id,
+    role: :default,
     status: :empty,
     stack: 0,
     waiting_for_bb: false,
@@ -92,6 +101,11 @@ defmodule BlockPoker.Tables.Seat do
 
   @spec new(pos_integer()) :: t()
   def new(number), do: %__MODULE__{number: number}
+
+  @doc "Администратор ли сидящий — снимок роли, снятый при посадке."
+  @spec admin?(t()) :: boolean()
+  def admin?(%__MODULE__{role: :admin}), do: true
+  def admin?(%__MODULE__{}), do: false
 
   @spec empty?(t()) :: boolean()
   def empty?(%__MODULE__{status: :empty}), do: true

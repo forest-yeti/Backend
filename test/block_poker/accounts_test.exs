@@ -216,4 +216,37 @@ defmodule BlockPoker.AccountsTest do
       assert {:error, :token_invalid} = Accounts.verify_socket_token("не токен")
     end
   end
+
+  describe "роли" do
+    test "новый пользователь — обычный игрок" do
+      assert %User{role: :default} = user_fixture()
+    end
+
+    test "set_role/2 назначает и снимает администратора" do
+      user = user_fixture()
+
+      assert {:ok, %User{role: :admin} = admin} = Accounts.set_role(user, "admin")
+      assert User.admin?(admin)
+
+      assert {:ok, %User{role: :default} = plain} = Accounts.set_role(admin, :default)
+      refute User.admin?(plain)
+    end
+
+    test "неизвестная роль не сохраняется" do
+      assert {:error, changeset} = user_fixture() |> Accounts.set_role("owner")
+      assert %{role: [_message]} = errors_on(changeset)
+    end
+
+    test "find_user/1 находит по email и по нику" do
+      user = user_fixture()
+
+      assert {:ok, found} = Accounts.find_user(user.email)
+      assert found.id == user.id
+
+      assert {:ok, found} = Accounts.find_user(user.name)
+      assert found.id == user.id
+
+      assert {:error, :not_found} = Accounts.find_user("никого")
+    end
+  end
 end

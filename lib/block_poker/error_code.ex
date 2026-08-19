@@ -27,6 +27,7 @@ defmodule BlockPoker.ErrorCode do
           | :room_closing
           | :leave_in_progress
           | :post_not_available
+          | :start_not_available
           | :zero_stack
           | :reservation_lost
           | :not_your_turn
@@ -60,6 +61,7 @@ defmodule BlockPoker.ErrorCode do
     room_closing: {409, "Комната закрывается"},
     leave_in_progress: {409, "Вы встаёте из-за стола: дождитесь завершения"},
     post_not_available: {409, "Войти за взнос сейчас нельзя"},
+    start_not_available: {409, "Запустить игру сейчас нельзя"},
     zero_stack: {409, "Нулевой стек: сначала докупитесь"},
     reservation_lost: {409, "Резерв места истёк, попробуйте снова"},
     not_your_turn: {409, "Сейчас не ваш ход"},

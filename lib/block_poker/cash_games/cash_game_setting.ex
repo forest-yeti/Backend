@@ -45,6 +45,7 @@ defmodule BlockPoker.CashGames.CashGameSetting do
     :rebuy_prompt_ms,
     :button_draw_animation_ms,
     :allow_post_blind,
+    :auto_start,
     :blind_dodge_window_hands,
     :felt_color,
     :background_color,
@@ -85,6 +86,11 @@ defmodule BlockPoker.CashGames.CashGameSetting do
     field :button_draw_animation_ms, :integer, default: 3_000
 
     field :allow_post_blind, :boolean, default: true
+
+    # Стол с `false` сам не стартует, даже когда за ним собрался полный состав:
+    # первую раздачу запускает администратор командой `start_game`. Дальше
+    # раздачи идут обычным порядком.
+    field :auto_start, :boolean, default: true
     field :blind_dodge_window_hands, :integer, default: 10
 
     # Косметика стола: цвет сукна и цвет фона комнаты. Сервер их только хранит

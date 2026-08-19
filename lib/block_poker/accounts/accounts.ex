@@ -6,6 +6,8 @@ defmodule BlockPoker.Accounts do
   свободного текста в ошибках нет (§3 CLAUDE.md).
   """
 
+  import Ecto.Query, only: [from: 2]
+
   alias BlockPoker.Accounts.{Tokens, User}
   alias BlockPoker.Repo
   alias BlockPoker.Wallet
@@ -70,6 +72,33 @@ defmodule BlockPoker.Accounts do
       {:ok, uuid} -> id_to_result(Repo.get(User, uuid))
       :error -> {:error, :not_found}
     end
+  end
+
+  @doc """
+  Поиск учётки по нику или email — для команд обслуживания, где UUID под
+  рукой нет. Ник регистрозависим, email нормализуется, как при регистрации.
+  """
+  @spec find_user(String.t()) :: {:ok, User.t()} | {:error, :not_found}
+  def find_user(identifier) when is_binary(identifier) do
+    normalized = User.normalize_email(identifier)
+
+    query =
+      from(u in User,
+        where: u.name == ^identifier or u.email == ^normalized,
+        limit: 1
+      )
+
+    id_to_result(Repo.one(query))
+  end
+
+  @doc """
+  Смена роли. Роль наружу не отдаётся и через транспорт не меняется:
+  назначает её только команда `mix user.role`.
+  """
+  @spec set_role(User.t(), atom() | String.t()) ::
+          {:ok, User.t()} | {:error, Ecto.Changeset.t()}
+  def set_role(%User{} = user, role) do
+    user |> User.role_changeset(role) |> Repo.update()
   end
 
   @doc "Регистрация + сразу выданная пара токенов."

@@ -33,6 +33,7 @@
     rebuy_prompt_ms: 60_000,
     button_draw_animation_ms: 3_000,
     allow_post_blind: true,
+    auto_start: true,
     blind_dodge_window_hands: 10,
     max_rooms: 100,
     visibility: :public,

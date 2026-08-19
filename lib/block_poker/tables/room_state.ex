@@ -20,7 +20,11 @@ defmodule BlockPoker.Tables.RoomState do
   @type entry :: :wait_bb | :post
 
   @typedoc "Снимок профиля игрока: то, чем стол его показывает."
-  @type profile :: %{optional(:name) => String.t(), optional(:avatar) => String.t()}
+  @type profile :: %{
+          optional(:name) => String.t(),
+          optional(:avatar) => String.t(),
+          optional(:role) => Seat.role()
+        }
 
   @type t :: %__MODULE__{
           room_id: Ecto.UUID.t(),
@@ -102,6 +106,48 @@ defmodule BlockPoker.Tables.RoomState do
   @spec free_seats(t()) :: [pos_integer()]
   def free_seats(state),
     do: state |> seats() |> Enum.filter(&Seat.empty?/1) |> Enum.map(& &1.number)
+
+  @doc """
+  Стартует ли стол сам. `false` — первую раздачу запускает администратор
+  командой `start_game`; дальше раздачи идут обычным порядком.
+  """
+  @spec auto_start?(t()) :: boolean()
+  def auto_start?(%__MODULE__{setting: setting}), do: setting.auto_start != false
+
+  @doc """
+  Ждёт ли стол ручного запуска: игра ещё не начата, а сам он не начнётся.
+  """
+  @spec awaiting_manual_start?(t()) :: boolean()
+  def awaiting_manual_start?(%__MODULE__{} = state),
+    do: not auto_start?(state) and not state.game_started?
+
+  @doc """
+  Может ли игрок запустить стол руками. Обычному игроку — никогда, даже за
+  столом без автостарта; администратору — пока стол ждёт запуска. Начатую
+  игру запускать больше не надо, поэтому флаг гаснет вместе с ожиданием.
+  """
+  @spec can_start_manual?(t(), Ecto.UUID.t()) :: boolean()
+  def can_start_manual?(%__MODULE__{} = state, user_id) do
+    case find_seat(state, user_id) do
+      nil -> false
+      seat -> Seat.admin?(seat) and awaiting_manual_start?(state)
+    end
+  end
+
+  @doc """
+  Проверка команды ручного запуска: кто просит и в том ли стол состоянии.
+  Собственно старт — дело `TableServer`, здесь только правило.
+  """
+  @spec validate_manual_start(t(), Ecto.UUID.t()) ::
+          :ok | {:error, :not_seated | :start_not_available}
+  def validate_manual_start(%__MODULE__{} = state, user_id) do
+    cond do
+      find_seat(state, user_id) == nil -> {:error, :not_seated}
+      not can_start_manual?(state, user_id) -> {:error, :start_not_available}
+      length(players(state)) < 2 -> {:error, :start_not_available}
+      true -> :ok
+    end
+  end
 
   @spec full?(t()) :: boolean()
   def full?(state), do: free_seats(state) == []
@@ -365,7 +411,8 @@ defmodule BlockPoker.Tables.RoomState do
           user_id: user_id,
           reservation_id: reservation_id,
           name: Map.get(profile, :name),
-          avatar: Map.get(profile, :avatar)
+          avatar: Map.get(profile, :avatar),
+          role: Map.get(profile, :role, :default)
       }
 
       {:ok, put_seat(state, seat)}

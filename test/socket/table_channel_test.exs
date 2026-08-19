@@ -328,6 +328,56 @@ defmodule Socket.Channels.TableChannelTest do
     refute snapshot.you.wants_post
   end
 
+  test "ручной запуск стола доступен только администратору", %{} do
+    setting =
+      setting_fixture(%{currency: :play_money, small_blind: 1, big_blind: 2, auto_start: false})
+
+    room_id = Ecto.UUID.generate()
+
+    pid =
+      start_supervised!(
+        {TableServer, [room_id: room_id, setting: setting, timers: :manual]},
+        id: room_id
+      )
+
+    Sandbox.allow(BlockPoker.Repo, self(), pid)
+
+    buy_in = CashGameSetting.min_buy_in_chips(setting)
+
+    %{user: admin, channel: first} = connect_player(room_id)
+    {:ok, _admin} = BlockPoker.Accounts.set_role(admin, :admin)
+    %{channel: second} = connect_player(room_id)
+
+    # Роль снимается при посадке, поэтому назначена она до join_seat.
+    ref = push(first, "join_seat", %{"seat" => 1, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+    ref = push(second, "join_seat", %{"seat" => 2, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+
+    # Стол собран, но сам не стартует.
+    ref = push(second, "table_state", %{})
+    assert_reply ref, :ok, snapshot
+    assert snapshot.phase == :idle
+    refute snapshot.you.can_start_manual
+
+    ref = push(second, "start_game", %{})
+    assert_reply ref, :error, %{code: "start_not_available"}
+
+    ref = push(first, "table_state", %{})
+    assert_reply ref, :ok, snapshot
+    assert snapshot.you.can_start_manual
+
+    ref = push(first, "start_game", %{})
+    assert_reply ref, :ok, _payload
+
+    assert_push "button_draw", _payload
+
+    ref = push(first, "table_state", %{})
+    assert_reply ref, :ok, snapshot
+    assert snapshot.phase == :button_draw
+    refute snapshot.you.can_start_manual
+  end
+
   test "играющему post_blind отвечает кодом", %{room_id: room_id, buy_in: buy_in} do
     %{channel: channel} = connect_player(room_id)
     ref = push(channel, "join_seat", %{"seat" => 1, "buy_in" => buy_in})

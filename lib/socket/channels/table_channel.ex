@@ -114,6 +114,12 @@ defmodule Socket.Channels.TableChannel do
     end
   end
 
+  def handle_in("start_game", _payload, socket) do
+    socket.assigns.room_id
+    |> Tables.start_game(socket.assigns.user_id)
+    |> Message.reply(socket)
+  end
+
   def handle_in("sit_out", _payload, socket) do
     socket.assigns.room_id
     |> Tables.sit_out(socket.assigns.user_id)

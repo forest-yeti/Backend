@@ -179,6 +179,15 @@ defmodule BlockPoker.Tables do
     with {:ok, pid} <- fetch_room(room_id), do: TableServer.show_cards(pid, user_id)
   end
 
+  @doc """
+  Ручной запуск стола в комнате без автостарта. Право на команду проверяет
+  комната: транспорт лишь передаёт, кто просит.
+  """
+  @spec start_game(Ecto.UUID.t(), Ecto.UUID.t()) :: :ok | {:error, error()}
+  def start_game(room_id, user_id) do
+    with {:ok, pid} <- fetch_room(room_id), do: TableServer.start_game(pid, user_id)
+  end
+
   @spec sit_out(Ecto.UUID.t(), Ecto.UUID.t()) :: :ok | {:error, error()}
   def sit_out(room_id, user_id) do
     with {:ok, pid} <- fetch_room(room_id), do: TableServer.sit_out(pid, user_id)
@@ -269,7 +278,7 @@ defmodule BlockPoker.Tables do
   # а не UUID, и не ходит в базу на каждый снапшот.
   defp profile(user_id) do
     case Accounts.get_user(user_id) do
-      {:ok, user} -> %{name: user.name, avatar: user.avatar}
+      {:ok, user} -> %{name: user.name, avatar: user.avatar, role: user.role}
       {:error, _reason} -> %{}
     end
   end
