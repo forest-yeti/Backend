@@ -200,11 +200,16 @@ defmodule BlockPoker.Tables.Lobby do
     open = Enum.filter(rooms, &open?/1)
 
     cond do
-      open == [] and length(rooms) < setting.max_rooms -> start_room(state, setting)
+      open == [] and length(rooms) < CashGameSetting.room_limit(setting) ->
+        start_room(state, setting)
+
       # Лишние пустые комнаты закрываются: иначе после вечернего пика
       # останутся десятки пустых.
-      length(open) > 1 -> close_extra(state, open)
-      true -> state
+      length(open) > 1 ->
+        close_extra(state, open)
+
+      true ->
+        state
     end
   end
 
@@ -308,7 +313,7 @@ defmodule BlockPoker.Tables.Lobby do
   defp build_snapshot(state, query) do
     state.settings
     |> Map.values()
-    |> Enum.filter(& &1.enabled)
+    |> Enum.filter(&(&1.enabled and CashGameSetting.public?(&1)))
     |> Enum.map(&setting_snapshot(state, &1))
     |> then(&LobbyQuery.apply(query, &1))
   end
@@ -341,8 +346,14 @@ defmodule BlockPoker.Tables.Lobby do
       :error ->
         :ok
 
+      # Закрытой комнаты в общей сетке нет — значит, нет и её обновлений:
+      # иначе подписчик лобби узнал бы о столе, которого не должен видеть.
       {:ok, setting} ->
-        PubSub.broadcast(@pubsub, @topic, {:lobby_update, setting_snapshot(state, setting)})
+        if CashGameSetting.public?(setting) do
+          PubSub.broadcast(@pubsub, @topic, {:lobby_update, setting_snapshot(state, setting)})
+        else
+          :ok
+        end
     end
   end
 

@@ -36,6 +36,33 @@ defmodule Socket.Views.LobbyView do
     }
   end
 
+  @doc """
+  Комната, найденная по коду: то же, что строка лобби, плюс адрес комнаты —
+  клиенту остаётся выбрать стек и отправить `join_seat`.
+  """
+  @spec found_room(map()) :: map()
+  def found_room(%{setting: setting} = found) do
+    range = BlockPoker.Tables.buy_in_range(setting)
+
+    %{
+      room_id: found.room_id,
+      setting_id: setting.id,
+      name: CashGameSetting.display_name(setting),
+      game_type: setting.game_type,
+      currency: setting.currency,
+      small_blind: setting.small_blind,
+      big_blind: setting.big_blind,
+      ante: setting.ante,
+      ante_type: setting.ante_type,
+      min_buy_in: range.min,
+      max_buy_in: range.max,
+      seats_taken: found.seats_taken,
+      free_seats: found.free_seats,
+      max_players: found.max_players,
+      visuals: visuals(setting)
+    }
+  end
+
   @spec room(map()) :: map()
   def room(room) do
     %{

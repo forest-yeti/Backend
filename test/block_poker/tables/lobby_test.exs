@@ -37,7 +37,8 @@ defmodule BlockPoker.Tables.LobbyTest do
     name
   end
 
-  defp rooms(lobby, setting), do: Lobby.rooms_for(lobby, setting.id)
+  defp rooms(lobby, %{id: id}), do: rooms(lobby, id)
+  defp rooms(lobby, setting_id), do: Lobby.rooms_for(lobby, setting_id)
 
   # Блайнды у каждого шаблона свои (естественный ключ уникален), поэтому
   # бай-ин считается от шаблона, а не берётся числом.
@@ -155,5 +156,33 @@ defmodule BlockPoker.Tables.LobbyTest do
 
     # Появилась вторая, пустая комната — но выбрана должна быть первая.
     assert {:ok, ^waiting_id} = Lobby.open_room(lobby, setting.id)
+  end
+
+  test "закрытая комната есть в пуле, но её нет в витрине лобби" do
+    private = private_setting_fixture(%{small_blind: 25, big_blind: 50})
+    public = setting_fixture(%{small_blind: 5, big_blind: 10})
+    lobby = start_lobby!()
+
+    ids = lobby |> Lobby.snapshot() |> Enum.map(& &1.setting.id)
+
+    assert public.id in ids
+    refute private.id in ids
+
+    # Комната при этом поднята: по коду в неё можно сесть.
+    assert [%{seats_taken: 0}] = rooms(lobby, private.id)
+  end
+
+  test "закрытая комната не порождает вторую, даже когда заполнилась" do
+    private = private_setting_fixture(%{max_players: 2})
+    lobby = start_lobby!()
+    [%{room_id: room_id}] = rooms(lobby, private.id)
+
+    fill_room(room_id, private)
+    _sync = Lobby.snapshot(lobby)
+
+    # Публичный лимит на этом месте открыл бы вторую комнату — у закрытой
+    # код ведёт в одну и ту же, и «мест нет» здесь честный ответ.
+    assert [%{room_id: ^room_id}] = rooms(lobby, private.id)
+    assert {:error, :no_seats_available} = Lobby.open_room(lobby, private.id)
   end
 end

@@ -44,4 +44,10 @@ defmodule BlockPoker.CashGamesFixtures do
     {:ok, setting} = overrides |> valid_setting_attrs() |> CashGames.create_setting()
     setting
   end
+
+  @doc "Закрытая комната: код выдаёт сервер, поэтому фикстура его не задаёт."
+  def private_setting_fixture(overrides \\ %{}) do
+    {:ok, setting} = overrides |> valid_setting_attrs() |> CashGames.create_private_setting()
+    setting
+  end
 end

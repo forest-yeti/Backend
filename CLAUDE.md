@@ -262,6 +262,7 @@ BlockPoker.Supervisor (:one_for_one)
 "sit_out"     %{}
 "chat"        %{text: "..."}
 "ping"        %{t: 1755528000123}      # замер задержки, любой топик
+"find_by_code" %{code: "a1b2c3"}        # поиск закрытой комнаты, топик lobby
 ```
 
 Сервер → клиент:

@@ -187,4 +187,78 @@ defmodule BlockPoker.CashGamesTest do
     assert zero.id in ids
     refute with_rake.id in ids
   end
+
+  describe "закрытые комнаты" do
+    test "create_private_setting выдаёт код и прячет комнату из лобби" do
+      setting = private_setting_fixture()
+
+      assert setting.visibility == :private
+      refute CashGameSetting.public?(setting)
+      assert String.length(setting.code) == CashGameSetting.code_length()
+      assert CashGameSetting.valid_code?(setting.code)
+    end
+
+    test "публичный шаблон кода не получает" do
+      assert %CashGameSetting{code: nil, visibility: :public} = setting_fixture()
+    end
+
+    test "закрытая комната разворачивает ровно одну комнату" do
+      assert CashGameSetting.room_limit(private_setting_fixture()) == 1
+      assert CashGameSetting.room_limit(setting_fixture(%{max_rooms: 7})) == 7
+    end
+
+    test "поиск по коду прощает регистр и пробелы" do
+      setting = private_setting_fixture()
+      code = setting.code
+
+      assert {:ok, found} = CashGames.get_by_code(code)
+      assert found.id == setting.id
+
+      assert {:ok, found} = CashGames.get_by_code("  #{String.upcase(code)} ")
+      assert found.id == setting.id
+    end
+
+    test "мусор вместо кода не доходит до базы" do
+      assert {:error, :not_found} = CashGames.get_by_code("не код")
+      assert {:error, :not_found} = CashGames.get_by_code("abc")
+      assert {:error, :not_found} = CashGames.get_by_code(nil)
+      assert {:error, :not_found} = CashGames.get_by_code(42)
+    end
+
+    test "выключенная комната по коду не находится" do
+      setting = private_setting_fixture()
+      {:ok, _disabled} = CashGames.set_enabled(setting, false)
+
+      assert {:error, :not_found} = CashGames.get_by_code(setting.code)
+    end
+
+    test "код уникален — это гарантия базы, а не проверки перед вставкой" do
+      setting = private_setting_fixture()
+
+      assert {:error, changeset} =
+               CashGames.create_setting(
+                 valid_setting_attrs(%{small_blind: 25, big_blind: 50, code: setting.code})
+               )
+
+      assert %{code: [_message]} = errors_on(changeset)
+    end
+
+    test "закрытая комната на тех же блайндах, что и публичный лимит, — не дубль" do
+      attrs = %{small_blind: 5, big_blind: 10, max_players: 6}
+
+      public = setting_fixture(attrs)
+      private = private_setting_fixture(attrs)
+
+      assert public.id != private.id
+      assert public.code == nil
+      assert private.code != nil
+    end
+
+    test "код не принимает форму вне алфавита" do
+      assert {:error, changeset} =
+               CashGames.create_setting(valid_setting_attrs(%{code: "ABC!23"}))
+
+      assert %{code: [_message]} = errors_on(changeset)
+    end
+  end
 end

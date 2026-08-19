@@ -25,6 +25,7 @@ defmodule BlockPoker.CashGames.CashGameSetting do
 
   @editable [
     :name,
+    :code,
     :game_type,
     :currency,
     :small_blind,
@@ -56,6 +57,12 @@ defmodule BlockPoker.CashGames.CashGameSetting do
   ]
 
   @color ~r/^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$/
+
+  # Алфавит кода: строчная латиница и цифры без пар, которые путают при
+  # диктовке вслух и переписывании от руки (0/o, 1/l/i).
+  @code_alphabet ~c"abcdefghjkmnpqrstuvwxyz23456789"
+  @code_length 6
+  @code_format ~r/^[a-z0-9]{6}$/
 
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
@@ -99,7 +106,13 @@ defmodule BlockPoker.CashGames.CashGameSetting do
     field :background_color, :string, default: "#10241C"
 
     field :enabled, :boolean, default: true
+
+    # `:private` — шаблона нет в общей сетке лобби, войти можно только по коду.
     field :visibility, Ecto.Enum, values: @visibilities, default: :public
+
+    # Код входа закрытой комнаты. У публичных шаблонов — `nil`; уникален
+    # среди заданных (в MySQL `NULL` уникальному индексу не мешает).
+    field :code, :string
     field :sort_order, :integer, default: 0
     field :max_rooms, :integer, default: 100
 
@@ -111,6 +124,64 @@ defmodule BlockPoker.CashGames.CashGameSetting do
 
   @spec ante_types() :: [atom()]
   def ante_types, do: @ante_types
+
+  @spec visibilities() :: [atom()]
+  def visibilities, do: @visibilities
+
+  @spec code_length() :: pos_integer()
+  def code_length, do: @code_length
+
+  @doc "Видна ли комната в общей сетке лобби."
+  @spec public?(t()) :: boolean()
+  def public?(%__MODULE__{visibility: :private}), do: false
+  def public?(%__MODULE__{}), do: true
+
+  @doc """
+  Сколько комнат разворачивает шаблон. У закрытого — ровно одна: код ведёт
+  друзей за один и тот же стол, а не за случайный из пула.
+  """
+  @spec room_limit(t()) :: pos_integer()
+  def room_limit(%__MODULE__{} = setting) do
+    if public?(setting), do: setting.max_rooms, else: 1
+  end
+
+  @doc """
+  Приведение кода к каноническому виду: регистр и пробелы игроку прощаются,
+  в базе код всегда в нижнем регистре.
+  """
+  @spec normalize_code(term()) :: String.t() | nil
+  def normalize_code(code) when is_binary(code) do
+    case code |> String.trim() |> String.downcase() do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
+
+  def normalize_code(_code), do: nil
+
+  @doc "Проверка формы кода — до похода в базу."
+  @spec valid_code?(term()) :: boolean()
+  def valid_code?(code) do
+    case normalize_code(code) do
+      nil -> false
+      normalized -> Regex.match?(@code_format, normalized)
+    end
+  end
+
+  @doc """
+  Новый код входа. Источник случайности — `:crypto.strong_rand_bytes/1`:
+  угадываемый код пускает за закрытый стол постороннего (§9 CLAUDE.md).
+  Столкновение отсекает UNIQUE-индекс, а не проверка перед вставкой.
+  """
+  @spec generate_code() :: String.t()
+  def generate_code do
+    size = length(@code_alphabet)
+
+    @code_length
+    |> :crypto.strong_rand_bytes()
+    |> :binary.bin_to_list()
+    |> Enum.map_join(fn byte -> <<Enum.at(@code_alphabet, rem(byte, size))>> end)
+  end
 
   @spec changeset(t(), map()) :: Ecto.Changeset.t()
   def changeset(setting, attrs) do
@@ -125,6 +196,7 @@ defmodule BlockPoker.CashGames.CashGameSetting do
     |> validate_number(:sort_order, greater_than_or_equal_to: 0)
     |> validate_number(:max_rooms, greater_than: 0)
     |> validate_length(:name, max: 80)
+    |> validate_code()
     |> validate_format(:felt_color, @color)
     |> validate_format(:background_color, @color)
     |> validate_timings()
@@ -135,6 +207,7 @@ defmodule BlockPoker.CashGames.CashGameSetting do
       [:game_type, :currency, :small_blind, :big_blind, :ante, :max_players],
       name: :cash_game_settings_natural_key
     )
+    |> unique_constraint(:code, name: :cash_game_settings_code)
   end
 
   @doc "Нижняя граница бай-ина в фишках."
@@ -168,6 +241,14 @@ defmodule BlockPoker.CashGames.CashGameSetting do
 
   def display_name(%__MODULE__{} = setting) do
     "#{setting.small_blind}/#{setting.big_blind} #{setting.max_players}-max"
+  end
+
+  defp validate_code(changeset) do
+    changeset
+    |> update_change(:code, &normalize_code/1)
+    |> validate_format(:code, @code_format,
+      message: "допустимы #{@code_length} символов: строчная латиница и цифры"
+    )
   end
 
   defp validate_blinds(changeset) do

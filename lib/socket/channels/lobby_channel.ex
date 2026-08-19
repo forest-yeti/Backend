@@ -48,6 +48,15 @@ defmodule Socket.Channels.LobbyChannel do
     {:reply, {:ok, Message.pong(payload)}, socket}
   end
 
+  # Вход по коду: канал отдаёт превью комнаты, садится игрок обычным
+  # `join_seat` в топике стола.
+  def handle_in("find_by_code", payload, socket) do
+    case Tables.find_by_code(Map.get(payload, "code")) do
+      {:ok, found} -> {:reply, {:ok, LobbyView.found_room(found)}, socket}
+      {:error, code} -> Message.error_reply(code, socket)
+    end
+  end
+
   def handle_in("quick_seat", payload, socket) do
     with {:ok, setting_id} <- Message.fetch_id(payload, "setting_id"),
          {:ok, buy_in} <- Message.fetch_amount(payload, "buy_in") do

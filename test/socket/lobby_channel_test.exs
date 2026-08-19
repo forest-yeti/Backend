@@ -10,7 +10,7 @@ defmodule Socket.Channels.LobbyChannelTest do
   import BlockPoker.TablesHelpers
 
   alias BlockPoker.CashGames.CashGameSetting
-  alias BlockPoker.Tables.Lobby
+  alias BlockPoker.Tables.{Lobby, TableRegistry}
   alias Ecto.Adapters.SQL.Sandbox
   alias Socket.UserSocket
 
@@ -23,6 +23,13 @@ defmodule Socket.Channels.LobbyChannelTest do
     :ok = Lobby.reload()
 
     %{setting: setting, buy_in: CashGameSetting.min_buy_in_chips(setting)}
+  end
+
+  defp socket_for do
+    user = user_fixture()
+    {:ok, %{token: token}} = BlockPoker.Accounts.start_session(user)
+    {:ok, socket} = connect(UserSocket, %{"token" => token})
+    socket
   end
 
   defp join_lobby do
@@ -191,5 +198,54 @@ defmodule Socket.Channels.LobbyChannelTest do
 
     # Занятость игрового лимита изменилась, но подписчик смотрит на main.
     refute_push "lobby_delta", _delta
+  end
+
+  test "вход по коду: превью комнаты, которой нет в общей сетке" do
+    private = private_setting_fixture(%{small_blind: 25, big_blind: 50, max_players: 6})
+    :ok = Lobby.reload()
+
+    %{channel: channel, snapshot: snapshot} = join_lobby()
+
+    # В витрине закрытой комнаты нет — ни при join, ни в списке.
+    refute Enum.any?(snapshot.settings, &(&1.setting_id == private.id))
+
+    ref = push(channel, "find_by_code", %{"code" => String.upcase(private.code)})
+    assert_reply ref, :ok, found
+
+    assert found.setting_id == private.id
+    assert found.small_blind == 25
+    assert found.max_players == 6
+    assert found.seats_taken == 0
+    assert found.free_seats == 6
+    assert found.min_buy_in == CashGameSetting.min_buy_in_chips(private)
+
+    # Дальше — обычная посадка в топике стола, отдельного пути для кода нет.
+    {:ok, _reply, table} = subscribe_and_join(socket_for(), "table:#{found.room_id}", %{})
+    ref = push(table, "join_seat", %{"seat" => 1, "buy_in" => found.min_buy_in})
+    assert_reply ref, :ok, %{seat: 1}
+  end
+
+  test "неизвестный код не находит ничего" do
+    %{channel: channel} = join_lobby()
+
+    for code <- ["zzzzzz", "мусор", ""] do
+      ref = push(channel, "find_by_code", %{"code" => code})
+      assert_reply ref, :error, %{code: "not_found"}
+    end
+  end
+
+  test "заполненная закрытая комната отвечает «мест нет», а не «не найдено»" do
+    private = private_setting_fixture(%{small_blind: 25, big_blind: 50, max_players: 2})
+    :ok = Lobby.reload()
+
+    [%{room_id: room_id}] = Lobby.rooms_for(private.id)
+    pid = TableRegistry.whereis(room_id)
+    buy_in = CashGameSetting.min_buy_in_chips(private)
+    Enum.each(1..2, &seat!(pid, "user-#{&1}", &1, buy_in))
+
+    %{channel: channel} = join_lobby()
+
+    ref = push(channel, "find_by_code", %{"code" => private.code})
+    assert_reply ref, :error, %{code: "no_seats_available"}
   end
 end

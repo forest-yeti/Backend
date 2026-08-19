@@ -19,6 +19,8 @@ defmodule BlockPoker.Tables do
   """
 
   alias BlockPoker.Accounts
+  alias BlockPoker.CashGames
+  alias BlockPoker.CashGames.CashGameSetting
   alias BlockPoker.Engine.Preselect
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.GameMode
@@ -59,6 +61,52 @@ defmodule BlockPoker.Tables do
   @doc "Проходит ли обновление лимита фильтр подписчика."
   @spec lobby_visible?(LobbyQuery.t(), map()) :: boolean()
   def lobby_visible?(query, snapshot), do: LobbyQuery.matches?(query, snapshot)
+
+  @doc """
+  Поиск закрытой комнаты по коду входа — единственный способ её найти:
+  в общей сетке лобби такой комнаты нет.
+
+  Отдаётся превью со всем, что нужно для решения «садиться или нет»:
+  лимиты, границы бай-ина в фишках и занятость стола. Посадка потом —
+  обычным `join_seat/5`, отдельного пути для кода нет.
+  """
+  @spec find_by_code(term()) :: {:ok, map()} | {:error, :not_found | :no_seats_available}
+  def find_by_code(code) do
+    with {:ok, setting} <- CashGames.get_by_code(code),
+         {:ok, room} <- pick_room_for(setting) do
+      {:ok,
+       %{
+         setting: setting,
+         room_id: room.room_id,
+         seats_taken: room.seats_taken,
+         max_players: room.max_players,
+         free_seats: room.max_players - room.seats_taken
+       }}
+    end
+  end
+
+  # У закрытого шаблона комната ровно одна (`CashGameSetting.room_limit/1`),
+  # поэтому выбирать не из чего — но заполненную отдавать как найденную
+  # нельзя: игроку нужен не адрес стола, а место за ним.
+  defp pick_room_for(setting) do
+    Lobby.rooms_for(setting.id)
+    |> Enum.reject(& &1.draining?)
+    |> Enum.filter(&(&1.seats_taken < &1.max_players))
+    |> Enum.max_by(& &1.seats_taken, fn -> nil end)
+    |> case do
+      nil -> {:error, :no_seats_available}
+      room -> {:ok, room}
+    end
+  end
+
+  @doc "Границы бай-ина комнаты в фишках — их клиент рисует ползунком стека."
+  @spec buy_in_range(CashGameSetting.t()) :: %{min: pos_integer(), max: pos_integer() | nil}
+  def buy_in_range(%CashGameSetting{} = setting) do
+    %{
+      min: CashGameSetting.min_buy_in_chips(setting),
+      max: CashGameSetting.max_buy_in_chips(setting)
+    }
+  end
 
   @spec room_state(Ecto.UUID.t()) :: {:ok, RoomState.t()} | {:error, :not_found}
   def room_state(room_id) do
