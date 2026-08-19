@@ -20,6 +20,16 @@ defmodule BlockPoker.Wallet.WalletEntry do
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
   schema "wallet_entries" do
+    # Порядковый номер записи в журнале. Выдаёт его БД (AUTO_INCREMENT),
+    # поэтому он монотонен и не зависит от разрешения часов: сортировать
+    # выписку по `inserted_at` нельзя — две операции могут попасть в одну
+    # микросекунду, и тогда их порядок не определён.
+    #
+    # В структуре, вернувшейся из `insert`, поле пустое: MySQL-адаптер Ecto
+    # читает после вставки только первичный ключ. Номер появляется при
+    # следующем чтении — журналу этого достаточно, наружу он не уходит.
+    field :seq, :integer
+
     field :amount, :integer
     field :type, Ecto.Enum, values: @types
     field :balance_after, :integer

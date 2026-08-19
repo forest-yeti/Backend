@@ -66,13 +66,17 @@ defmodule BlockPoker.Wallet do
   @doc """
   Выписка по кошельку, свежие записи первыми.
 
+  Порядок задаёт `seq` — счётчик самой БД. По времени вставки журнал
+  сортировать нельзя: операции, попавшие в одну микросекунду, шли бы
+  в произвольном порядке.
+
   Опции: `:limit` (по умолчанию 50), `:offset`.
   """
   @spec list_entries(Ecto.UUID.t(), keyword()) :: [WalletEntry.t()]
   def list_entries(wallet_id, opts \\ []) do
     WalletEntry
     |> where(wallet_id: ^wallet_id)
-    |> order_by(desc: :inserted_at, desc: :id)
+    |> order_by(desc: :seq)
     |> limit(^Keyword.get(opts, :limit, 50))
     |> offset(^Keyword.get(opts, :offset, 0))
     |> Repo.all()

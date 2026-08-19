@@ -123,10 +123,51 @@ defmodule BlockPoker.WalletTest do
   end
 
   test "выписка отсортирована свежими вперёд", %{wallet: wallet} do
-    {:ok, _result} =
-      record(%{wallet_id: wallet.id, amount: -100, type: :buy_in, idempotency_key: "buyin:a"})
+    for key <- ["buyin:a", "buyin:b", "buyin:c"] do
+      {:ok, _result} =
+        record(%{wallet_id: wallet.id, amount: -100, type: :buy_in, idempotency_key: key})
+    end
 
-    assert [%{idempotency_key: "buyin:a"} | _rest] = Wallet.list_entries(wallet.id)
+    keys = wallet.id |> Wallet.list_entries() |> Enum.map(& &1.idempotency_key)
+
+    # Первой записью кошелька был стартовый deposit — он же последний в выписке.
+    assert ["buyin:c", "buyin:b", "buyin:a", _signup] = keys
+  end
+
+  test "порядок выписки не зависит от совпадения времени вставки", %{wallet: wallet} do
+    for key <- ["buyin:a", "buyin:b", "buyin:c"] do
+      {:ok, _result} =
+        record(%{wallet_id: wallet.id, amount: -100, type: :buy_in, idempotency_key: key})
+    end
+
+    # Часы грубее микросекунды — обычное дело (на Windows особенно), и тогда
+    # у нескольких записей `inserted_at` совпадает. Порядок журнала обязан
+    # остаться прежним: его задаёт `seq`, а не время.
+    same_time = DateTime.utc_now()
+
+    {_count, _rows} =
+      WalletEntry
+      |> where(wallet_id: ^wallet.id)
+      |> Repo.update_all(set: [inserted_at: same_time])
+
+    keys = wallet.id |> Wallet.list_entries() |> Enum.map(& &1.idempotency_key)
+
+    assert ["buyin:c", "buyin:b", "buyin:a", _signup] = keys
+  end
+
+  test "seq выдаёт база, и он растёт с каждой записью", %{wallet: wallet} do
+    for key <- ["buyin:a", "buyin:b"] do
+      {:ok, _result} =
+        record(%{wallet_id: wallet.id, amount: -100, type: :buy_in, idempotency_key: key})
+    end
+
+    # Номер приходит из БД, поэтому читается он из выписки, а не из
+    # структуры, вернувшейся из вставки.
+    seqs = wallet.id |> Wallet.list_entries() |> Enum.map(& &1.seq)
+
+    assert Enum.all?(seqs, &is_integer/1)
+    assert seqs == Enum.sort(seqs, :desc)
+    assert length(Enum.uniq(seqs)) == length(seqs)
   end
 
   test "get_wallet возвращает :not_found для чужого пользователя" do
