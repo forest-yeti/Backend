@@ -20,6 +20,7 @@ defmodule Mix.Tasks.CashGame.New do
       (по умолчанию `40-100`; `40-` — стол без потолка);
     * `--ante` — анте в фишках (по умолчанию 0);
     * `--rake` — рейк в сотых долях процента: `450` — это 4.5% (по умолчанию 0);
+    * `--felt` и `--background` — цвета сукна и фона комнаты (`#RRGGBB`);
     * `--private` — комнаты нет в общей сетке лобби, вход только по коду;
       код выдаётся сервером и печатается по завершении;
     * `--no-auto-start` — стол не начинает игру сам, первую раздачу
@@ -47,6 +48,8 @@ defmodule Mix.Tasks.CashGame.New do
     buy_in: :string,
     ante: :integer,
     rake: :integer,
+    felt: :string,
+    background: :string,
     private: :boolean,
     auto_start: :boolean,
     dry_run: :boolean
@@ -102,8 +105,13 @@ defmodule Mix.Tasks.CashGame.New do
       min_buy_in: min_buy_in,
       max_buy_in: max_buy_in,
       rake_percent: opts[:rake] || 0,
+      felt_color: opts[:felt],
+      background_color: opts[:background],
       auto_start: opts[:auto_start] != false
     }
+    # Цвета не заданы — остаются дефолты схемы, а не `nil`.
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
   end
 
   defp blinds(nil), do: Mix.raise("не заданы блайнды: --blinds 5/10")
@@ -150,10 +158,11 @@ defmodule Mix.Tasks.CashGame.New do
   end
 
   defp describe(attrs) do
-    name = attrs.name || "#{attrs.small_blind}/#{attrs.big_blind} #{attrs.max_players}-max"
+    name =
+      Map.get(attrs, :name) || "#{attrs.small_blind}/#{attrs.big_blind} #{attrs.max_players}-max"
 
     "#{name} — #{attrs.currency} #{attrs.small_blind}/#{attrs.big_blind}, " <>
-      "мест #{attrs.max_players}, бай-ин #{attrs.min_buy_in}-#{attrs.max_buy_in || "∞"}bb" <>
+      "мест #{attrs.max_players}, бай-ин #{attrs.min_buy_in}-#{Map.get(attrs, :max_buy_in) || "∞"}bb" <>
       if(attrs.auto_start, do: "", else: ", ручной старт")
   end
 
