@@ -46,6 +46,9 @@ defmodule BlockPoker.Engine.HandTest do
     end)
   end
 
+  # Банки первого прогона: у обычной раздачи он единственный.
+  defp pots(hand), do: hand.results.runs |> hd() |> Map.fetch!(:pots)
+
   defp act!(hand, seat, action) do
     {:ok, hand, events} = Hand.act(hand, seat, action, nil)
     {hand, events}
@@ -68,7 +71,7 @@ defmodule BlockPoker.Engine.HandTest do
       assert Hand.total_chips(hand) == 3000
 
       # Анте и блайнд сброшенного игрока достались победителю.
-      assert Enum.sum(Enum.map(hand.results.pots, & &1.amount)) == 10 + 10 + 15
+      assert Enum.sum(Enum.map(pots(hand), & &1.amount)) == 10 + 10 + 15
     end
   end
 
@@ -88,7 +91,7 @@ defmodule BlockPoker.Engine.HandTest do
       assert Hand.total_chips(hand) == 2060
 
       # Банк — только покрытые деньги: 60 + 60 плюс большой блайнд сбросившего.
-      assert Enum.sum(Enum.map(hand.results.pots, & &1.amount)) == 60 + 60 + 10
+      assert Enum.sum(Enum.map(pots(hand), & &1.amount)) == 60 + 60 + 10
 
       # 40 неотвеченных вернулись, а не разыгрались: даже проиграв, ставивший
       # остаётся с 940, а не с 900.
@@ -271,7 +274,7 @@ defmodule BlockPoker.Engine.HandTest do
     assert hand.results.showdown?
 
     assert Enum.sum(Map.values(hand.results.payouts)) ==
-             Enum.sum(Enum.map(hand.results.pots, & &1.amount))
+             Enum.sum(Enum.map(pots(hand), & &1.amount))
 
     assert Hand.total_chips(hand) == 2000
   end
@@ -325,7 +328,7 @@ defmodule BlockPoker.Engine.HandTest do
     assert Map.get(hand.results.payouts, 1, 0) <= 200
 
     assert Enum.sum(Map.values(hand.results.payouts)) ==
-             Enum.sum(Enum.map(hand.results.pots, & &1.amount))
+             Enum.sum(Enum.map(pots(hand), & &1.amount))
 
     assert Hand.total_chips(hand) == 2100
   end
@@ -341,8 +344,10 @@ defmodule BlockPoker.Engine.HandTest do
     assert Enum.all?(payload.players, &(length(&1.cards) == 2))
     assert payload.board == []
 
-    assert length(payload.equity) == 2
-    assert_in_delta Enum.sum(Enum.map(payload.equity, & &1.equity)), 1.0, 0.001
+    # Прогон один — и шансы приходят одним прогоном.
+    assert [%{run: 1, equity: equity}] = payload.equity
+    assert length(equity) == 2
+    assert_in_delta Enum.sum(Enum.map(equity, & &1.equity)), 1.0, 0.001
   end
 
   test "доводка борда идёт по одной улице и заканчивается вскрытием" do

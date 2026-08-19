@@ -13,7 +13,7 @@ defmodule BlockPoker.Tables.RoomState do
 
   alias BlockPoker.CashGames.CashGameSetting
   alias BlockPoker.Chat
-  alias BlockPoker.Engine.{EntryRules, Preselect, Stats, TimeBank}
+  alias BlockPoker.Engine.{EntryRules, Hand, Preselect, Stats, TimeBank}
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.Reactions
   alias BlockPoker.Tables.Seat
@@ -47,6 +47,7 @@ defmodule BlockPoker.Tables.RoomState do
           chat: [Chat.message()],
           deadline_at: integer() | nil,
           showdown: map() | nil,
+          rit_deadline_at: integer() | nil,
           rabbit: rabbit() | nil
         }
 
@@ -102,6 +103,10 @@ defmodule BlockPoker.Tables.RoomState do
     # Открытые при олл-ине карты и шансы: игрок, подключившийся в середине
     # доводки, должен видеть то же, что и остальные.
     showdown: nil,
+    # Дедлайн ответа на предложение сыграть дважды (монотонные мс). Хранится
+    # рядом с `deadline_at` и по той же причине: вернувшийся внутри окна
+    # игрок должен увидеть остаток времени, а не начать отсчёт заново.
+    rit_deadline_at: nil,
     # Снимок rabbit hunting прошедшей раздачи; живёт паузу между раздачами.
     rabbit: nil
   ]
@@ -388,6 +393,22 @@ defmodule BlockPoker.Tables.RoomState do
   @spec can_react?(t(), Ecto.UUID.t()) :: boolean()
   def can_react?(%__MODULE__{} = state, user_id) do
     match?({:ok, _seat}, fetch_player(state, user_id))
+  end
+
+  @doc """
+  Что игрок видит про предложение сыграть дважды: кого спрашивают и сколько
+  осталось времени. `nil` — вопроса нет.
+
+  Кого спрашивают, решает раздача, а не комната: список мест берётся из
+  `Engine.RunItTwice`, а не пересобирается здесь.
+  """
+  @spec run_it_twice_view(t(), integer()) :: map() | nil
+  def run_it_twice_view(%__MODULE__{hand: nil}, _now), do: nil
+
+  def run_it_twice_view(%__MODULE__{hand: hand} = state, now) do
+    if Hand.offering_run_it_twice?(hand) do
+      %{seats: hand.rit.seats, deadline_ms: max((state.rit_deadline_at || now) - now, 0)}
+    end
   end
 
   @doc """

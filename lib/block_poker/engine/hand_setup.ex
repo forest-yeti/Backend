@@ -27,7 +27,8 @@ defmodule BlockPoker.Engine.HandSetup do
           small_blind: non_neg_integer(),
           big_blind: non_neg_integer(),
           ante: non_neg_integer(),
-          ante_type: :big_blind | :per_player
+          ante_type: :big_blind | :per_player,
+          run_it_twice_allowed: boolean()
         }
 
   # Блайнды в обязательные не входят: на анте-столе их нет вовсе, и структура
@@ -40,7 +41,11 @@ defmodule BlockPoker.Engine.HandSetup do
     small_blind: 0,
     big_blind: 0,
     ante: 0,
-    ante_type: :big_blind
+    ante_type: :big_blind,
+    # Разрешение приходит флагом, а не ссылкой на шаблон, — по той же причине,
+    # что и блайнды. Дефолт `false`: новый режим и искусственный вариант в
+    # тестах получают функцию выключенной молча, а не по забывчивости.
+    run_it_twice_allowed: false
   ]
 
   @doc """

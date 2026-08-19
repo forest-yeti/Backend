@@ -45,6 +45,9 @@ defmodule BlockPoker.GameMode.Cash do
     do: not RoomState.in_hand?(state, seat.number)
 
   @impl true
+  def run_it_twice?(%RoomState{setting: setting}), do: setting.allowed_run_it_twice
+
+  @impl true
   def take_buy_in(%RoomState{} = state, user_id, amount, reservation_id) do
     case Wallet.buy_in(user_id, state.setting.currency, amount, "buyin:#{reservation_id}",
            ref_id: state.room_id
@@ -106,6 +109,7 @@ defmodule BlockPoker.GameMode.Cash do
           }
         end),
       button_seat: state.button_seat || hd(players).number,
+      run_it_twice_allowed: run_it_twice?(state),
       small_blind: setting.small_blind,
       big_blind: setting.big_blind,
       ante: setting.ante,

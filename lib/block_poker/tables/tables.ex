@@ -309,6 +309,18 @@ defmodule BlockPoker.Tables do
   def reactions, do: Reactions.ids()
 
   @doc """
+  Ответ на предложение сыграть недостающие улицы дважды.
+
+  Право отвечать проверяет раздача: спрашивают только двоих, дошедших до
+  доводки, и только пока окно открыто.
+  """
+  @spec answer_run_it_twice(Ecto.UUID.t(), Ecto.UUID.t(), boolean()) :: :ok | {:error, error()}
+  def answer_run_it_twice(room_id, user_id, accept?) do
+    with {:ok, pid} <- fetch_room(room_id),
+         do: TableServer.answer_run_it_twice(pid, user_id, accept?)
+  end
+
+  @doc """
   Rabbit hunting: показать карты, которые пришли бы, доиграй раздача до
   ривера. Доступно сидящим за столом в паузу после раздачи, законченной
   фолдом; наблюдателю — нет.

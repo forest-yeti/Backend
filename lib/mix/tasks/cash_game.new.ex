@@ -55,6 +55,7 @@ defmodule Mix.Tasks.CashGame.New do
     background: :string,
     private: :boolean,
     auto_start: :boolean,
+    run_it_twice: :boolean,
     dry_run: :boolean
   ]
 
@@ -109,7 +110,8 @@ defmodule Mix.Tasks.CashGame.New do
       rake_percent: opts[:rake] || 0,
       felt_color: opts[:felt],
       background_color: opts[:background],
-      auto_start: opts[:auto_start] != false
+      auto_start: opts[:auto_start] != false,
+      allowed_run_it_twice: opts[:run_it_twice] != false
     })
     # Цвета не заданы — остаются дефолты схемы, а не `nil`.
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)

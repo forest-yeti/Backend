@@ -50,6 +50,7 @@ defmodule BlockPoker.CashGames.CashGameSetting do
     :button_draw_animation_ms,
     :allow_post_blind,
     :auto_start,
+    :allowed_run_it_twice,
     :blind_dodge_window_hands,
     :felt_color,
     :background_color,
@@ -96,6 +97,11 @@ defmodule BlockPoker.CashGames.CashGameSetting do
     field :button_draw_animation_ms, :integer, default: 3_000
 
     field :allow_post_blind, :boolean, default: true
+
+    # Двое в олл-ине могут договориться разыграть недостающие улицы дважды.
+    # Флаг живёт в шаблоне кэша, потому что это функция кэш-игры: в турнирах
+    # она выключена всегда и настройкой не управляется (§3.1 задачи 5).
+    field :allowed_run_it_twice, :boolean, default: true
 
     # Стол с `false` сам не стартует, даже когда за ним собрался полный состав:
     # первую раздачу запускает администратор командой `start_game`. Дальше

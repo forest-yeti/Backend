@@ -47,6 +47,9 @@ defmodule Socket.Views.TableView do
       button_draw: button_draw(room),
       hand: hand(room),
       showdown: room.showdown,
+      # Открытый вопрос про два прогона с остатком времени: вернувшийся
+      # внутри окна игрок должен успеть ответить.
+      run_it_twice: RoomState.run_it_twice_view(room, System.monotonic_time(:millisecond)),
       chat: room.chat,
       # Панель реакций рисуется ровно этим списком и в этом порядке.
       reactions: BlockPoker.Tables.reactions(),
@@ -111,6 +114,8 @@ defmodule Socket.Views.TableView do
     %{
       street: hand.street,
       board: Enum.map(hand.board, &Card.to_map/1),
+      # Второй прогон борда; `nil` — обычная раздача.
+      board_2: hand.board_2 && Enum.map(hand.board_2, &Card.to_map/1),
       pot: hand.pot,
       bet: hand.bet,
       to_act: hand.to_act,

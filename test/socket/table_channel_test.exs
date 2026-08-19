@@ -236,6 +236,74 @@ defmodule Socket.Channels.TableChannelTest do
     assert_reply ref, :error, %{code: "not_your_turn"}
   end
 
+  test "оба согласились сыграть дважды — стол доводит два борда", %{
+    room_id: room_id,
+    buy_in: buy_in
+  } do
+    %{channel: first} = connect_player(room_id)
+    %{channel: second} = connect_player(room_id)
+
+    ref = push(first, "join_seat", %{"seat" => 1, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+    ref = push(second, "join_seat", %{"seat" => 2, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+
+    :ok = TableServer.fire_timer(room_pid(room_id), :button_draw)
+    assert_push "action_prompt", prompt
+
+    {actor, other} = if prompt.seat == 1, do: {first, second}, else: {second, first}
+    ref = push(actor, "action", %{"type" => "all_in"})
+    assert_reply ref, :ok, _payload
+    ref = push(other, "action", %{"type" => "all_in"})
+
+    # Ответ на закрывающий олл-ин ждёт расчёта эквити вскрытых рук: он идёт
+    # в том же вызове и в сотню миллисекунд по умолчанию не укладывается.
+    assert_reply ref, :ok, _payload, 2_000
+
+    # Карты открылись раньше вопроса — иначе решать было бы вслепую.
+    assert_push "all_in_showdown", _showdown
+    assert_push "run_it_twice_offer", %{seats: [1, 2]}
+
+    ref = push(first, "run_it_twice", %{"accept" => true})
+    assert_reply ref, :ok, _payload
+    ref = push(second, "run_it_twice", %{"accept" => true})
+    assert_reply ref, :ok, _payload
+
+    assert_push "run_it_twice_decided", %{accepted: true}
+
+    :ok = TableServer.fire_timer(room_pid(room_id), :runout)
+    assert_push "street_dealt", %{street: :flop, board_2: board_2}
+    assert length(board_2) == 3
+  end
+
+  test "наблюдателю отвечать на предложение нечем", %{room_id: room_id, buy_in: buy_in} do
+    %{channel: first} = connect_player(room_id)
+    %{channel: second} = connect_player(room_id)
+    %{channel: watcher} = connect_player(room_id)
+
+    ref = push(first, "join_seat", %{"seat" => 1, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+    ref = push(second, "join_seat", %{"seat" => 2, "buy_in" => buy_in})
+    assert_reply ref, :ok, _payload
+
+    :ok = TableServer.fire_timer(room_pid(room_id), :button_draw)
+    assert_push "action_prompt", prompt
+
+    {actor, other} = if prompt.seat == 1, do: {first, second}, else: {second, first}
+    ref = push(actor, "action", %{"type" => "all_in"})
+    assert_reply ref, :ok, _payload
+    ref = push(other, "action", %{"type" => "all_in"})
+
+    # Ответ на закрывающий олл-ин ждёт расчёта эквити вскрытых рук: он идёт
+    # в том же вызове и в сотню миллисекунд по умолчанию не укладывается.
+    assert_reply ref, :ok, _payload, 2_000
+
+    assert_push "run_it_twice_offer", _offer
+
+    ref = push(watcher, "run_it_twice", %{"accept" => true})
+    assert_reply ref, :error, %{code: "not_seated"}
+  end
+
   test "чат доходит до всех за столом", %{room_id: room_id, buy_in: buy_in} do
     %{channel: first} = connect_player(room_id)
     %{channel: _second} = connect_player(room_id)

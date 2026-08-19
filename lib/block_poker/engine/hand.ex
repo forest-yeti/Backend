@@ -14,7 +14,18 @@ defmodule BlockPoker.Engine.Hand do
   трогает второе.
   """
 
-  alias BlockPoker.Engine.{Card, Deck, Equity, HandRank, HandSetup, Outs, Rng, Showdown, Variant}
+  alias BlockPoker.Engine.{
+    Card,
+    Deck,
+    Equity,
+    HandRank,
+    HandSetup,
+    Outs,
+    Rng,
+    RunItTwice,
+    Showdown,
+    Variant
+  }
 
   @type street :: :preflop | :flop | :turn | :river | :complete
   @type status :: :active | :folded | :all_in
@@ -45,6 +56,9 @@ defmodule BlockPoker.Engine.Hand do
           bet_unit: non_neg_integer(),
           street: street(),
           board: [Card.t()],
+          board_2: [Card.t()] | nil,
+          run_it_twice_allowed?: boolean(),
+          rit: RunItTwice.t() | nil,
           pot: non_neg_integer(),
           bet: non_neg_integer(),
           min_raise: pos_integer(),
@@ -69,6 +83,11 @@ defmodule BlockPoker.Engine.Hand do
     :aggressor,
     :rake_fun,
     :results,
+    # Второй прогон борда. `nil` — обычная раздача, и весь код, написанный
+    # до run it twice, работает с этим значением без единой правки.
+    :board_2,
+    # Открытый вопрос «играем дважды?». `nil` — не спрашивали.
+    :rit,
     # Номинал структуры ставок: от него считаются минимальный бет и рейз.
     # Блайндов и анте раздача не знает — только эту величину.
     bet_unit: 0,
@@ -80,7 +99,10 @@ defmodule BlockPoker.Engine.Hand do
     seq: 0,
     # Ставить больше некому: борд доводится до конца с паузами, чтобы игрок
     # увидел каждую улицу, а не мгновенный итог.
-    runout?: false
+    runout?: false,
+    # Разрешение приходит из режима через `HandSetup`: кэш читает шаблон,
+    # турнир отвечает `false` всегда.
+    run_it_twice_allowed?: false
   ]
 
   @streets [:preflop, :flop, :turn, :river]
@@ -129,6 +151,7 @@ defmodule BlockPoker.Engine.Hand do
       order: order,
       button_seat: setup.button_seat,
       bet_unit: structure.bet_unit(setup),
+      run_it_twice_allowed?: setup.run_it_twice_allowed,
       rake_fun: Keyword.get(opts, :rake)
     }
 
@@ -396,9 +419,85 @@ defmodule BlockPoker.Engine.Hand do
 
   # Ставить больше некому. Карты открываются сразу — дальше только случай,
   # и прятать их незачем; борд доводится по улице за шаг снаружи.
+  #
+  # Порядок событий здесь — правило, а не удобство отрисовки: карты
+  # вскрываются **раньше** вопроса о двух прогонах, чтобы игрок решал,
+  # видя расклад и проценты.
   defp begin_runout(hand) do
-    hand = %{hand | runout?: true, to_act: nil}
-    {hand, [{:all_in_showdown, showdown_payload(hand)}]}
+    hand = %{hand | to_act: nil}
+    showdown = {:all_in_showdown, showdown_payload(hand)}
+
+    case offer_seats(hand) do
+      nil ->
+        {%{hand | runout?: true}, [showdown]}
+
+      seats ->
+        hand = %{hand | rit: RunItTwice.offer(seats)}
+        {hand, [showdown, {:run_it_twice_offer, %{seats: seats}}]}
+    end
+  end
+
+  # Кого спрашивать про два прогона — и спрашивать ли вообще.
+  #
+  # Условия перечислены здесь целиком и намеренно в одном месте: разнесённые
+  # по оболочке, они разъезжаются с движком при первом же изменении правил.
+  defp offer_seats(%__MODULE__{run_it_twice_allowed?: false}), do: nil
+
+  defp offer_seats(hand) do
+    seats = hand |> contenders() |> Enum.map(& &1.seat)
+    missing = hand |> board_plan() |> Enum.reduce(0, fn {_street, count}, acc -> acc + count end)
+
+    # Карт должно хватить на оба борда: варианты с четырьмя карманными
+    # картами появятся строкой в реестре, а не правкой этого условия.
+    if length(seats) == 2 and missing > 0 and length(hand.deck) >= missing * 2 do
+      seats
+    else
+      nil
+    end
+  end
+
+  @doc """
+  Ответ игрока на предложение сыграть дважды.
+
+  Право отвечать — правило игры, а не транспорта: проверяется здесь, а не
+  в канале.
+  """
+  @spec answer_run_it_twice(t(), pos_integer(), boolean()) ::
+          {:ok, t(), [tuple()]} | {:error, atom()}
+  def answer_run_it_twice(%__MODULE__{} = hand, seat, accept?) do
+    with {:ok, rit} <- RunItTwice.answer(hand.rit, seat, accept?) do
+      {hand, events} = settle_offer(%{hand | rit: rit})
+      {:ok, hand, events}
+    end
+  end
+
+  @doc """
+  Закрыть предложение снаружи: время вышло. Неотвеченное — отказ.
+  """
+  @spec close_run_it_twice(t()) :: {:ok, t(), [tuple()]} | {:error, atom()}
+  def close_run_it_twice(%__MODULE__{rit: nil}), do: {:error, :run_it_twice_not_offered}
+
+  def close_run_it_twice(%__MODULE__{} = hand) do
+    {hand, events} = settle_offer(%{hand | rit: RunItTwice.close(hand.rit)})
+    {:ok, hand, events}
+  end
+
+  @doc "Ждёт ли раздача ответа про два прогона."
+  @spec offering_run_it_twice?(t()) :: boolean()
+  def offering_run_it_twice?(%__MODULE__{rit: rit}), do: RunItTwice.offered?(rit)
+
+  # Пока исход не определён — ничего не происходит и стол ждёт. Как только
+  # определён, доводка начинается обычным порядком, и единственный след
+  # согласия — второй борд.
+  defp settle_offer(hand) do
+    if RunItTwice.offered?(hand.rit) do
+      {hand, []}
+    else
+      accepted? = RunItTwice.accepted?(hand.rit)
+      hand = %{hand | runout?: true, board_2: if(accepted?, do: hand.board, else: nil)}
+
+      {hand, [{:run_it_twice_decided, %{accepted: accepted?, answers: hand.rit.answers}}]}
+    end
   end
 
   @doc """
@@ -439,25 +538,57 @@ defmodule BlockPoker.Engine.Hand do
   # Точный перебор дорог на пяти неизвестных картах, поэтому Монте-Карло
   # с умеренным числом итераций: полпроцента погрешности игроку незаметны,
   # а секунда ожидания — очень даже.
+  #
+  # Считается **по каждому прогону отдельно**: борды разные, и один общий
+  # процент не соответствует ни одному из них.
   defp equity_payload(hand) do
     known = hand |> contenders() |> Enum.map(&{&1.seat, &1.hole})
 
     if length(known) < 2 do
       []
     else
-      result = Equity.equity(known, hand.board, hand.variant, iterations: 20_000, outs: false)
-      outs = Outs.compute(known, hand.board, hand.context)
+      boards = boards(hand)
 
-      Enum.map(result.players, fn player ->
-        %{
-          seat: player.id,
-          win: player.win,
-          tie: player.tie,
-          equity: player.equity,
-          outs: outs |> Map.get(player.id, []) |> Enum.map(&out_payload/1)
-        }
+      boards
+      |> Enum.with_index()
+      |> Enum.map(fn {board, index} ->
+        %{run: index + 1, equity: equity_for(hand, known, board, dead_for(boards, board))}
       end)
     end
+  end
+
+  # Борд у прогонов свой, а колода — общая, и это правило счёта, а не деталь
+  # отображения. Карта, легшая на тёрн первого прогона, физически ушла из
+  # колоды: во втором прогоне она выйти не может, и показывать её как аут —
+  # прямая ложь игроку и завышенный процент.
+  #
+  # Пример, ради которого этот расчёт существует: четыре аута на флопе, один
+  # из них пришёл на тёрн первого прогона — на втором борде аутов остаётся
+  # три, а не четыре.
+  #
+  # Мёртвые карты прогона — то, что лежит на **чужом** борде и отсутствует
+  # на своём. Общий префикс до олл-ина сюда не входит: он уже учтён бордом.
+  defp dead_for(boards, board), do: Enum.flat_map(boards, &(&1 -- board))
+
+  defp equity_for(hand, known, board, dead_cards) do
+    result =
+      Equity.equity(known, board, hand.variant,
+        iterations: 20_000,
+        outs: false,
+        dead_cards: dead_cards
+      )
+
+    outs = Outs.compute(known, board, hand.context, dead_cards)
+
+    Enum.map(result.players, fn player ->
+      %{
+        seat: player.id,
+        win: player.win,
+        tie: player.tie,
+        equity: player.equity,
+        outs: outs |> Map.get(player.id, []) |> Enum.map(&out_payload/1)
+      }
+    end)
   end
 
   defp out_payload(out) do
@@ -471,10 +602,16 @@ defmodule BlockPoker.Engine.Hand do
     count = Map.fetch!(@board_cards, street)
     {cards, deck} = Enum.split(hand.deck, count)
 
+    # Прогоны идут улица в улицу, а не «первый до ривера, потом второй»:
+    # порядок откусывания от колоды — часть правил, потому что он решает,
+    # какому борду какая карта досталась, и обязан быть воспроизводим по seed.
+    {board_2, deck} = deal_second(hand.board_2, deck, count)
+
     hand = %{
       hand
       | street: street,
         board: hand.board ++ cards,
+        board_2: board_2,
         deck: deck,
         bet: 0,
         min_raise: hand.bet_unit,
@@ -485,7 +622,21 @@ defmodule BlockPoker.Engine.Hand do
           end)
     }
 
-    {hand, {:street_dealt, %{street: street, board: board_payload(hand), pot: hand.pot}}}
+    {hand,
+     {:street_dealt,
+      %{
+        street: street,
+        board: board_payload(hand),
+        board_2: second_board_payload(hand),
+        pot: hand.pot
+      }}}
+  end
+
+  defp deal_second(nil, deck, _count), do: {nil, deck}
+
+  defp deal_second(board_2, deck, count) do
+    {cards, deck} = Enum.split(deck, count)
+    {board_2 ++ cards, deck}
   end
 
   defp finish(hand) do
@@ -520,11 +671,17 @@ defmodule BlockPoker.Engine.Hand do
         {amount, rake} = take_rake(hand, hand.pot, 1)
 
         %{
-          pots: [%{amount: amount, winners: [only.seat]}],
+          runs: [
+            %{
+              run: 1,
+              board: board_payload(hand),
+              pots: [%{amount: amount, winners: [only.seat]}],
+              placements: []
+            }
+          ],
           payouts: %{only.seat => amount},
           rake: rake,
-          showdown?: false,
-          placements: []
+          showdown?: false
         }
 
       _many ->
@@ -532,16 +689,56 @@ defmodule BlockPoker.Engine.Hand do
     end
   end
 
+  # Вскрытие разбито на две несвязанные вещи, и это разделение — не украшение.
+  #
+  # **Слои банка от борда не зависят.** Сколько слоёв, какого размера и кто
+  # на них претендует — определяют вложения игроков; карты решают только, кто
+  # из претендентов слой забрал. Поэтому слои и рейк считаются **один раз**,
+  # а ранжировка — по разу на прогон (§6 задачи 5).
+  #
+  # Отсюда же и защита от главной денежной ошибки run it twice: прогнать
+  # `payout/1` дважды означало бы снять рейк дважды. В такой структуре это
+  # невыразимо — `take_rake/3` живёт в `pot_layers/2` и вызывается один раз
+  # независимо от числа прогонов.
   defp showdown(hand, contenders) do
+    {layers, refunds} = pot_layers(hand, contenders)
+
+    rake =
+      hand.pot - Enum.sum(Enum.map(layers, & &1.amount)) - Enum.sum(Map.values(refunds))
+
+    boards = boards(hand)
     entries = Enum.map(contenders, &{&1.seat, &1.hole})
-    placements = Showdown.showdown(entries, hand.board, hand.context)
-    place_of = Map.new(placements, &{&1.player_id, &1.place})
 
-    {pots, payouts, refunded} = split_pots(hand, place_of)
-    rake = hand.pot - Enum.sum(Enum.map(pots, & &1.amount)) - refunded
+    {runs, payouts} =
+      boards
+      |> Enum.with_index()
+      |> Enum.map_reduce(%{}, fn {board, index}, payouts ->
+        placements = Showdown.showdown(entries, board, hand.context)
+        place_of = Map.new(placements, &{&1.player_id, &1.place})
+        pots = resolve_layers(layers, place_of, index, length(boards))
 
-    %{pots: pots, payouts: payouts, rake: rake, showdown?: true, placements: placements}
+        run = %{
+          run: index + 1,
+          board: Enum.map(board, &Card.to_map/1),
+          pots: pots,
+          placements: placements
+        }
+
+        {run, merge_chips(payouts, distribute(pots, hand.button_seat, hand.order))}
+      end)
+
+    %{
+      runs: runs,
+      payouts: merge_chips(payouts, refunds),
+      rake: rake,
+      showdown?: true
+    }
   end
+
+  # Борды раздачи в порядке прогонов. Обычная раздача — один; принятый
+  # run it twice — два, с общим префиксом до олл-ина.
+  defp boards(%__MODULE__{board_2: nil, board: board}), do: [board]
+  defp boards(%__MODULE__{board_2: board_2, board: board}), do: [board, board_2]
 
   # Сайд-поты строятся по уровням, которые **разыгрывают претенденты**:
   # только их вложения делят банк на слои. Всё остальное — деньги, которые
@@ -556,8 +753,7 @@ defmodule BlockPoker.Engine.Hand do
   # блайнд с анте вкладывает больше лимперов, и наверху появлялся слой, на
   # который не претендует никто. Такой банк делился между пустым списком
   # победителей — то есть на ноль.
-  defp split_pots(hand, place_of) do
-    contenders = hand |> players() |> Enum.filter(&Map.has_key?(place_of, &1.seat))
+  defp pot_layers(hand, contenders) do
     dead = hand |> players() |> Enum.reduce(0, &(&1.dead + &2))
 
     # Потолок банка — вторая по величине ставка за раздачу: выше неё ставку
@@ -577,7 +773,7 @@ defmodule BlockPoker.Engine.Hand do
       |> Enum.uniq()
       |> Enum.sort()
 
-    {pots, _prev} =
+    {layers, _prev} =
       levels
       |> Enum.with_index()
       |> Enum.map_reduce(0, fn {level, index}, prev ->
@@ -593,19 +789,45 @@ defmodule BlockPoker.Engine.Hand do
         eligible =
           contenders |> Enum.filter(&(min(&1.total, cap) >= level)) |> Enum.map(& &1.seat)
 
-        best = eligible |> Enum.map(&Map.fetch!(place_of, &1)) |> Enum.min(fn -> nil end)
-        winners = Enum.filter(eligible, &(Map.fetch!(place_of, &1) == best))
         {amount, _rake} = take_rake(hand, amount, length(eligible))
 
-        {%{amount: amount, winners: winners}, level}
+        {%{amount: amount, eligible: eligible}, level}
       end)
 
-    pots = if levels == [], do: [dead_only_pot(hand, contenders, dead)], else: pots
-    pots = Enum.reject(pots, &(&1.amount == 0 or &1.winners == []))
-    payouts = distribute(pots, hand.button_seat, hand.order)
+    layers = if levels == [], do: [dead_only_layer(hand, contenders, dead)], else: layers
 
-    {pots, Map.merge(payouts, refunds, fn _seat, paid, refund -> paid + refund end),
-     Enum.sum(Map.values(refunds))}
+    {Enum.reject(layers, &(&1.amount == 0)), refunds}
+  end
+
+  # Кто забрал каждый слой на этом борде — и сколько от слоя причитается
+  # этому прогону.
+  #
+  # Нечётная фишка достаётся **первому** прогону: правило детерминированное,
+  # не зависит ни от позиции, ни от порядка мест, и объясняется игроку одной
+  # фразой. Делить её случайно нельзя — в системе не должно появляться и
+  # исчезать ни одной фишки (§11 CLAUDE.md).
+  defp resolve_layers(layers, place_of, index, runs) do
+    layers
+    |> Enum.map(fn layer ->
+      best = layer.eligible |> Enum.map(&Map.fetch!(place_of, &1)) |> Enum.min(fn -> nil end)
+      winners = Enum.filter(layer.eligible, &(Map.fetch!(place_of, &1) == best))
+
+      %{amount: share(layer.amount, index, runs), winners: winners}
+    end)
+    |> Enum.reject(&(&1.amount == 0 or &1.winners == []))
+  end
+
+  defp share(amount, 0, runs), do: div(amount, runs) + rem(amount, runs)
+  defp share(amount, _index, runs), do: div(amount, runs)
+
+  defp merge_chips(left, right), do: Map.merge(left, right, fn _seat, a, b -> a + b end)
+
+  # Вырожденный случай: ставок не было вовсе, а мёртвые деньги в банке есть.
+  # Разыгрывают их те, кто дошёл до вскрытия.
+  defp dead_only_layer(hand, contenders, dead) do
+    seats = Enum.map(contenders, & &1.seat)
+    {amount, _rake} = take_rake(hand, dead, max(length(seats), 1))
+    %{amount: amount, eligible: seats}
   end
 
   defp matched_cap(hand) do
@@ -614,14 +836,6 @@ defmodule BlockPoker.Engine.Hand do
       [only] -> only
       [_highest, second | _rest] -> second
     end
-  end
-
-  # Вырожденный случай: ставок не было вовсе, а мёртвые деньги в банке есть.
-  # Разыгрывают их те, кто дошёл до вскрытия.
-  defp dead_only_pot(hand, contenders, dead) do
-    seats = Enum.map(contenders, & &1.seat)
-    {amount, _rake} = take_rake(hand, dead, max(length(seats), 1))
-    %{amount: amount, winners: seats}
   end
 
   # Неделимый остаток достаётся ближайшему от кнопки по часовой стрелке —
@@ -832,10 +1046,12 @@ defmodule BlockPoker.Engine.Hand do
 
   defp board_payload(hand), do: Enum.map(hand.board, &Card.to_map/1)
 
+  defp second_board_payload(%__MODULE__{board_2: nil}), do: nil
+  defp second_board_payload(%__MODULE__{board_2: board_2}), do: Enum.map(board_2, &Card.to_map/1)
+
   defp finish_payload(hand, results) do
     %{
-      board: board_payload(hand),
-      pots: results.pots,
+      runs: results.runs,
       payouts: results.payouts,
       rake: Map.get(results, :rake, 0),
       showdown: results.showdown?,

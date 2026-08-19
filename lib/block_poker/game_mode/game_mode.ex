@@ -39,6 +39,17 @@ defmodule BlockPoker.GameMode do
   @callback rake(setting :: term(), pot :: non_neg_integer(), players :: pos_integer(), keyword()) ::
               non_neg_integer()
 
+  @doc """
+  Разрешён ли за этим столом run it twice.
+
+  Кэш читает флаг шаблона; любой другой режим отвечает `false` **всегда**.
+  В турнире фишка — это позиция в структуре мест, и дробление банка по
+  прогонам меняет распределение мест, а не только дисперсию. Настройки
+  «разрешить RIT» в турнирных структурах не заводится: решение принимается
+  здесь и больше нигде.
+  """
+  @callback run_it_twice?(RoomState.t()) :: boolean()
+
   @doc "Вернуть фишки игроку: в кэше — cash-out в кошелёк, в турнире — no-op."
   @callback return_chips(RoomState.t(), Ecto.UUID.t(), non_neg_integer(), String.t()) ::
               :ok | {:error, atom()}

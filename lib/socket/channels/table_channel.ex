@@ -102,6 +102,12 @@ defmodule Socket.Channels.TableChannel do
     |> Message.reply(socket)
   end
 
+  def handle_in("run_it_twice", payload, socket) do
+    socket.assigns.room_id
+    |> Tables.answer_run_it_twice(socket.assigns.user_id, payload["accept"] == true)
+    |> Message.reply(socket)
+  end
+
   def handle_in("rabbit_hunt", _payload, socket) do
     socket.assigns.room_id
     |> Tables.rabbit_hunt(socket.assigns.user_id)

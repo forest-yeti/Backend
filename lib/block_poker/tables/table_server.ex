@@ -28,6 +28,9 @@ defmodule BlockPoker.Tables.TableServer do
 
   # Пауза между улицами при доводке борта и перед следующей раздачей.
   @runout_step_ms 1_500
+  # Сколько даётся на ответ про два прогона. Молчание — отказ, поэтому окно
+  # короткое: стол не может ждать думающего дольше, чем длится его ход.
+  @rit_offer_ms 8_000
   @next_hand_ms 2_500
   # Насколько показ rabbit-карт отодвигает следующую раздачу: ровно столько,
   # чтобы их успели рассмотреть, и не настолько, чтобы стол простаивал.
@@ -148,6 +151,12 @@ defmodule BlockPoker.Tables.TableServer do
   @doc "Открыть свои карты по желанию."
   @spec show_cards(GenServer.server(), Ecto.UUID.t()) :: :ok | {:error, atom()}
   def show_cards(room, user_id), do: GenServer.call(room, {:show_cards, user_id})
+
+  @doc "Ответ игрока на предложение сыграть дважды."
+  @spec answer_run_it_twice(GenServer.server(), Ecto.UUID.t(), boolean()) ::
+          :ok | {:error, atom()}
+  def answer_run_it_twice(room, user_id, accept?),
+    do: GenServer.call(room, {:run_it_twice, user_id, accept?})
 
   @doc "Показать карты, которые пришли бы дальше, если бы раздача доигралась."
   @spec rabbit_hunt(GenServer.server(), Ecto.UUID.t()) :: :ok | {:error, atom()}
@@ -325,6 +334,18 @@ defmodule BlockPoker.Tables.TableServer do
     with {:ok, hand} <- fetch_hand(state),
          {:ok, seat} <- seat_of(state, user_id),
          {:ok, hand, events} <- Hand.show_cards(hand, seat) do
+      {:reply, :ok, apply_hand(state, hand, events)}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  # Кто вправе отвечать — правило игры, и проверяет его раздача. Сервер лишь
+  # переводит `user_id` в место и отдаёт ответ движку.
+  def handle_call({:run_it_twice, user_id, accept?}, _from, state) do
+    with {:ok, hand} <- fetch_hand(state),
+         {:ok, seat} <- seat_of(state, user_id),
+         {:ok, hand, events} <- Hand.answer_run_it_twice(hand, seat, accept?) do
       {:reply, :ok, apply_hand(state, hand, events)}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
@@ -572,6 +593,16 @@ defmodule BlockPoker.Tables.TableServer do
   # Пауза между раздачами: игрок должен успеть увидеть, чем всё кончилось.
   defp do_timeout(:next_hand, state), do: start_hand(state)
 
+  # Время на ответ вышло: неотвеченное — отказ, и доводка идёт одним бордом.
+  defp do_timeout(:rit, state) do
+    with {:ok, hand} <- fetch_hand(state),
+         {:ok, hand, events} <- Hand.close_run_it_twice(hand) do
+      apply_hand(state, hand, events)
+    else
+      {:error, _reason} -> state
+    end
+  end
+
   # Доводка борта при олл-ине: по улице за тик, чтобы игрок успел увидеть
   # флоп, тёрн и ривер, а не только итог.
   defp do_timeout(:runout, state) do
@@ -720,10 +751,20 @@ defmodule BlockPoker.Tables.TableServer do
 
     cond do
       Hand.finished?(hand) -> finish_hand(state, hand)
+      Hand.offering_run_it_twice?(hand) -> arm_rit_timer(state)
       hand.runout? -> schedule(cancel_timer(state, :action), :runout, @runout_step_ms)
       true -> advance_to_actor(state, hand)
     end
   end
+
+  # Окно ответа взводится один раз: повторный `apply_hand/3` внутри того же
+  # окна (ответил первый из двоих) не должен продлевать его второму.
+  defp arm_rit_timer(%State{room: %RoomState{rit_deadline_at: nil}} = state) do
+    state = put_room(state, %{state.room | rit_deadline_at: now_ms(state) + @rit_offer_ms})
+    schedule(cancel_timer(state, :action), :rit, @rit_offer_ms)
+  end
+
+  defp arm_rit_timer(state), do: state
 
   # Новая улица — новая обстановка: выбор, сделанный до флопа, к ней уже
   # не относится, и молча применять его нельзя.
@@ -835,7 +876,7 @@ defmodule BlockPoker.Tables.TableServer do
   defp now_ms(%State{clock: clock}), do: clock.()
 
   defp finish_hand(state, hand) do
-    state = state |> cancel_timer(:action) |> cancel_timer(:runout)
+    state = state |> cancel_timer(:action) |> cancel_timer(:runout) |> cancel_timer(:rit)
 
     state = record_stats(state, hand)
 
@@ -846,6 +887,7 @@ defmodule BlockPoker.Tables.TableServer do
           hand_stats: nil,
           deadline_at: nil,
           time_bank_at: nil,
+          rit_deadline_at: nil,
           showdown: nil
       }
       |> RoomState.clear_preselects()
@@ -1017,10 +1059,18 @@ defmodule BlockPoker.Tables.TableServer do
     state
   end
 
-  defp emit({:equity_update, equity}, state) do
-    showdown = Map.put(state.room.showdown || %{}, :equity, equity)
+  # Вопрос закрыт: гасим окно вместе с его таймером — иначе просроченный тик
+  # попытался бы закрыть его второй раз.
+  defp emit({:run_it_twice_decided, payload}, state) do
+    state = put_room(cancel_timer(state, :rit), %{state.room | rit_deadline_at: nil})
+    broadcast(state, "run_it_twice_decided", payload)
+    state
+  end
+
+  defp emit({:equity_update, runs}, state) do
+    showdown = Map.put(state.room.showdown || %{}, :equity, runs)
     state = put_room(state, %{state.room | showdown: showdown})
-    broadcast(state, "equity_update", %{equity: equity})
+    broadcast(state, "equity_update", %{runs: runs})
     state
   end
 

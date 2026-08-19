@@ -140,6 +140,14 @@ defmodule BlockPoker.ArchitectureTest do
     assert offenders(@transport, pattern) == []
   end
 
+  test "транспорт не решает, кому и когда играть дважды" do
+    # Канал только передаёт ответ игрока: кого спрашивают, разрешено ли это
+    # за столом и чем кончилось — целиком дело ядра (§3 задачи 5).
+    pattern = ~r/allowed_run_it_twice|run_it_twice\?|RunItTwice|rit\./
+
+    assert offenders(@transport, pattern) == []
+  end
+
   test "комната ходит в кошелёк только через контекст, а не сама" do
     # TableServer держит фишки, но деньгами не двигает: иначе одна медленная
     # транзакция останавливала бы весь стол.
