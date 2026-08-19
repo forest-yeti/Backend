@@ -77,6 +77,13 @@ defmodule BlockPoker.Tables.Lobby do
     GenServer.call(server, {:rooms_for, setting_id})
   end
 
+  @doc """
+  Все комнаты пула. Нужны, чтобы найти места игрока: он держит их в разных
+  лимитах одновременно, и обходить по одному шаблону нельзя.
+  """
+  @spec rooms(GenServer.server()) :: [Room.t()]
+  def rooms(server \\ __MODULE__), do: GenServer.call(server, :rooms)
+
   @spec settings(GenServer.server()) :: [CashGameSetting.t()]
   def settings(server \\ __MODULE__), do: GenServer.call(server, :settings)
 
@@ -113,6 +120,8 @@ defmodule BlockPoker.Tables.Lobby do
   end
 
   def handle_call(:settings, _from, state), do: {:reply, Map.values(state.settings), state}
+
+  def handle_call(:rooms, _from, state), do: {:reply, Map.values(state.rooms), state}
 
   def handle_call({:rooms_for, setting_id}, _from, state) do
     {:reply, rooms_of(state, setting_id), state}

@@ -248,4 +248,26 @@ defmodule Socket.Channels.LobbyChannelTest do
     ref = push(channel, "find_by_code", %{"code" => private.code})
     assert_reply ref, :error, %{code: "no_seats_available"}
   end
+
+  test "my_seats отвечает, за какими столами игрок уже сидит", %{setting: setting, buy_in: buy_in} do
+    %{user: user, channel: channel} = join_lobby()
+
+    ref = push(channel, "my_seats", %{})
+    assert_reply ref, :ok, %{seats: []}
+
+    ref = push(channel, "quick_seat", %{"setting_id" => setting.id, "buy_in" => buy_in})
+    assert_reply ref, :ok, %{room_id: room_id}
+
+    # Закрытое окно стола места не освобождает, и лобби обязано уметь
+    # сказать, куда возвращаться: иначе игроку доступна только «Сесть»,
+    # а она честно отвечает already_seated.
+    ref = push(channel, "my_seats", %{})
+    assert_reply ref, :ok, %{seats: [seat]}
+    assert seat.room_id == room_id
+    assert seat.setting_id == setting.id
+    assert seat.seat == 1
+
+    assert TableRegistry.whereis(room_id) != nil
+    assert user.id != nil
+  end
 end

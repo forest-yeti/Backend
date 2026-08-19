@@ -147,6 +147,36 @@ defmodule BlockPoker.Tables do
   end
 
   @doc """
+  Где игрок сидит прямо сейчас — по всем комнатам сразу.
+
+  Нужно лобби: закрытое окно стола не освобождает место, и без этого списка
+  игрок не знает, за какой стол возвращаться, а «Сесть» отвечает ему
+  `already_seated`. Место — состояние комнаты, а не сессии, поэтому список
+  собирается с живых комнат, а не хранится рядом с соединением.
+  """
+  @spec my_seats(Ecto.UUID.t()) :: [map()]
+  def my_seats(user_id) do
+    Lobby.rooms()
+    |> Enum.flat_map(fn room ->
+      with {:ok, state} <- room_state(room.room_id),
+           %{} = seat <- RoomState.find_seat(state, user_id) do
+        [
+          %{
+            room_id: room.room_id,
+            setting_id: room.setting_id,
+            seat: seat.number,
+            stack: seat.stack,
+            status: seat.status
+          }
+        ]
+      else
+        _other -> []
+      end
+    end)
+    |> Enum.sort_by(& &1.room_id)
+  end
+
+  @doc """
   Уход из-за стола: стек возвращается в кошелёк записью `cash_out`.
 
   Место освобождается **после** подтверждения перевода — до тех пор оно
@@ -386,7 +416,12 @@ defmodule BlockPoker.Tables do
         {:ok, result}
 
       # Место или комнату успели занять — идём в следующую комнату.
-      {:error, reason} when reason in [:seat_taken, :no_seats_available, :room_closing] ->
+      # `already_seated` здесь того же рода: игрок сидит **в этой** комнате,
+      # а просил он не её, а любую комнату лимита. Отказ вместо перехода к
+      # следующей делал быстрый вход неработающим для всех, кто уже сидит
+      # за самым полным столом лимита, — то есть для мультитейбла.
+      {:error, reason}
+      when reason in [:seat_taken, :no_seats_available, :room_closing, :already_seated] ->
         try_rooms(rest, user_id, buy_in, entry, reason)
 
       {:error, reason} ->

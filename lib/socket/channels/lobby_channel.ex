@@ -48,6 +48,12 @@ defmodule Socket.Channels.LobbyChannel do
     {:reply, {:ok, Message.pong(payload)}, socket}
   end
 
+  # Где игрок уже сидит. Закрытие окна стола место не освобождает, и лобби
+  # обязано уметь ответить, куда возвращаться.
+  def handle_in("my_seats", _payload, socket) do
+    {:reply, {:ok, LobbyView.my_seats(Tables.my_seats(socket.assigns.user_id))}, socket}
+  end
+
   # Вход по коду: канал отдаёт превью комнаты, садится игрок обычным
   # `join_seat` в топике стола.
   def handle_in("find_by_code", payload, socket) do

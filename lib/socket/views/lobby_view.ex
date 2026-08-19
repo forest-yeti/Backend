@@ -86,4 +86,25 @@ defmodule Socket.Views.LobbyView do
   def visuals(setting) do
     %{felt_color: setting.felt_color, background_color: setting.background_color}
   end
+
+  @doc """
+  Занятые игроком места. Список плоский: за одним лимитом можно сидеть в
+  нескольких комнатах, и группировать их по шаблону значило бы решать за
+  клиента, как он их покажет.
+  """
+  @spec my_seats([map()]) :: map()
+  def my_seats(seats) do
+    %{
+      seats:
+        Enum.map(seats, fn seat ->
+          %{
+            room_id: seat.room_id,
+            setting_id: seat.setting_id,
+            seat: seat.seat,
+            stack: seat.stack,
+            status: seat.status
+          }
+        end)
+    }
+  end
 end
