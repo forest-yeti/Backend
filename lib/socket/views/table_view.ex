@@ -27,9 +27,15 @@ defmodule Socket.Views.TableView do
       room_id: room.room_id,
       setting_id: room.setting.id,
       name: CashGameSetting.display_name(room.setting),
+      game_type: room.setting.game_type,
+      betting_structure: CashGameSetting.structure(room.setting).id(),
       small_blind: room.setting.small_blind,
       big_blind: room.setting.big_blind,
       ante: room.setting.ante,
+      # Номинал, от которого клиент считает шаги ползунка ставки. Приходит
+      # посчитанным: выбирать между блайндом и анте — это ветвление по
+      # правилам игры, которого в транспорте быть не может (§3 CLAUDE.md).
+      bet_unit: RoomState.bet_unit(room),
       max_players: room.setting.max_players,
       timings: timings(room.setting),
       action_seq: room.action_seq,

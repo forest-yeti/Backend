@@ -111,6 +111,35 @@ defmodule BlockPoker.ArchitectureTest do
     assert offenders(@engine, ~r/GameMode/) == []
   end
 
+  test "раздача не знает ни блайндов, ни анте — только номинал структуры" do
+    # §3.4 задачи 4: вынужденные ставки собирает `BettingStructure`, и
+    # упоминание блайндов в `Hand` означало бы, что шов проведён неверно.
+    source = "lib/block_poker/engine/hand.ex" |> sources() |> hd() |> elem(1) |> strip_docs()
+
+    refute Regex.match?(~r/small_blind|big_blind|ante/, source)
+  end
+
+  test "ветвление по структуре ставок живёт только в её реестре реализаций" do
+    offenders =
+      @engine
+      |> Enum.flat_map(&sources/1)
+      |> Enum.reject(fn {path, _source} ->
+        String.contains?(path, "betting_structure") or String.contains?(path, "variant")
+      end)
+      |> Enum.filter(fn {_path, source} ->
+        Regex.match?(~r/:button_ante|ButtonAnte|:blinds/, strip_docs(source))
+      end)
+      |> Enum.map(&elem(&1, 0))
+
+    assert offenders == []
+  end
+
+  test "транспорт не знает ни видов покера, ни структур ставок" do
+    pattern = ~r/:short_deck|ShortDeck|:texas_holdem|TexasHoldem|:button_ante|ButtonAnte/
+
+    assert offenders(@transport, pattern) == []
+  end
+
   test "комната ходит в кошелёк только через контекст, а не сама" do
     # TableServer держит фишки, но деньгами не двигает: иначе одна медленная
     # транзакция останавливала бы весь стол.

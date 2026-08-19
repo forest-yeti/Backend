@@ -5,16 +5,19 @@ defmodule BlockPoker.CashGames.CashGameSetting do
   Шаблон — это *описание лимита*, а не стол. Столов (комнат) под одним
   шаблоном может быть сколько угодно, и они процессы (§3 задачи 3).
 
-  Бай-ин хранится в **больших блайндах**, а не в фишках: `min: 40, max: 100` —
-  это классический стол на 100bb, и такая запись переживает смену лимитов.
-  Абсолютные значения считаются от `big_blind` функциями `min_buy_in_chips/1`
-  и `max_buy_in_chips/1` — арифметика над фишками живёт в ядре, не во view.
+  Бай-ин хранится в **базовых единицах стола**, а не в фишках: `min: 40,
+  max: 100` — это классический стол на 100 единиц, и такая запись переживает
+  смену лимитов. Базовая единица зависит от структуры ставок (`bet_unit/1`):
+  на блайндовом столе это большой блайнд, на анте-столе — анте. Абсолютные
+  значения считают `min_buy_in_chips/1` и `max_buy_in_chips/1` — арифметика
+  над фишками живёт в ядре, не во view.
   """
 
   use Ecto.Schema
 
   import Ecto.Changeset
 
+  alias BlockPoker.Engine.BettingStructure
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
 
   @type t :: %__MODULE__{}
@@ -125,6 +128,24 @@ defmodule BlockPoker.CashGames.CashGameSetting do
   @spec ante_types() :: [atom()]
   def ante_types, do: @ante_types
 
+  @doc """
+  Структура ставок стола. Её задаёт вид покера, а не отдельное поле: холдем
+  играется на блайндах, Short Deck — на анте кнопки.
+  """
+  @spec structure(t()) :: BettingStructure.t()
+  def structure(%__MODULE__{game_type: game_type}) do
+    game_type |> VariantRegistry.fetch!() |> then(& &1.betting_structure())
+  end
+
+  @doc """
+  Базовая единица стола: большой блайнд у блайндов, анте у анте кнопки.
+  В ней же считается бай-ин и категория лимита в лобби.
+  """
+  @spec bet_unit(t()) :: non_neg_integer()
+  def bet_unit(%__MODULE__{} = setting) do
+    structure(setting).bet_unit(%{big_blind: setting.big_blind, ante: setting.ante})
+  end
+
   @spec visibilities() :: [atom()]
   def visibilities, do: @visibilities
 
@@ -188,7 +209,7 @@ defmodule BlockPoker.CashGames.CashGameSetting do
     setting
     |> cast(attrs, @editable)
     |> validate_required([:game_type, :currency, :small_blind, :big_blind, :max_players])
-    |> validate_number(:small_blind, greater_than: 0)
+    |> validate_number(:small_blind, greater_than_or_equal_to: 0)
     |> validate_number(:ante, greater_than_or_equal_to: 0)
     |> validate_inclusion(:max_players, 2..9)
     |> validate_number(:min_buy_in, greater_than_or_equal_to: 20)
@@ -212,12 +233,12 @@ defmodule BlockPoker.CashGames.CashGameSetting do
 
   @doc "Нижняя граница бай-ина в фишках."
   @spec min_buy_in_chips(t()) :: pos_integer()
-  def min_buy_in_chips(%__MODULE__{} = setting), do: setting.min_buy_in * setting.big_blind
+  def min_buy_in_chips(%__MODULE__{} = setting), do: setting.min_buy_in * bet_unit(setting)
 
   @doc "Верхняя граница бай-ина в фишках; `nil` — стол без потолка."
   @spec max_buy_in_chips(t()) :: pos_integer() | nil
   def max_buy_in_chips(%__MODULE__{max_buy_in: nil}), do: nil
-  def max_buy_in_chips(%__MODULE__{} = setting), do: setting.max_buy_in * setting.big_blind
+  def max_buy_in_chips(%__MODULE__{} = setting), do: setting.max_buy_in * bet_unit(setting)
 
   @doc """
   Потолок рейка для раздачи с `players` участниками: берётся ближайший
@@ -251,14 +272,62 @@ defmodule BlockPoker.CashGames.CashGameSetting do
     )
   end
 
+  # Какие номиналы шаблон обязан заполнить, решает структура ставок, а не
+  # `game_type`: блайндовому столу нужны блайнды, анте-столу — анте, и лишние
+  # поля у обоих должны быть нулями, иначе в БД поселится второй, никем не
+  # применяемый лимит.
   defp validate_blinds(changeset) do
+    case structure_of(changeset) do
+      nil -> changeset
+      BettingStructure.Blinds -> validate_blind_limits(changeset)
+      _button_ante -> validate_ante_limits(changeset)
+    end
+  end
+
+  defp structure_of(changeset) do
+    case VariantRegistry.fetch(get_field(changeset, :game_type)) do
+      {:ok, variant} -> variant.betting_structure()
+      {:error, :unknown_variant} -> nil
+    end
+  end
+
+  defp validate_blind_limits(changeset) do
     small = get_field(changeset, :small_blind)
     big = get_field(changeset, :big_blind)
 
-    if is_integer(small) and is_integer(big) and big <= small do
-      add_error(changeset, :big_blind, "должен быть больше малого блайнда")
-    else
+    changeset
+    |> require_positive(:small_blind, "на блайндовом столе нужны блайнды")
+    |> then(fn changeset ->
+      if is_integer(small) and is_integer(big) and big <= small do
+        add_error(changeset, :big_blind, "должен быть больше малого блайнда")
+      else
+        changeset
+      end
+    end)
+  end
+
+  # Проверяем по `get_field/2`, а не `validate_number/3`: у `ante` в схеме
+  # дефолт 0, и явно переданный ноль изменением не считается — валидация
+  # числа его просто не увидела бы.
+  defp validate_ante_limits(changeset) do
+    changeset
+    |> require_positive(:ante, "на анте-столе нужен номинал больше нуля")
+    |> require_zero(:small_blind, "на анте-столе блайндов нет")
+    |> require_zero(:big_blind, "на анте-столе блайндов нет")
+  end
+
+  defp require_positive(changeset, field, message) do
+    if is_integer(get_field(changeset, field)) and get_field(changeset, field) > 0 do
       changeset
+    else
+      add_error(changeset, field, message)
+    end
+  end
+
+  defp require_zero(changeset, field, message) do
+    case get_field(changeset, field) do
+      value when value in [0, nil] -> changeset
+      _other -> add_error(changeset, field, message)
     end
   end
 

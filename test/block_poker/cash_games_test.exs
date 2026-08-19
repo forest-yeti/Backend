@@ -9,6 +9,7 @@ defmodule BlockPoker.CashGamesTest do
 
   alias BlockPoker.CashGames
   alias BlockPoker.CashGames.{CashGameSetting, Grid}
+  alias BlockPoker.Engine.BettingStructure
 
   describe "валидация" do
     test "большой блайнд обязан быть больше малого" do
@@ -121,16 +122,30 @@ defmodule BlockPoker.CashGamesTest do
   end
 
   describe "mix cash_game.seed" do
-    test "разворачивает 72 шаблона: 12 уровней main и 6 play money, по четыре формата" do
+    test "разворачивает 90 шаблонов: 12 уровней main и 6 play money, по пять форматов" do
       rows = Grid.expand()
 
-      assert length(rows) == 72
-      assert Enum.count(rows, &(&1.attrs.currency == :main)) == 48
-      assert Enum.count(rows, &(&1.attrs.currency == :play_money)) == 24
+      assert length(rows) == 90
+      assert Enum.count(rows, &(&1.attrs.currency == :main)) == 60
+      assert Enum.count(rows, &(&1.attrs.currency == :play_money)) == 30
+    end
+
+    test "Short Deck разворачивается по всей лестнице лимитов, только 6-max" do
+      short_deck = Grid.expand() |> Enum.filter(&(&1.attrs.game_type == :short_deck))
+
+      # По одному столу на каждый уровень обеих валют.
+      assert length(short_deck) == 18
+      assert Enum.map(short_deck, & &1.attrs.max_players) |> Enum.uniq() == [6]
+
+      # Блайндов у анте-стола нет, номинал — анте, равное bb уровня.
+      assert Enum.all?(short_deck, &(&1.attrs.small_blind == 0 and &1.attrs.big_blind == 0))
+      assert Enum.all?(short_deck, &(&1.attrs.ante > 0))
     end
 
     test "анте на Ante-столах — половина большого блайнда" do
-      rows = Grid.expand(currency: :main, only: ["NL5", "NL10"])
+      rows =
+        Grid.expand(currency: :main, only: ["NL5", "NL10"])
+        |> Enum.filter(&(&1.attrs.game_type == :texas_holdem))
 
       ante_rows = Enum.filter(rows, &(&1.attrs.ante > 0))
       # NL5: bb 5 -> анте 2 (округление вниз); NL10: bb 10 -> анте 5.
@@ -154,12 +169,12 @@ defmodule BlockPoker.CashGamesTest do
       rows = Grid.expand(currency: :play_money, only: ["NL1000"])
 
       first = Grid.seed(rows)
-      assert length(first.created) == 4
+      assert length(first.created) == 5
 
       second = Grid.seed(rows)
       assert second.created == []
-      assert length(second.skipped) == 4
-      assert length(CashGames.list_settings()) == 4
+      assert length(second.skipped) == 5
+      assert length(CashGames.list_settings()) == 5
     end
 
     test "--force перезаписывает, но не воскрешает выключенный оператором лимит" do
@@ -259,6 +274,63 @@ defmodule BlockPoker.CashGamesTest do
                CashGames.create_setting(valid_setting_attrs(%{code: "ABC!23"}))
 
       assert %{code: [_message]} = errors_on(changeset)
+    end
+  end
+
+  describe "Short Deck" do
+    test "анте-стол создаётся без блайндов" do
+      {:ok, setting} =
+        CashGames.create_setting(
+          valid_setting_attrs(%{game_type: :short_deck, small_blind: 0, big_blind: 0, ante: 10})
+        )
+
+      assert setting.game_type == :short_deck
+      assert CashGameSetting.bet_unit(setting) == 10
+      assert CashGameSetting.structure(setting) == BettingStructure.ButtonAnte
+    end
+
+    test "анте-стол с блайндами не создаётся" do
+      {:error, changeset} =
+        CashGames.create_setting(
+          valid_setting_attrs(%{game_type: :short_deck, small_blind: 5, big_blind: 10, ante: 10})
+        )
+
+      assert %{small_blind: [_message], big_blind: [_other]} = errors_on(changeset)
+    end
+
+    test "анте-стол без анте не создаётся" do
+      {:error, changeset} =
+        CashGames.create_setting(
+          valid_setting_attrs(%{game_type: :short_deck, small_blind: 0, big_blind: 0, ante: 0})
+        )
+
+      assert %{ante: [_message]} = errors_on(changeset)
+    end
+
+    test "блайндовый стол без блайндов не создаётся" do
+      {:error, changeset} =
+        CashGames.create_setting(
+          valid_setting_attrs(%{game_type: :texas_holdem, small_blind: 0, big_blind: 0, ante: 5})
+        )
+
+      assert %{small_blind: [_message]} = errors_on(changeset)
+    end
+
+    test "бай-ин анте-стола считается в анте" do
+      {:ok, setting} =
+        CashGames.create_setting(
+          valid_setting_attrs(%{
+            game_type: :short_deck,
+            small_blind: 0,
+            big_blind: 0,
+            ante: 10,
+            min_buy_in: 40,
+            max_buy_in: 100
+          })
+        )
+
+      assert CashGameSetting.min_buy_in_chips(setting) == 400
+      assert CashGameSetting.max_buy_in_chips(setting) == 1_000
     end
   end
 end

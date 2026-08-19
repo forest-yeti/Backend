@@ -8,7 +8,7 @@ defmodule BlockPoker.Engine.Variant.Registry do
 
   alias BlockPoker.Engine.Variant
 
-  @variants [Variant.TexasHoldem]
+  @variants [Variant.TexasHoldem, Variant.ShortDeck]
   @by_id Map.new(@variants, &{&1.id(), &1})
 
   @spec all() :: [Variant.t()]

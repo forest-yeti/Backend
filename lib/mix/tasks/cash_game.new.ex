@@ -6,19 +6,22 @@ defmodule Mix.Tasks.CashGame.New do
   который разливает стандартную сетку лимитов.
 
       mix cash_game.new --blinds 5/10
+      mix cash_game.new --game-type short_deck --ante 10
       mix cash_game.new --name "Домашняя" --blinds 5/10 --max-players 6 \
         --buy-in 40-100 --private --no-auto-start
 
   Флаги:
 
-    * `--blinds sb/bb` — блайнды, единственный обязательный параметр;
+    * `--blinds sb/bb` — блайнды блайндового стола (холдем);
+    * `--ante` — анте анте-стола (Short Deck), где блайндов нет вовсе;
+      с `--blinds` взаимоисключающ, нужный из двух подсказывает сама команда;
     * `--name` — название для лобби (по умолчанию производное от лимитов);
     * `--game-type` — вариант игры (по умолчанию `texas_holdem`);
     * `--currency` — `main` или `play_money` (по умолчанию `play_money`);
     * `--max-players` — мест за столом, 2..9 (по умолчанию 6);
-    * `--buy-in min-max` — границы бай-ина **в больших блайндах**
-      (по умолчанию `40-100`; `40-` — стол без потолка);
-    * `--ante` — анте в фишках (по умолчанию 0);
+    * `--buy-in min-max` — границы бай-ина **в базовых единицах стола**:
+      больших блайндах у холдема, анте у Short Deck (по умолчанию `40-100`;
+      `40-` — стол без потолка);
     * `--rake` — рейк в сотых долях процента: `450` — это 4.5% (по умолчанию 0);
     * `--felt` и `--background` — цвета сукна и фона комнаты (`#RRGGBB`);
     * `--private` — комнаты нет в общей сетке лобби, вход только по коду;
@@ -91,16 +94,15 @@ defmodule Mix.Tasks.CashGame.New do
   end
 
   defp attrs(opts) do
-    {small, big} = blinds(opts[:blinds])
+    game_type = game_type(opts[:game_type])
     {min_buy_in, max_buy_in} = buy_in(opts[:buy_in])
 
-    %{
+    game_type
+    |> limits(opts)
+    |> Map.merge(%{
       name: opts[:name],
-      game_type: game_type(opts[:game_type]),
+      game_type: game_type,
       currency: currency(opts[:currency]),
-      small_blind: small,
-      big_blind: big,
-      ante: opts[:ante] || 0,
       max_players: opts[:max_players] || 6,
       min_buy_in: min_buy_in,
       max_buy_in: max_buy_in,
@@ -108,10 +110,40 @@ defmodule Mix.Tasks.CashGame.New do
       felt_color: opts[:felt],
       background_color: opts[:background],
       auto_start: opts[:auto_start] != false
-    }
+    })
     # Цвета не заданы — остаются дефолты схемы, а не `nil`.
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
+  end
+
+  # Какие номиналы спрашивать, знает структура ставок выбранного вида покера,
+  # а не эта команда: ветвиться по `game_type` в задаче mix — тот же самый
+  # запрет, что и в транспорте.
+  defp limits(game_type, opts) do
+    structure = game_type |> VariantRegistry.fetch!() |> then(& &1.betting_structure())
+
+    limits_for(structure.id(), opts)
+  end
+
+  defp limits_for(:blinds, opts) do
+    if opts[:ante] && !opts[:blinds] do
+      Mix.raise("на блайндовом столе нужны блайнды: --blinds 5/10")
+    end
+
+    {small, big} = blinds(opts[:blinds])
+    %{small_blind: small, big_blind: big, ante: 0}
+  end
+
+  defp limits_for(_button_ante, opts) do
+    if opts[:blinds] do
+      Mix.raise("на анте-столе блайндов нет: задайте номинал через --ante")
+    end
+
+    case opts[:ante] do
+      nil -> Mix.raise("не задан номинал стола: --ante 10")
+      ante when ante > 0 -> %{small_blind: 0, big_blind: 0, ante: ante}
+      _other -> Mix.raise("анте должно быть больше нуля")
+    end
   end
 
   defp blinds(nil), do: Mix.raise("не заданы блайнды: --blinds 5/10")
@@ -158,13 +190,15 @@ defmodule Mix.Tasks.CashGame.New do
   end
 
   defp describe(attrs) do
-    name =
-      Map.get(attrs, :name) || "#{attrs.small_blind}/#{attrs.big_blind} #{attrs.max_players}-max"
+    name = Map.get(attrs, :name) || "#{limits_label(attrs)} #{attrs.max_players}-max"
 
-    "#{name} — #{attrs.currency} #{attrs.small_blind}/#{attrs.big_blind}, " <>
-      "мест #{attrs.max_players}, бай-ин #{attrs.min_buy_in}-#{Map.get(attrs, :max_buy_in) || "∞"}bb" <>
+    "#{name} — #{attrs.currency} #{limits_label(attrs)}, " <>
+      "мест #{attrs.max_players}, бай-ин #{attrs.min_buy_in}-#{Map.get(attrs, :max_buy_in) || "∞"}" <>
       if(attrs.auto_start, do: "", else: ", ручной старт")
   end
+
+  defp limits_label(%{big_blind: 0} = attrs), do: "анте #{attrs.ante}"
+  defp limits_label(attrs), do: "#{attrs.small_blind}/#{attrs.big_blind}"
 
   defp errors(changeset) do
     changeset

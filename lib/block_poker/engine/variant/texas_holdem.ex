@@ -49,4 +49,7 @@ defmodule BlockPoker.Engine.Variant.TexasHoldem do
 
   @impl true
   def pot_split, do: :high
+
+  @impl true
+  def betting_structure, do: BlockPoker.Engine.BettingStructure.Blinds
 end

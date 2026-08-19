@@ -2,15 +2,15 @@ defmodule BlockPoker.Engine.HandSetup do
   @moduledoc """
   Вход раздачи: всё, что нужно движку, чтобы её начать, — и ничего сверх того.
 
-  Ключевое свойство — блайнды приходят **числами**, а не ссылкой на
-  `CashGameSetting`. Кэш берёт их из шаблона, турнир — из текущего уровня
+  Ключевое свойство — вынужденные ставки приходят **числами**, а не ссылкой
+  на `CashGameSetting`. Кэш берёт их из шаблона, турнир — из текущего уровня
   структуры; движку раздачи это безразлично, и именно поэтому он одинаков
   для обоих (§9 задачи 3).
 
   Структура чистая: ни кошельков, ни `Repo`, ни процессов.
   """
 
-  alias BlockPoker.Engine.Variant
+  alias BlockPoker.Engine.{BettingStructure, Variant}
 
   @type player :: %{
           seat: pos_integer(),
@@ -24,22 +24,31 @@ defmodule BlockPoker.Engine.HandSetup do
           variant: Variant.t(),
           players: [player()],
           button_seat: pos_integer(),
-          small_blind: pos_integer(),
-          big_blind: pos_integer(),
+          small_blind: non_neg_integer(),
+          big_blind: non_neg_integer(),
           ante: non_neg_integer(),
           ante_type: :big_blind | :per_player
         }
 
-  @enforce_keys [:variant, :players, :button_seat, :small_blind, :big_blind]
+  # Блайнды в обязательные не входят: на анте-столе их нет вовсе, и структура
+  # ставок берёт оттуда, откуда положено ей (`BettingStructure`).
+  @enforce_keys [:variant, :players, :button_seat]
   defstruct [
     :variant,
     :players,
     :button_seat,
-    :small_blind,
-    :big_blind,
+    small_blind: 0,
+    big_blind: 0,
     ante: 0,
     ante_type: :big_blind
   ]
+
+  @doc """
+  Структура ставок этой раздачи. Её задаёт вид покера, а не шаблон стола:
+  холдем играется на блайндах, Short Deck — на анте кнопки.
+  """
+  @spec structure(t()) :: BettingStructure.t()
+  def structure(%__MODULE__{variant: variant}), do: variant.betting_structure()
 
   @doc """
   Сумма фишек, с которой раздача начинается. Инвариант «фишки не возникают

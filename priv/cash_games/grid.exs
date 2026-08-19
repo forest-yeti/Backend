@@ -9,11 +9,17 @@
 
 %{
   # Форматы, в которых разворачивается каждый уровень.
+  # Формат может сменить и вид покера: Short Deck разворачивается на той же
+  # лестнице лимитов, что и холдем, — номиналом стола становится анте,
+  # равное большому блайнду уровня, а блайндов у такого стола нет вовсе.
+  # Only 6-max: за девятью местами 36 карт делятся плохо, хедз-ап на анте
+  # кнопки вырождается.
   formats: [
     %{suffix: "6-max", max_players: 6, ante: :none},
     %{suffix: "6-max Ante", max_players: 6, ante: :half_big_blind},
     %{suffix: "9-max", max_players: 9, ante: :none},
-    %{suffix: "HU", max_players: 2, ante: :none}
+    %{suffix: "HU", max_players: 2, ante: :none},
+    %{suffix: "Short Deck 6-max", max_players: 6, ante: :big_blind, game_type: :short_deck}
   ],
 
   # Общие для всей сетки значения. Меняются здесь, а не в коде задачи.

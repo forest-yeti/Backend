@@ -42,8 +42,7 @@ defmodule BlockPoker.Engine.Hand do
           players: %{pos_integer() => player()},
           order: [pos_integer()],
           button_seat: pos_integer(),
-          small_blind: pos_integer(),
-          big_blind: pos_integer(),
+          bet_unit: non_neg_integer(),
           street: street(),
           board: [Card.t()],
           pot: non_neg_integer(),
@@ -70,8 +69,9 @@ defmodule BlockPoker.Engine.Hand do
     :aggressor,
     :rake_fun,
     :results,
-    small_blind: 0,
-    big_blind: 0,
+    # Номинал структуры ставок: от него считаются минимальный бет и рейз.
+    # Блайндов и анте раздача не знает — только эту величину.
+    bet_unit: 0,
     street: :preflop,
     board: [],
     pot: 0,
@@ -87,7 +87,11 @@ defmodule BlockPoker.Engine.Hand do
   @board_cards %{flop: 3, turn: 1, river: 1}
 
   @doc """
-  Начало раздачи: анте, блайнды, карманные карты и первый ход.
+  Начало раздачи: вынужденные ставки, карманные карты и первый ход.
+
+  Что именно ставится до карт и кто говорит первым, знает структура ставок
+  (`Engine.BettingStructure`), а не эта функция: блайнды и анте кнопки
+  отличаются только ею.
 
   Возвращает состояние и события в порядке возникновения — клиент рисует
   их как есть, ничего не досчитывая.
@@ -114,6 +118,8 @@ defmodule BlockPoker.Engine.Hand do
          }}
       end)
 
+    structure = HandSetup.structure(setup)
+
     hand = %__MODULE__{
       variant: setup.variant,
       context: HandRank.context(setup.variant),
@@ -122,22 +128,20 @@ defmodule BlockPoker.Engine.Hand do
       players: players,
       order: order,
       button_seat: setup.button_seat,
-      small_blind: setup.small_blind,
-      big_blind: setup.big_blind,
+      bet_unit: structure.bet_unit(setup),
       rake_fun: Keyword.get(opts, :rake)
     }
 
-    {hand, ante_events} = post_antes(hand, setup)
-    {hand, blind_events} = post_blinds(hand)
+    {hand, forced_events} = post_forced_bets(hand, structure.forced_bets(setup))
     {hand, entry_events} = post_entries(hand, setup)
     hand = deal_hole(hand)
 
-    hand = %{hand | bet: max_committed(hand), min_raise: setup.big_blind}
-    hand = %{hand | to_act: first_to_act(hand)}
+    hand = %{hand | bet: max_committed(hand), min_raise: hand.bet_unit}
+    hand = %{hand | to_act: first_to_act(hand, structure.last_to_act_preflop(setup))}
 
     {hand,
-     ante_events ++
-       blind_events ++ entry_events ++ [{:hole_dealt, hole_payload(hand)}] ++ prompt(hand)}
+     forced_events ++
+       entry_events ++ [{:hole_dealt, hole_payload(hand)}] ++ prompt(hand)}
   end
 
   @doc "Легальные действия игрока — единственный источник правды для кнопок."
@@ -452,7 +456,7 @@ defmodule BlockPoker.Engine.Hand do
         board: hand.board ++ cards,
         deck: deck,
         bet: 0,
-        min_raise: hand.big_blind,
+        min_raise: hand.bet_unit,
         aggressor: nil,
         players:
           Map.new(hand.players, fn {seat, player} ->
@@ -628,27 +632,42 @@ defmodule BlockPoker.Engine.Hand do
 
   # --- вспомогательное ------------------------------------------------------
 
-  defp post_antes(hand, %HandSetup{ante: 0}), do: {hand, []}
-
-  defp post_antes(hand, %HandSetup{ante: ante, ante_type: :per_player}) do
-    Enum.reduce(hand.order, {hand, []}, fn seat, {acc, events} ->
-      player = Map.fetch!(acc.players, seat)
-      amount = min(ante, player.stack)
-      acc = commit(acc, player, amount)
-      {acc, events ++ [{:posted, %{seat: seat, kind: "ante", amount: amount, pot: acc.pot}}]}
+  # Вынужденные ставки: суммы приходят от структуры, урезание по стеку —
+  # здесь, потому что только раздача знает, сколько у игрока осталось.
+  #
+  # Живая ставка становится ставкой круга, и слово за поставившим остаётся:
+  # большой блайнд и анте кнопки отвечают на рейз, как все. Мёртвая уходит
+  # в банк, ставкой не считается и права чека не даёт — поэтому вложенное
+  # возвращается из `committed` в то, чем оно было до постановки.
+  defp post_forced_bets(hand, bets) do
+    Enum.reduce(bets, {hand, []}, fn bet, {acc, events} ->
+      {acc, event} = post_forced_bet(acc, bet)
+      {acc, events ++ event}
     end)
   end
 
-  defp post_antes(hand, %HandSetup{ante: ante}) do
-    seat = blind_seat(hand, :big)
-    player = Map.fetch!(hand.players, seat)
-    amount = min(ante, player.stack)
-    hand = commit(hand, player, amount)
+  defp post_forced_bet(hand, %{amount: amount}) when amount <= 0, do: {hand, []}
 
-    # Анте за стол вносит большой блайнд — в банк, но не в счёт своей ставки.
-    hand = put_player(hand, %{Map.fetch!(hand.players, seat) | committed: 0})
-    hand = mark_dead(hand, seat, amount)
-    {hand, [{:posted, %{seat: seat, kind: "ante", amount: amount, pot: hand.pot}}]}
+  defp post_forced_bet(hand, bet) do
+    player = Map.fetch!(hand.players, bet.seat)
+    committed = player.committed
+    amount = min(bet.amount, player.stack)
+
+    hand = commit(hand, player, amount)
+    hand = settle_forced_bet(hand, bet, committed, amount)
+
+    {hand,
+     [{:posted, %{seat: bet.seat, kind: to_string(bet.kind), amount: amount, pot: hand.pot}}]}
+  end
+
+  defp settle_forced_bet(hand, %{live?: true, seat: seat}, _committed, _amount) do
+    put_player(hand, %{Map.fetch!(hand.players, seat) | acted?: false})
+  end
+
+  defp settle_forced_bet(hand, %{seat: seat}, committed, amount) do
+    hand
+    |> put_player(%{Map.fetch!(hand.players, seat) | committed: committed})
+    |> mark_dead(seat, amount)
   end
 
   # Взнос за вход вне очереди: игрок, не дожидавшийся своего большого
@@ -708,45 +727,6 @@ defmodule BlockPoker.Engine.Hand do
     {hand, [{:posted, %{seat: seat, kind: "dead_post", amount: amount, pot: hand.pot}}]}
   end
 
-  defp post_blinds(hand) do
-    [{:small, hand.small_blind}, {:big, hand.big_blind}]
-    |> Enum.reduce({hand, []}, fn {kind, blind}, {acc, events} ->
-      seat = blind_seat(acc, kind)
-      player = Map.fetch!(acc.players, seat)
-      amount = min(blind, player.stack)
-      acc = commit(acc, player, amount)
-
-      # Блайнд — не «ход»: слово за игроком всё равно останется.
-      acc = put_player(acc, %{Map.fetch!(acc.players, seat) | acted?: false})
-      label = if kind == :small, do: "small_blind", else: "big_blind"
-      {acc, events ++ [{:posted, %{seat: seat, kind: label, amount: amount, pot: acc.pot}}]}
-    end)
-  end
-
-  # На хедз-апе кнопка — малый блайнд и ходит первой до флопа.
-  #
-  # Кнопка при этом может стоять на месте, которое раздачу не играет:
-  # «мёртвая кнопка» — законное состояние живого стола (игрок встал, сел
-  # в сит-аут или ждёт большого блайнда). Брать её место как малый блайнд
-  # в таком случае нельзя — его в раздаче попросту нет.
-  defp blind_seat(hand, kind) do
-    seats = hand.order
-
-    if length(seats) == 2 do
-      small = if hand.button_seat in seats, do: hand.button_seat, else: Enum.at(seats, 0)
-
-      case kind do
-        :small -> small
-        :big -> Enum.find(seats, &(&1 != small))
-      end
-    else
-      case kind do
-        :small -> Enum.at(seats, 0)
-        :big -> Enum.at(seats, 1)
-      end
-    end
-  end
-
   defp deal_hole(hand) do
     count = hand.variant.hole_cards_count()
 
@@ -759,10 +739,9 @@ defmodule BlockPoker.Engine.Hand do
     %{hand | players: players, deck: deck}
   end
 
-  defp first_to_act(%{street: :preflop} = hand) do
-    big = blind_seat(hand, :big)
-    after_seat(hand, big)
-  end
+  # Префлоп: торговля начинается после того, кто говорит последним, — кого
+  # именно, решает структура ставок.
+  defp first_to_act(hand, last), do: after_seat(hand, last)
 
   defp first_to_act(hand) do
     # После флопа первым говорит ближайший от кнопки по часовой стрелке.

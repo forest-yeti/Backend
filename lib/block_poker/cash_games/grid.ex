@@ -15,6 +15,8 @@ defmodule BlockPoker.CashGames.Grid do
 
   alias BlockPoker.CashGames
   alias BlockPoker.CashGames.CashGameSetting
+  alias BlockPoker.Engine.BettingStructure
+  alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
 
   @grid_path "cash_games/grid.exs"
 
@@ -84,24 +86,49 @@ defmodule BlockPoker.CashGames.Grid do
   defp keep_level?(_level, nil), do: true
   defp keep_level?(level, only), do: level.level in only
 
+  defp game_type(format, grid), do: Map.get(format, :game_type) || grid.defaults.game_type
+
+  defp structure(game_type) do
+    game_type |> VariantRegistry.fetch!() |> then(& &1.betting_structure())
+  end
+
   defp attrs(grid, currency, level, format) do
-    ante = ante(format.ante, level.big_blind)
+    game_type = game_type(format, grid)
+    limits = limits(structure(game_type), level, format)
 
     grid.defaults
     |> Map.merge(Map.fetch!(grid.visuals, currency))
+    |> Map.merge(limits)
     |> Map.merge(%{
       name: "#{level.level} #{format.suffix}",
+      game_type: game_type,
       currency: currency,
-      small_blind: level.small_blind,
-      big_blind: level.big_blind,
-      ante: ante,
       max_players: format.max_players,
       sort_order: 0
     })
   end
 
+  # Номиналы уровня в том виде, в каком их принимает структура ставок:
+  # блайндовому столу — блайнды, анте-столу — анте и нули вместо блайндов.
+  defp limits(BettingStructure.Blinds, level, format) do
+    %{
+      small_blind: level.small_blind,
+      big_blind: level.big_blind,
+      ante: ante(format.ante, level.big_blind)
+    }
+  end
+
+  defp limits(_button_ante, level, format) do
+    %{small_blind: 0, big_blind: 0, ante: ante(format.ante, level.big_blind)}
+  end
+
   # Анте типа `big_blind` вносит один игрок, и стандартная сумма — половина
   # большого блайнда. Нечётный bb округляется вниз (NL5: bb 5 -> анте 2).
+  #
+  # На анте-столе анте равно большому блайнду уровня: лестница лимитов у
+  # Short Deck та же, что у холдема, и стол «NL10 Short Deck» стоит игроку
+  # столько же, сколько NL10.
+  defp ante(:big_blind, big_blind), do: big_blind
   defp ante(:half_big_blind, big_blind), do: div(big_blind, 2)
   defp ante(:none, _big_blind), do: 0
 end

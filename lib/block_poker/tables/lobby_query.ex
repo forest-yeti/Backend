@@ -123,13 +123,19 @@ defmodule BlockPoker.Tables.LobbyQuery do
   def table_size(%CashGameSetting{max_players: max}) when max <= 6, do: :six_max
   def table_size(%CashGameSetting{}), do: :nine_max
 
-  @doc "Категория лимита: микро / средний / хайроллер."
+  @doc """
+  Категория лимита: микро / средний / хайроллер.
+
+  Считается от базовой единицы стола, а не от большого блайнда: на анте-столе
+  блайндов нет, и «лимит 0» отправлял бы все такие столы в микро.
+  """
   @spec limit_tier(CashGameSetting.t()) :: :micro | :medium | :high_roller
   def limit_tier(%CashGameSetting{} = setting) do
     bounds = Map.get(@tier_bounds, setting.currency, [])
+    unit = CashGameSetting.bet_unit(setting)
 
-    Enum.find_value(bounds, :high_roller, fn {tier, max_big_blind} ->
-      if setting.big_blind <= max_big_blind, do: tier
+    Enum.find_value(bounds, :high_roller, fn {tier, max_unit} ->
+      if unit <= max_unit, do: tier
     end)
   end
 
@@ -214,7 +220,9 @@ defmodule BlockPoker.Tables.LobbyQuery do
 
   defp sort_key(%__MODULE__{sort: {:limit, direction}}, entry) do
     %{setting: setting} = entry
-    {currency_rank(setting), signed(setting.big_blind, direction), default_key(entry)}
+
+    {currency_rank(setting), signed(CashGameSetting.bet_unit(setting), direction),
+     default_key(entry)}
   end
 
   defp sort_key(%__MODULE__{sort: {:occupancy, direction}}, entry) do
@@ -222,8 +230,8 @@ defmodule BlockPoker.Tables.LobbyQuery do
   end
 
   defp default_key(%{setting: setting}) do
-    {currency_rank(setting), setting.big_blind, setting.small_blind, setting.max_players,
-     setting.ante, setting.id}
+    {currency_rank(setting), CashGameSetting.bet_unit(setting), setting.small_blind,
+     setting.max_players, setting.ante, setting.id}
   end
 
   defp currency_rank(setting), do: Map.get(@currency_order, setting.currency, 99)

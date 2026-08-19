@@ -12,7 +12,7 @@ defmodule BlockPoker.Engine.Variant do
   Проверяется искусственным вариантом в `test/support`.
   """
 
-  alias BlockPoker.Engine.Card
+  alias BlockPoker.Engine.{BettingStructure, Card}
 
   @doc "Идентификатор варианта; по нему вариант достаётся из реестра."
   @callback id() :: atom()
@@ -40,6 +40,16 @@ defmodule BlockPoker.Engine.Variant do
   тот, по которому стрит сравнивается: у `A2345` это пятёрка.
   """
   @callback straight_sequences() :: [[0..12]]
+
+  @doc """
+  Как за столом собираются вынужденные ставки (`Engine.BettingStructure`).
+
+  Структура принадлежит виду покера, а не шаблону стола: холдем играют на
+  блайндах, Short Deck — на анте кнопки. Свободная комбинация «любой вариант
+  на любой структуре» породила бы столы, которых не существует в природе,
+  и каждый пришлось бы поддерживать.
+  """
+  @callback betting_structure() :: BettingStructure.t()
 
   @doc "Делится ли банк и по какой второй шкале."
   @callback pot_split() :: :high | {:hi_lo, low_evaluator :: module()}

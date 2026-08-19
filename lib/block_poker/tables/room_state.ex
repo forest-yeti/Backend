@@ -14,6 +14,7 @@ defmodule BlockPoker.Tables.RoomState do
   alias BlockPoker.CashGames.CashGameSetting
   alias BlockPoker.Chat
   alias BlockPoker.Engine.{EntryRules, Preselect, Stats, TimeBank}
+  alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.Reactions
   alias BlockPoker.Tables.Seat
 
@@ -491,7 +492,7 @@ defmodule BlockPoker.Tables.RoomState do
   """
   @spec entry_decision(t(), Seat.t(), entry()) :: EntryRules.decision()
   def entry_decision(state, seat, intent) do
-    EntryRules.decide(%{
+    entry_rules(state).decide(%{
       seat: seat.number,
       intent: intent,
       seats_in_game: state |> players() |> Enum.map(& &1.number),
@@ -504,6 +505,15 @@ defmodule BlockPoker.Tables.RoomState do
       dodging?: dodging?(state, seat.user_id)
     })
   end
+
+  @doc """
+  Базовая единица стола: от неё считаются минимальная ставка и категория
+  лимита. На блайндовом столе это большой блайнд, на анте-столе — анте.
+  Величину даёт структура ставок, а не комната: выбирать между полями
+  шаблона значило бы ветвиться по правилам игры.
+  """
+  @spec bet_unit(t()) :: non_neg_integer()
+  def bet_unit(%__MODULE__{setting: setting}), do: CashGameSetting.bet_unit(setting)
 
   @doc """
   Границы бай-ина в фишках с учётом уже лежащего перед игроком стека.
@@ -725,6 +735,15 @@ defmodule BlockPoker.Tables.RoomState do
   # и подтверждения транзакции ещё нет. Любое действие в этом окне — докупка,
   # сит-аут, второй уход — работает с местом, которого через миг не будет,
   # а купленные в этот момент фишки исчезают вместе с ним.
+  # Правила входа принадлежат структуре ставок: там, где платят все и каждую
+  # раздачу, ждать нечего и взнос брать не за что.
+  defp entry_rules(%__MODULE__{setting: setting}) do
+    setting.game_type
+    |> VariantRegistry.fetch!()
+    |> then(& &1.betting_structure())
+    |> then(& &1.entry_rules())
+  end
+
   defp fetch_player(state, user_id) do
     case find_seat(state, user_id) do
       nil -> {:error, :not_seated}
