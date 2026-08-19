@@ -255,7 +255,8 @@ defmodule BlockPoker.Tables.TableServer do
           status: seat.status,
           user_id: seat.user_id,
           name: seat.name,
-          avatar: seat.avatar
+          avatar: seat.avatar,
+          flair: seat.flair
         })
 
         {:reply, {:ok, seat}, state}

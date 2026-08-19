@@ -20,6 +20,10 @@ defmodule BlockPoker.Tables.Seat do
   сама по себе клиенту не отдаётся никогда — из неё считается лишь то, что
   игроку разрешено (§9 CLAUDE.md).
 
+  `flair` — косметика игрока: чем стол его выделяет (цвет ника и прочее
+  оформление). Снимок, как ник и аватар; в отличие от роли, существует ровно
+  затем, чтобы уйти клиенту. Прав не даёт и на правила не влияет.
+
   `name` и `avatar` — снимок профиля на момент посадки: стол показывает игрока
   ником, а не UUID, и не ходит за этим в базу на каждый снапшот.
 
@@ -61,6 +65,7 @@ defmodule BlockPoker.Tables.Seat do
           user_id: Ecto.UUID.t() | nil,
           name: String.t() | nil,
           avatar: String.t() | nil,
+          flair: String.t() | nil,
           role: role(),
           status: status(),
           stack: non_neg_integer(),
@@ -87,6 +92,7 @@ defmodule BlockPoker.Tables.Seat do
     :user_id,
     :name,
     :avatar,
+    :flair,
     :reservation_id,
     role: :default,
     status: :empty,

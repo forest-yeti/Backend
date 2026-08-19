@@ -151,6 +151,9 @@ defmodule Socket.Views.TableView do
       user_id: seat.user_id,
       name: seat.name,
       avatar: seat.avatar,
+      # Косметика: во что её красить, решает клиент. Неизвестную метку он
+      # рисует как обычную — новая косметика не требует его релиза.
+      flair: seat.flair,
       stack: seat.stack,
       waiting_for_bb: seat.waiting_for_bb,
       wants_post: seat.wants_post,

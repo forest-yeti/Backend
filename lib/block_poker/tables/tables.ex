@@ -470,7 +470,7 @@ defmodule BlockPoker.Tables do
   # а не UUID, и не ходит в базу на каждый снапшот.
   defp profile(user_id) do
     case Accounts.get_user(user_id) do
-      {:ok, user} -> %{name: user.name, avatar: user.avatar, role: user.role}
+      {:ok, user} -> %{name: user.name, avatar: user.avatar, flair: user.flair, role: user.role}
       {:error, _reason} -> %{}
     end
   end

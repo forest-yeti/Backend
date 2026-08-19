@@ -25,6 +25,7 @@ defmodule BlockPoker.Tables.RoomState do
   @type profile :: %{
           optional(:name) => String.t(),
           optional(:avatar) => String.t(),
+          optional(:flair) => String.t(),
           optional(:role) => Seat.role()
         }
 
@@ -364,7 +365,17 @@ defmodule BlockPoker.Tables.RoomState do
     with {:ok, seat} <- fetch_player(state, user_id),
          {:ok, sanitized} <- Chat.sanitize(text),
          {:ok, sent_at} <- Chat.throttle(seat.chat_sent_at, now) do
-      message = %{seat: seat.number, user_id: user_id, name: seat.name, text: sanitized, at: at}
+      # Ник и косметика кладутся в само сообщение, а не берутся из места:
+      # автор успевает встать из-за стола, а его реплика остаётся в истории.
+      message = %{
+        seat: seat.number,
+        user_id: user_id,
+        name: seat.name,
+        flair: seat.flair,
+        text: sanitized,
+        at: at
+      }
+
       state = put_seat(state, %{seat | chat_sent_at: sent_at})
       {:ok, %{state | chat: Chat.push(state.chat, message)}, message}
     end
@@ -548,6 +559,7 @@ defmodule BlockPoker.Tables.RoomState do
           reservation_id: reservation_id,
           name: Map.get(profile, :name),
           avatar: Map.get(profile, :avatar),
+          flair: Map.get(profile, :flair),
           role: Map.get(profile, :role, :default)
       }
 

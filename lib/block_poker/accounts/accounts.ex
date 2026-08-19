@@ -101,6 +101,16 @@ defmodule BlockPoker.Accounts do
     user |> User.role_changeset(role) |> Repo.update()
   end
 
+  @doc """
+  Смена косметики. Как и роль, назначается только командой (`mix user.flair`):
+  через сокет игрок себе метку не поставит — иначе выделение перестало бы
+  что-либо значить.
+  """
+  @spec set_flair(User.t(), String.t()) :: {:ok, User.t()} | {:error, Ecto.Changeset.t()}
+  def set_flair(%User{} = user, flair) do
+    user |> User.flair_changeset(flair) |> Repo.update()
+  end
+
   @doc "Регистрация + сразу выданная пара токенов."
   @spec register_session(map()) :: {:ok, session()} | {:error, Ecto.Changeset.t()}
   def register_session(attrs) do

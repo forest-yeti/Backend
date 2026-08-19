@@ -18,7 +18,14 @@ defmodule Socket.Views.TableViewTest do
 
   setup do
     room = RoomState.new(Ecto.UUID.generate(), build_setting(%{max_players: 6}))
-    {:ok, room} = RoomState.reserve(room, 1, "me", "res-1", %{name: "Hero", avatar: "/a.png"})
+
+    {:ok, room} =
+      RoomState.reserve(room, 1, "me", "res-1", %{
+        name: "Hero",
+        avatar: "/a.png",
+        flair: "influencer"
+      })
+
     {:ok, room, _seat} = RoomState.confirm(room, "res-1", 400, :wait_bb)
 
     {:ok, room} =
@@ -121,6 +128,23 @@ defmodule Socket.Views.TableViewTest do
     snapshot = TableView.render(room, "me")
 
     assert Enum.find(snapshot.seats, &(&1.seat == 4)).stack == 600
+  end
+
+  test "косметика игрока видна всем за столом, роль — никому", %{room: room} do
+    decoded = room |> payload("opponent") |> Jason.decode!()
+
+    hero = Enum.find(decoded["seats"], &(&1["seat"] == 1))
+    villain = Enum.find(decoded["seats"], &(&1["seat"] == 4))
+
+    # Метка выделенного игрока — публичная: её и должны видеть соседи.
+    assert hero["flair"] == "influencer"
+
+    # Обычный игрок приходит без метки, а не отсутствующим полем: клиенту
+    # проще ветвиться по значению, чем по наличию ключа.
+    assert villain["flair"] == nil
+
+    # Роль рядом с ней наружу не уходит ни в каком виде (§9 CLAUDE.md).
+    refute payload(room, "opponent") =~ "role"
   end
 
   test "снапшот сериализуется без потерь и содержит косметику стола", %{room: room} do

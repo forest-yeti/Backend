@@ -16,6 +16,8 @@ defmodule BlockPoker.Accounts.User do
 
   @statuses [:active, :blocked]
   @roles [:default, :admin]
+  @flairs ["default", "influencer"]
+  @default_flair "default"
   @default_avatar "/users/avatars/default.png"
 
   @name_format ~r/\A[A-Za-z0-9_-]+\z/
@@ -41,6 +43,15 @@ defmodule BlockPoker.Accounts.User do
     # конкретному игроку за конкретным столом. Назначается `mix user.role`.
     field :role, Ecto.Enum, values: @roles, default: :default
 
+    # Косметика: как игрок выглядит за столом (цвет ника и прочее оформление).
+    # Полная противоположность роли — существует, чтобы её видели, и уходит
+    # клиенту в снимке места. Прав не даёт и на правила не влияет никак.
+    #
+    # Сервер отдаёт метку строкой и не знает, во что она красится: палитра —
+    # дело клиента. Неизвестную метку клиент рисует как `default`, поэтому
+    # новая косметика не требует одновременного релиза Electron.
+    field :flair, :string, default: @default_flair
+
     field :password_hash, :string, redact: true
     field :password, :string, virtual: true, redact: true
 
@@ -58,12 +69,30 @@ defmodule BlockPoker.Accounts.User do
   @spec roles() :: [atom()]
   def roles, do: @roles
 
+  @spec flairs() :: [String.t()]
+  def flairs, do: @flairs
+
+  @spec default_flair() :: String.t()
+  def default_flair, do: @default_flair
+
   @doc "Changeset смены роли: единственный путь сделать игрока администратором."
   @spec role_changeset(t(), atom() | String.t()) :: Ecto.Changeset.t()
   def role_changeset(user, role) do
     user
     |> cast(%{role: role}, [:role])
     |> validate_required([:role])
+  end
+
+  @doc """
+  Смена косметики. Значение проверяется по списку известных: метку ставит
+  администратор командой, и опечатка в ней уехала бы игроку на экран.
+  """
+  @spec flair_changeset(t(), String.t()) :: Ecto.Changeset.t()
+  def flair_changeset(user, flair) do
+    user
+    |> cast(%{flair: flair}, [:flair])
+    |> validate_required([:flair])
+    |> validate_inclusion(:flair, @flairs)
   end
 
   @spec admin?(t()) :: boolean()

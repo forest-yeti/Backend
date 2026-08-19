@@ -237,6 +237,33 @@ defmodule BlockPoker.AccountsTest do
       assert %{role: [_message]} = errors_on(changeset)
     end
 
+    test "новый пользователь — без косметики" do
+      assert %User{flair: "default"} = user_fixture()
+    end
+
+    test "set_flair/2 выделяет игрока и возвращает обычный вид" do
+      user = user_fixture()
+
+      assert {:ok, %User{flair: "influencer"} = marked} = Accounts.set_flair(user, "influencer")
+      assert {:ok, %User{flair: "default"}} = Accounts.set_flair(marked, "default")
+    end
+
+    test "неизвестная косметика не сохраняется" do
+      assert {:error, changeset} = user_fixture() |> Accounts.set_flair("gold")
+      assert %{flair: [_message]} = errors_on(changeset)
+    end
+
+    test "косметика не меняет роль, а роль не выдаёт косметику" do
+      # Поля независимы намеренно: роль наружу не уходит вовсе, а косметика
+      # затем и существует, чтобы её видели. Связать их значило бы утечь
+      # ролью через внешний вид.
+      {:ok, marked} = user_fixture() |> Accounts.set_flair("influencer")
+      assert marked.role == :default
+
+      {:ok, admin} = user_fixture(%{name: "Chief"}) |> Accounts.set_role(:admin)
+      assert admin.flair == "default"
+    end
+
     test "find_user/1 находит по email и по нику" do
       user = user_fixture()
 

@@ -26,6 +26,7 @@ defmodule BlockPoker.Chat do
           seat: pos_integer() | nil,
           user_id: Ecto.UUID.t(),
           name: String.t() | nil,
+          flair: String.t() | nil,
           text: String.t(),
           at: DateTime.t()
         }
