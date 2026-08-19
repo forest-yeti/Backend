@@ -15,6 +15,7 @@ defmodule BlockPoker.Tables.MoneyTest do
   import BlockPoker.TablesHelpers
 
   alias BlockPoker.CashGames.CashGameSetting
+  alias BlockPoker.GameMode
   alias BlockPoker.Tables
   alias BlockPoker.Tables.{RoomState, TableRegistry, TableServer}
   alias BlockPoker.Wallet
@@ -151,6 +152,34 @@ defmodule BlockPoker.Tables.MoneyTest do
 
     assert {:error, :invalid_buy_in} = Tables.add_chips(room_id, user.id, max - buy_in + 1)
     assert balance(user) == before
+  end
+
+  test "докупка, не дошедшая до стола, возвращается в кошелёк", %{user: user} do
+    # Гонка: между проверкой докупки и зачислением комната начала раздачу.
+    # Через `add_chips/3` её не воспроизвести — вызов синхронный, поэтому
+    # шаги разложены руками ровно в том порядке, в каком их делает контекст.
+    %{room_id: room_id, pid: pid, buy_in: buy_in} = start_test_room()
+    other = user_fixture()
+
+    {:ok, _result} = Tables.join_seat(room_id, user.id, 3, buy_in)
+    {:ok, _result} = Tables.join_seat(room_id, other.id, 4, buy_in)
+
+    before = balance(user)
+
+    {:ok, ref} = TableServer.validate_add_chips(pid, user.id, 100)
+    room = TableServer.state(pid)
+    :ok = GameMode.Cash.take_buy_in(room, user.id, 100, ref)
+    assert balance(user) == before - 100
+
+    # Пока деньги шли в ledger, стол разыграл кнопку и начал раздачу.
+    :ok = TableServer.fire_timer(pid, :button_draw)
+    assert TableServer.state(pid).phase == :hand
+
+    assert {:error, :hand_in_progress} =
+             Tables.commit_add_chips(pid, room_id, user.id, 100, ref)
+
+    assert balance(user) == before
+    assert Enum.count(entries(user), &(&1.type == :cash_out)) == 1
   end
 
   test "quick_seat сажает по шаблону и списывает бай-ин один раз", %{user: user} do

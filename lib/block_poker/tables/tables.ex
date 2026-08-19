@@ -18,6 +18,8 @@ defmodule BlockPoker.Tables do
   нет — это и есть инвариант денег.
   """
 
+  require Logger
+
   alias BlockPoker.Accounts
   alias BlockPoker.CashGames
   alias BlockPoker.CashGames.CashGameSetting
@@ -176,15 +178,58 @@ defmodule BlockPoker.Tables do
   стека; верх ограничен `max_buy_in`. Во время раздачи запрещена: докупка
   на ходу меняет эффективный стек посреди торговли и ломает уже сделанные
   ставки.
+
+  Порядок трёхшаговый и по той же причине, что у посадки: между проверкой и
+  зачислением лежит поход в кошелёк, а за это время комната успевает начать
+  раздачу или потерять место по grace-периоду. Поэтому зачисление проверяет
+  условия заново и вправе отказать — а списанные деньги в этом случае
+  возвращаются в кошелёк.
   """
   @spec add_chips(Ecto.UUID.t(), Ecto.UUID.t(), pos_integer()) :: {:ok, map()} | {:error, error()}
   def add_chips(room_id, user_id, amount) do
     with {:ok, pid} <- fetch_room(room_id),
          {:ok, ref} <- TableServer.validate_add_chips(pid, user_id, amount),
          room = TableServer.state(pid),
-         :ok <- GameMode.Cash.take_buy_in(room, user_id, amount, ref),
-         {:ok, seat} <- TableServer.commit_add_chips(pid, user_id, amount) do
-      {:ok, %{room_id: room_id, seat: seat.number, stack: seat.stack}}
+         :ok <- GameMode.Cash.take_buy_in(room, user_id, amount, ref) do
+      commit_add_chips(pid, room_id, user_id, amount, ref)
+    end
+  end
+
+  @doc """
+  Зачисление уже списанной докупки. Публична ради теста гонки: воспроизвести
+  «раздача началась между проверкой и зачислением» одним вызовом `add_chips/3`
+  нельзя — он синхронный.
+  """
+  @spec commit_add_chips(pid(), Ecto.UUID.t(), Ecto.UUID.t(), pos_integer(), String.t()) ::
+          {:ok, map()} | {:error, error()}
+  def commit_add_chips(pid, room_id, user_id, amount, ref) do
+    case TableServer.commit_add_chips(pid, user_id, amount) do
+      {:ok, seat} ->
+        {:ok, %{room_id: room_id, seat: seat.number, stack: seat.stack}}
+
+      # Между проверкой и зачислением стол начал раздачу или место ушло —
+      # деньги уже списаны, и без возврата они остались бы ни в кошельке,
+      # ни на столе.
+      {:error, reason} ->
+        return_lost_chips(TableServer.state(pid), user_id, amount, ref)
+        {:error, reason}
+    end
+  end
+
+  # Возврат сам может не пройти (кошелёк недоступен). Молчать об этом нельзя:
+  # это единственная точка, где фишки могут пропасть, и она обязана быть
+  # видна в логе — деньги доводятся руками по `ref`.
+  defp return_lost_chips(room, user_id, amount, ref) do
+    case GameMode.Cash.return_chips(room, user_id, amount, ref) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "докупка #{ref}: #{amount} списано, но не зачислено и не возвращено (#{inspect(reason)})"
+        )
+
+        :error
     end
   end
 
