@@ -12,6 +12,9 @@ defmodule BlockPoker.Wallet do
   alias BlockPoker.Repo
   alias BlockPoker.Wallet.{UserWallet, WalletEntry}
   alias Ecto.Multi
+  alias Phoenix.PubSub
+
+  @pubsub BlockPoker.PubSub
 
   # Стартовые суммы живут здесь и нигде не дублируются (§3 CLAUDE.md).
   @main_default 0
@@ -45,6 +48,15 @@ defmodule BlockPoker.Wallet do
       }
     end)
   end
+
+  @doc """
+  Топик, на котором игрок слышит движение своих денег.
+
+  Не `"wallet:<id>"`: на топик с именем канала Phoenix подписывает канал
+  сам, и вторая явная подписка доставляла бы каждое событие дважды.
+  """
+  @spec topic(Ecto.UUID.t()) :: String.t()
+  def topic(user_id), do: "wallet_events:#{user_id}"
 
   @spec list_wallets(Ecto.UUID.t()) :: [UserWallet.t()]
   def list_wallets(user_id) do
@@ -118,10 +130,46 @@ defmodule BlockPoker.Wallet do
       })
       |> Repo.transaction()
       |> case do
-        {:ok, %{entry: entry}} -> {:ok, entry}
+        {:ok, %{entry: entry}} -> {:ok, announce(user_id, wallet.id, entry)}
         {:error, _step, reason, _changes} -> {:error, reason}
       end
     end
+  end
+
+  # Событие уходит **после коммита**, а не внутри транзакции: подписчик,
+  # разбуженный на неподтверждённой записи, прочитал бы из базы старый
+  # баланс и запомнил его как текущий.
+  #
+  # Кто слушает — контексту не важно (§3 CLAUDE.md): наружу ядро говорит
+  # только фактом, а не вызовом канала.
+  defp announce(user_id, wallet_id, %WalletEntry{} = entry) do
+    # Баланс перечитывается, а не берётся из `entry.balance_after`: при
+    # идемпотентном повторе возвращается **старая** запись, и её баланс
+    # давно не текущий. Отправить его — значит своими руками сделать то
+    # расхождение, ради которого событие и заводится.
+    wallet = Repo.get!(UserWallet, wallet_id)
+
+    # Наружу уходят факты, а не схема журнала: `WalletEntry` не должен
+    # утечь в транспорт — там ему делать нечего, и это стережёт
+    # `ArchitectureTest`. `entry.amount` знаковый, знак выводить не нужно.
+    PubSub.broadcast(
+      @pubsub,
+      topic(user_id),
+      {:wallet_entry,
+       %{
+         wallet: wallet.type,
+         amount: wallet.amount,
+         entry: %{
+           seq: entry.seq,
+           type: entry.type,
+           amount: entry.amount,
+           ref_id: entry.ref_id,
+           at: entry.inserted_at
+         }
+       }}
+    )
+
+    entry
   end
 
   @doc """

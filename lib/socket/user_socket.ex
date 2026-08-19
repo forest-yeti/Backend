@@ -15,7 +15,7 @@ defmodule Socket.UserSocket do
 
   channel "lobby", Socket.Channels.LobbyChannel
   channel "table:*", Socket.Channels.TableChannel
-  # channel "wallet:*", Socket.Channels.WalletChannel
+  channel "wallet:*", Socket.Channels.WalletChannel
 
   @impl true
   def connect(params, socket, _connect_info) do
