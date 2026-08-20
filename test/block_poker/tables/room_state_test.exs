@@ -134,7 +134,7 @@ defmodule BlockPoker.Tables.RoomStateTest do
 
     test "неудача cash-out возвращает фишки на место", %{room: room} do
       {:ok, room, stack} = RoomState.begin_leave(room, "user-1", "ref-1")
-      room = RoomState.cancel_leave(room, "ref-1", stack)
+      room = RoomState.cancel_leave(room, "ref-1", stack, 300_000)
 
       assert Map.fetch!(room.seats, 2).stack == 500
       assert Map.fetch!(room.seats, 2).user_id == "user-1"
@@ -177,7 +177,7 @@ defmodule BlockPoker.Tables.RoomStateTest do
 
     test "истёкший grace переводит в sitting_out, но место сохраняет", %{room: room} do
       {:ok, room} = RoomState.disconnect(room, "user-1")
-      room = RoomState.expire_grace(room, 2)
+      room = RoomState.expire_grace(room, 2, 300_000)
 
       assert Map.fetch!(room.seats, 2).status == :sitting_out
       assert Map.fetch!(room.seats, 2).user_id == "user-1"

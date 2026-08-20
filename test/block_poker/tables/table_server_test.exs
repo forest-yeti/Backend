@@ -232,7 +232,7 @@ defmodule BlockPoker.Tables.TableServerTest do
       play_hand_out(pid)
 
       # Отключение и сит-аут — не конец сессии: игрок остаётся за столом.
-      :ok = TableServer.sit_out(pid, "user-1")
+      {:ok, _} = TableServer.sit_out(pid, "user-1")
       assert TableServer.state(pid).seats[1].stats.hands == 1
 
       leave(pid, "user-1")

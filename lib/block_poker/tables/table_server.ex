@@ -38,8 +38,8 @@ defmodule BlockPoker.Tables.TableServer do
 
   defmodule State do
     @moduledoc false
-    @enforce_keys [:room, :game_mode, :timer_mode, :rng, :clock]
-    defstruct [:room, :game_mode, :timer_mode, :rng, :clock, timers: %{}]
+    @enforce_keys [:room, :game_mode, :timer_mode, :rng, :clock, :evict]
+    defstruct [:room, :game_mode, :timer_mode, :rng, :clock, :evict, timers: %{}]
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -119,7 +119,11 @@ defmodule BlockPoker.Tables.TableServer do
     GenServer.call(room, {:abort_add_chips, user_id, ref})
   end
 
-  @spec sit_out(GenServer.server(), Ecto.UUID.t()) :: :ok | {:error, atom()}
+  @doc """
+  Уйти в паузу. `%{pending: true}` — игрок в раздаче и обязан её доиграть:
+  пауза начнётся по её завершении.
+  """
+  @spec sit_out(GenServer.server(), Ecto.UUID.t()) :: {:ok, map()} | {:error, atom()}
   def sit_out(room, user_id), do: GenServer.call(room, {:sit_out, user_id})
 
   @doc "Игровое действие. `seq` — счётчик стола, который клиент видел."
@@ -213,7 +217,12 @@ defmodule BlockPoker.Tables.TableServer do
       rng: Keyword.get_lazy(opts, :rng, &Rng.default/0),
       # Часы инжектируются: тайм-банк считает прошедшее время, и тесты
       # прогоняют его вручную, а не ожиданием (§11 CLAUDE.md).
-      clock: Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end)
+      clock: Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end),
+      # Выселение просидевшего паузу — это cash-out, то есть поход в кошелёк,
+      # а комната в кошелёк не ходит (см. moduledoc). Поэтому наружу уходит
+      # функция, и выполняется она в отдельном процессе: стол не вправе
+      # стоять, пока идёт транзакция.
+      evict: Keyword.get(opts, :evict, &default_evict/2)
     }
 
     {:ok, state, {:continue, :announce}}
@@ -410,7 +419,19 @@ defmodule BlockPoker.Tables.TableServer do
   end
 
   def handle_call({:cancel_leave, ref, stack}, _from, state) do
-    {:reply, :ok, put_room(state, RoomState.cancel_leave(state.room, ref, stack))}
+    room = RoomState.cancel_leave(state.room, ref, stack, sit_out_deadline(state))
+    state = put_room(state, room)
+
+    # Уход не состоялся, игрок остался сидеть в паузе — и держится она тем же
+    # сроком, что любая другая: место не может быть занято вечно из-за
+    # неудавшейся транзакции.
+    case Enum.find(
+           RoomState.seats(state.room),
+           &(&1.status == :sitting_out and &1.stack == stack)
+         ) do
+      nil -> {:reply, :ok, state}
+      seat -> {:reply, :ok, arm_sit_out(state, seat.number)}
+    end
   end
 
   def handle_call({:begin_add_chips, user_id, amount}, _from, state) do
@@ -424,7 +445,13 @@ defmodule BlockPoker.Tables.TableServer do
     case RoomState.commit_add_chips(state.room, user_id, ref) do
       {:ok, room, seat} ->
         state =
-          state |> put_room(room) |> cancel_timer({:rebuy, seat.number}) |> maybe_start_game()
+          state
+          |> put_room(room)
+          |> cancel_timer({:rebuy, seat.number})
+          # Докупка вернула игрока в игру — держать над ним таймер паузы
+          # больше не за что.
+          |> cancel_timer({:sit_out, seat.number})
+          |> maybe_start_game()
 
         announce(state)
         broadcast(state, "chips_added", %{seat: seat.number, stack: seat.stack})
@@ -446,7 +473,29 @@ defmodule BlockPoker.Tables.TableServer do
   end
 
   def handle_call({:sit_out, user_id}, _from, state) do
-    reply_with(state, RoomState.sit_out(state.room, user_id))
+    case RoomState.request_sit_out(state.room, user_id, sit_out_deadline(state)) do
+      {:ok, room, applied} ->
+        state = put_room(state, room)
+        seat = RoomState.find_seat(state.room, user_id)
+
+        state =
+          case applied do
+            :applied ->
+              start_sit_out(state, seat.number, "sit_out")
+
+            # Решение объявляется сразу: стол видит, что игрок доигрывает
+            # последнюю раздачу, а не гадает, почему он вдруг пропал.
+            :pending ->
+              broadcast(state, "sit_out_pending", %{seat: seat.number})
+              state
+          end
+
+        announce(state)
+        {:reply, {:ok, %{pending: applied == :pending}}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   # Стол без автостарта ждёт этой команды ровно один раз — на розыгрыш
@@ -464,7 +513,22 @@ defmodule BlockPoker.Tables.TableServer do
   end
 
   def handle_call({:sit_in, user_id}, _from, state) do
-    reply_with(state, RoomState.sit_in(state.room, user_id))
+    case RoomState.sit_in(state.room, user_id) do
+      {:ok, room} ->
+        seat = RoomState.find_seat(room, user_id)
+
+        state =
+          state
+          |> put_room(room)
+          |> cancel_timer({:sit_out, seat.number})
+
+        broadcast(state, "seat_sitting_in", %{seat: seat.number})
+        announce(state)
+        maybe_start_game_after_sit_in(state)
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:disconnect, user_id}, _from, state) do
@@ -563,10 +627,25 @@ defmodule BlockPoker.Tables.TableServer do
   # Grace-период истёк: место освобождается, фишки возвращать некому —
   # это делает `Tables`, поэтому наружу уходит событие.
   defp do_timeout({:grace, seat_number}, state) do
-    state = put_room(state, RoomState.expire_grace(state.room, seat_number))
-    broadcast(state, "seat_sitting_out", %{seat: seat_number, reason: "disconnected"})
+    room = RoomState.expire_grace(state.room, seat_number, sit_out_deadline(state))
+    state = state |> put_room(room) |> start_sit_out(seat_number, "disconnected")
     announce(state)
     state
+  end
+
+  # Пауза кончилась: место возвращается столу, фишки — в кошелёк игрока.
+  # Кэш-стол на шесть мест не может держать кресло за отошедшим бесконечно,
+  # а решать за игрока «доиграет — не доиграет» некому.
+  defp do_timeout({:sit_out, seat_number}, state) do
+    case Map.fetch(state.room.seats, seat_number) do
+      {:ok, %Seat{user_id: user_id} = seat} when user_id != nil ->
+        broadcast(state, "sit_out_expired", %{seat: seat.number, user_id: user_id})
+        state.evict.(state.room.room_id, user_id)
+        state
+
+      _other ->
+        state
+    end
   end
 
   defp do_timeout({:rebuy, seat_number}, state) do
@@ -876,6 +955,37 @@ defmodule BlockPoker.Tables.TableServer do
 
   defp now_ms(%State{clock: clock}), do: clock.()
 
+  defp sit_out_deadline(state), do: now_ms(state) + state.room.setting.sit_out_timeout_ms
+
+  # Отложенные паузы становятся настоящими ровно здесь: раздача доиграна,
+  # обязательств у игрока больше нет.
+  defp apply_pending_sit_outs(state) do
+    {room, seats} = RoomState.apply_pending_sit_outs(state.room, sit_out_deadline(state))
+
+    Enum.reduce(seats, put_room(state, room), &start_sit_out(&2, &1, "sit_out"))
+  end
+
+  defp start_sit_out(state, seat_number, reason) do
+    state = arm_sit_out(state, seat_number)
+    broadcast(state, "seat_sitting_out", %{seat: seat_number, reason: reason})
+    state
+  end
+
+  defp arm_sit_out(state, seat_number) do
+    schedule(state, {:sit_out, seat_number}, state.room.setting.sit_out_timeout_ms)
+  end
+
+  # Вернувшийся из паузы игрок мог оказаться вторым за столом — стол,
+  # остановленный «некому играть», обязан от этого поехать снова.
+  defp maybe_start_game_after_sit_in(state) do
+    {:reply, :ok, maybe_start_game(state)}
+  end
+
+  defp default_evict(room_id, user_id) do
+    Task.start(fn -> BlockPoker.Tables.leave_seat(room_id, user_id) end)
+    :ok
+  end
+
   defp finish_hand(state, hand) do
     state = state |> cancel_timer(:action) |> cancel_timer(:runout) |> cancel_timer(:rit)
 
@@ -903,6 +1013,7 @@ defmodule BlockPoker.Tables.TableServer do
       state
       |> put_room(room)
       |> handle_broke_players(hand)
+      |> apply_pending_sit_outs()
       |> maybe_stop_game()
 
     announce(state)
@@ -1122,7 +1233,7 @@ defmodule BlockPoker.Tables.TableServer do
     state.timers
     |> Map.keys()
     |> Enum.filter(fn
-      {kind, seat} when kind in [:grace, :rebuy] -> not MapSet.member?(occupied, seat)
+      {kind, seat} when kind in [:grace, :rebuy, :sit_out] -> not MapSet.member?(occupied, seat)
       _key -> false
     end)
     |> Enum.reduce(state, &cancel_timer(&2, &1))
@@ -1235,14 +1346,6 @@ defmodule BlockPoker.Tables.TableServer do
 
   defp pick_seat(_room, seat) when is_integer(seat), do: {:ok, seat}
   defp pick_seat(_room, _seat), do: {:error, :invalid_seat}
-
-  defp reply_with(state, {:ok, room}) do
-    state = put_room(state, room)
-    announce(state)
-    {:reply, :ok, state}
-  end
-
-  defp reply_with(state, {:error, reason}), do: {:reply, {:error, reason}, state}
 
   defp put_room(state, room), do: %{state | room: room}
 

@@ -45,7 +45,7 @@ defmodule BlockPoker.CashGames.CashGameSetting do
     :time_bank_ms,
     :time_bank_refill,
     :disconnect_grace_ms,
-    :sit_out_max_hands,
+    :sit_out_timeout_ms,
     :rebuy_prompt_ms,
     :button_draw_animation_ms,
     :allow_post_blind,
@@ -92,7 +92,11 @@ defmodule BlockPoker.CashGames.CashGameSetting do
     field :time_bank_ms, :integer, default: 30_000
     field :time_bank_refill, :integer, default: 10_000
     field :disconnect_grace_ms, :integer, default: 30_000
-    field :sit_out_max_hands, :integer, default: 20
+
+    # Сколько игрок вправе просидеть в паузе, прежде чем стол вернёт ему
+    # фишки и освободит место. Единица — время, а не раздачи: длительность
+    # раздачи зависит от числа игроков, а договаривается игрок в минутах.
+    field :sit_out_timeout_ms, :integer, default: 300_000
     field :rebuy_prompt_ms, :integer, default: 60_000
     field :button_draw_animation_ms, :integer, default: 3_000
 
@@ -353,7 +357,7 @@ defmodule BlockPoker.CashGames.CashGameSetting do
       :action_timeout_ms,
       :disconnect_grace_ms,
       :rebuy_prompt_ms,
-      :sit_out_max_hands,
+      :sit_out_timeout_ms,
       :blind_dodge_window_hands
     ]
 

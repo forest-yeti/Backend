@@ -375,7 +375,15 @@ defmodule BlockPoker.Tables do
     with {:ok, pid} <- fetch_room(room_id), do: TableServer.start_game(pid, user_id)
   end
 
-  @spec sit_out(Ecto.UUID.t(), Ecto.UUID.t()) :: :ok | {:error, error()}
+  @doc """
+  Пауза за столом. Раздачу с уже розданными картами игрок обязан доиграть,
+  поэтому ответ говорит, началась пауза (`pending: false`) или только принята
+  к исполнению (`pending: true`).
+
+  Пауза не бессрочна: просидев `sit_out_timeout_ms`, игрок уходит из-за стола
+  с обычным cash-out — кресло за кэш-столом дороже, чем удобство отошедшего.
+  """
+  @spec sit_out(Ecto.UUID.t(), Ecto.UUID.t()) :: {:ok, map()} | {:error, error()}
   def sit_out(room_id, user_id) do
     with {:ok, pid} <- fetch_room(room_id), do: TableServer.sit_out(pid, user_id)
   end

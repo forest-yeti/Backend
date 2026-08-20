@@ -27,6 +27,12 @@ defmodule BlockPoker.Tables.Seat do
   `name` и `avatar` — снимок профиля на момент посадки: стол показывает игрока
   ником, а не UUID, и не ходит за этим в базу на каждый снапшот.
 
+  `sit_out_pending` и `sit_out_until` — пауза (§«Сит-аут»): отложенное
+  решение уйти в паузу и срок, до которого пауза держит место. Обычный
+  `sit_out_until` — это не «когда пауза кончится», а «когда стол вернёт
+  фишки в кошелёк и освободит место»: бесконечно занятое кресло за кэш-столом
+  дороже, чем неудобство вернувшегося игрока.
+
   `waiting_for_bb`, `missed_blinds` и `can_post` — вход в игру (§6 задачи 3).
   Само решение принимает `Engine.EntryRules`, здесь только его результат.
 
@@ -74,7 +80,8 @@ defmodule BlockPoker.Tables.Seat do
           post_required: boolean(),
           can_post: boolean(),
           missed_blinds: non_neg_integer(),
-          hands_sat_out: non_neg_integer(),
+          sit_out_pending: boolean(),
+          sit_out_until: integer() | nil,
           wants_post: boolean(),
           post: non_neg_integer(),
           dead_post: non_neg_integer(),
@@ -101,7 +108,13 @@ defmodule BlockPoker.Tables.Seat do
     post_required: false,
     can_post: false,
     missed_blinds: 0,
-    hands_sat_out: 0,
+    # Нажатый «сит-аут», который ещё не наступил: игрок в раздаче и обязан
+    # её доиграть. Решение принято, применяется оно по концу раздачи.
+    sit_out_pending: false,
+    # Момент (монотонные мс), после которого пауза перестаёт держать место.
+    # Живёт в месте, а не в таймере процесса, потому что его видит клиент:
+    # вернувшийся после реконнекта должен увидеть тот же обратный отсчёт.
+    sit_out_until: nil,
     # Игрок нажал «не ждать блайнда». Это **намерение**, а не решение:
     # во что оно обойдётся, зависит от положения кнопки, а она успевает
     # сдвинуться, поэтому считается оно в момент старта раздачи, а не нажатия.

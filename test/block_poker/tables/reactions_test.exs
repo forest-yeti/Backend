@@ -49,7 +49,7 @@ defmodule BlockPoker.Tables.ReactionsTest do
       %{pid: pid} = start_room!()
       seat!(pid, "user-1", 1, 400)
       seat!(pid, "user-2", 2, 400)
-      :ok = TableServer.sit_out(pid, "user-1")
+      {:ok, _} = TableServer.sit_out(pid, "user-1")
 
       assert :ok = TableServer.react(pid, "user-1", "salt")
     end

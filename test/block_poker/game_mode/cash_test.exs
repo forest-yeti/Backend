@@ -98,7 +98,7 @@ defmodule BlockPoker.GameMode.CashTest do
     room = seat(room, 1, "user-1", 400, :post)
     room = seat(room, 2, "user-2", 400, :post)
     room = seat(room, 3, "watcher", 400)
-    {:ok, room} = RoomState.sit_out(room, "watcher")
+    {:ok, room, :applied} = RoomState.request_sit_out(room, "watcher", 0)
 
     assert Cash.can_leave?(room, RoomState.find_seat(room, "user-1"))
 

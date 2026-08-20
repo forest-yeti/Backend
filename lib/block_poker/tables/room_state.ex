@@ -783,33 +783,95 @@ defmodule BlockPoker.Tables.RoomState do
   end
 
   @doc "Cash-out не прошёл: фишки возвращаются на место, игрок остаётся сидеть."
-  @spec cancel_leave(t(), String.t(), non_neg_integer()) :: t()
-  def cancel_leave(state, ref, stack) do
+  @spec cancel_leave(t(), String.t(), non_neg_integer(), integer()) :: t()
+  def cancel_leave(state, ref, stack, deadline) do
     case Enum.find(seats(state), &(&1.reservation_id == ref)) do
       nil ->
         state
 
       seat ->
-        put_seat(state, %{seat | status: :sitting_out, stack: stack, reservation_id: nil})
+        seat = begin_sit_out(%{seat | stack: stack, reservation_id: nil}, deadline)
+        put_seat(state, seat)
     end
   end
 
-  @spec sit_out(t(), Ecto.UUID.t()) :: {:ok, t()} | {:error, atom()}
-  def sit_out(state, user_id) do
+  @doc """
+  Просьба уйти в паузу. Раздачу, в которой игрок уже получил карты, он
+  обязан доиграть: пауза посреди торговли — это либо бесплатный фолд с
+  сохранением вложенного, либо зависший стол, ждущий ушедшего.
+
+  Критерий тот же, что у ухода из-за стола (`in_hand?/2`): сбросивший карты
+  больше ничего столу не должен, и его пауза начинается сразу.
+
+  Поэтому решение и его применение разнесены. `:pending` — решение принято,
+  оно сработает по концу раздачи (`apply_pending_sit_outs/2`); `:applied` —
+  игрок в раздаче не участвует, пауза начинается сразу.
+
+  `deadline` — монотонный момент, после которого пауза перестаёт держать
+  место. Считает его оболочка: срок берётся из шаблона комнаты, а часов у
+  чистой структуры нет.
+  """
+  @spec request_sit_out(t(), Ecto.UUID.t(), integer()) ::
+          {:ok, t(), :applied | :pending} | {:error, atom()}
+  def request_sit_out(state, user_id, deadline) do
     with {:ok, seat} <- fetch_player(state, user_id) do
-      {:ok, put_seat(state, %{seat | status: :sitting_out, waiting_for_bb: false})}
+      cond do
+        in_hand?(state, seat.number) ->
+          {:ok, put_seat(state, %{seat | sit_out_pending: true}), :pending}
+
+        seat.status == :sitting_out ->
+          {:error, :already_sitting_out}
+
+        true ->
+          {:ok, put_seat(state, begin_sit_out(seat, deadline)), :applied}
+      end
     end
   end
 
+  @doc """
+  Раздача кончилась: отложенные паузы становятся настоящими. Возвращает
+  места, которые в паузу ушли, — их оболочке нужно взвести таймером и
+  объявить столу.
+  """
+  @spec apply_pending_sit_outs(t(), integer()) :: {t(), [pos_integer()]}
+  def apply_pending_sit_outs(state, deadline) do
+    state
+    |> seats()
+    |> Enum.filter(& &1.sit_out_pending)
+    |> Enum.reduce({state, []}, fn seat, {acc, numbers} ->
+      {put_seat(acc, begin_sit_out(seat, deadline)), [seat.number | numbers]}
+    end)
+    |> then(fn {acc, numbers} -> {acc, Enum.sort(numbers)} end)
+  end
+
+  @doc """
+  Возврат в игру. Снимает и уже начавшуюся паузу, и ещё не наступившую:
+  передумавший в середине раздачи игрок остаётся играть, ничего не пропуская.
+  """
   @spec sit_in(t(), Ecto.UUID.t()) :: {:ok, t()} | {:error, atom()}
   def sit_in(state, user_id) do
     with {:ok, seat} <- fetch_player(state, user_id) do
-      if seat.stack == 0 do
-        {:error, :zero_stack}
-      else
-        {:ok, put_seat(state, activate_seat(seat, state))}
+      cond do
+        seat.status != :sitting_out and seat.sit_out_pending ->
+          {:ok, put_seat(state, %{seat | sit_out_pending: false})}
+
+        seat.stack == 0 ->
+          {:error, :zero_stack}
+
+        true ->
+          {:ok, put_seat(state, activate_seat(seat, state))}
       end
     end
+  end
+
+  defp begin_sit_out(seat, deadline) do
+    %{
+      seat
+      | status: :sitting_out,
+        waiting_for_bb: false,
+        sit_out_pending: false,
+        sit_out_until: deadline
+    }
   end
 
   @doc "Разрыв связи: место держится, игрок помечается отключённым."
@@ -832,14 +894,14 @@ defmodule BlockPoker.Tables.RoomState do
 
   @doc """
   Grace-период истёк: место остаётся за игроком, но раздачи он пропускает.
-  Освобождение места — отдельное решение по `sit_out_max_hands`, и принимает
-  его не таймер обрыва связи.
+  Дальше место держит обычный срок паузы — тот же, что у нажавшего «сит-аут»
+  вручную: для стола разницы между «отошёл» и «отвалился» нет.
   """
-  @spec expire_grace(t(), pos_integer()) :: t()
-  def expire_grace(state, seat_number) do
+  @spec expire_grace(t(), pos_integer(), integer()) :: t()
+  def expire_grace(state, seat_number, deadline) do
     case Map.fetch(state.seats, seat_number) do
       {:ok, %Seat{status: :disconnected} = seat} ->
-        put_seat(state, %{seat | status: :sitting_out, waiting_for_bb: false})
+        put_seat(state, begin_sit_out(seat, deadline))
 
       _other ->
         state
@@ -908,7 +970,8 @@ defmodule BlockPoker.Tables.RoomState do
     %{
       seat
       | status: :playing,
-        hands_sat_out: 0,
+        sit_out_pending: false,
+        sit_out_until: nil,
         waiting_for_bb: decision.status == :waiting_for_bb,
         post_required: decision.status == :post_required,
         can_post: decision.can_post

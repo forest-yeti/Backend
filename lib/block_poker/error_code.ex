@@ -31,6 +31,7 @@ defmodule BlockPoker.ErrorCode do
           | :post_not_available
           | :start_not_available
           | :zero_stack
+          | :already_sitting_out
           | :reservation_lost
           | :not_your_turn
           | :illegal_action
@@ -72,6 +73,7 @@ defmodule BlockPoker.ErrorCode do
     post_not_available: {409, "Войти за взнос сейчас нельзя"},
     start_not_available: {409, "Запустить игру сейчас нельзя"},
     zero_stack: {409, "Нулевой стек: сначала докупитесь"},
+    already_sitting_out: {409, "Вы уже в паузе"},
     reservation_lost: {409, "Резерв места истёк, попробуйте снова"},
     not_your_turn: {409, "Сейчас не ваш ход"},
     illegal_action: {422, "Такое действие сейчас недопустимо"},

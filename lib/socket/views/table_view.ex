@@ -71,7 +71,8 @@ defmodule Socket.Views.TableView do
       time_bank_ms: setting.time_bank_ms,
       time_bank_refill: setting.time_bank_refill,
       disconnect_grace_ms: setting.disconnect_grace_ms,
-      rebuy_prompt_ms: setting.rebuy_prompt_ms
+      rebuy_prompt_ms: setting.rebuy_prompt_ms,
+      sit_out_timeout_ms: setting.sit_out_timeout_ms
     }
   end
 
@@ -158,6 +159,10 @@ defmodule Socket.Views.TableView do
       waiting_for_bb: seat.waiting_for_bb,
       wants_post: seat.wants_post,
       missed_blinds: seat.missed_blinds,
+      # Пауза публична: стол и так видит, что игрок раздачи пропускает, а
+      # обратный отсчёт объясняет, сколько это кресло ещё будет занято.
+      sit_out_pending: seat.sit_out_pending,
+      sit_out_ms: remaining(seat.sit_out_until),
       # Запас времени публичен: соперник и так видит, что игрок думает
       # дольше обычного. А вот `preselect` — нет: заранее выбранный фолд
       # рассказал бы столу о руке раньше самого хода.
@@ -182,6 +187,8 @@ defmodule Socket.Views.TableView do
           stack: seat.stack,
           status: seat.status,
           waiting_for_bb: seat.waiting_for_bb,
+          sit_out_pending: seat.sit_out_pending,
+          sit_out_ms: remaining(seat.sit_out_until),
           post_required: seat.post_required,
           can_post: seat.can_post,
           wants_post: seat.wants_post,

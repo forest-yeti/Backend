@@ -36,7 +36,7 @@
     time_bank_ms: 30_000,
     time_bank_refill: 10_000,
     disconnect_grace_ms: 30_000,
-    sit_out_max_hands: 20,
+    sit_out_timeout_ms: 300_000,
     rebuy_prompt_ms: 60_000,
     button_draw_animation_ms: 3_000,
     allow_post_blind: true,
