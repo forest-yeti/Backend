@@ -17,6 +17,7 @@ defmodule Socket.Views.TableView do
   alias BlockPoker.Engine.Card
   alias BlockPoker.Engine.Hand
   alias BlockPoker.Engine.Stats
+  alias BlockPoker.Engine.Straddle
   alias BlockPoker.Tables.{RoomState, Seat}
   alias Socket.Views.LobbyView
 
@@ -36,6 +37,13 @@ defmodule Socket.Views.TableView do
       # посчитанным: выбирать между блайндом и анте — это ветвление по
       # правилам игры, которого в транспорте быть не может (§3 CLAUDE.md).
       bet_unit: RoomState.bet_unit(room),
+      # Страддл: разрешён ли он за этим столом и с какой суммы начинается.
+      # Минимум приходит посчитанным — «два номинала» это доменное правило,
+      # и удваивать блайнд на клиенте значило бы завести его копию (§3).
+      straddle_allowed: room.straddle_allowed?,
+      straddle_min: Straddle.min_amount(RoomState.bet_unit(room)),
+      # Идущее окно объявления суммы: остаток на момент отправки снапшота.
+      straddle_ms: remaining(room.straddle_deadline_at),
       max_players: room.setting.max_players,
       timings: timings(room.setting),
       action_seq: room.action_seq,
@@ -72,6 +80,7 @@ defmodule Socket.Views.TableView do
       time_bank_refill: setting.time_bank_refill,
       disconnect_grace_ms: setting.disconnect_grace_ms,
       rebuy_prompt_ms: setting.rebuy_prompt_ms,
+      straddle_offer_ms: BlockPoker.Tables.straddle_offer_ms(),
       sit_out_timeout_ms: setting.sit_out_timeout_ms
     }
   end
@@ -159,6 +168,9 @@ defmodule Socket.Views.TableView do
       waiting_for_bb: seat.waiting_for_bb,
       wants_post: seat.wants_post,
       missed_blinds: seat.missed_blinds,
+      # Страддл публичен: стол обязан знать, что кто-то ставит вслепую, —
+      # это меняет цену раздачи для всех, а не только для объявившего.
+      straddle: seat.straddle,
       # Пауза публична: стол и так видит, что игрок раздачи пропускает, а
       # обратный отсчёт объясняет, сколько это кресло ещё будет занято.
       sit_out_pending: seat.sit_out_pending,
@@ -195,6 +207,7 @@ defmodule Socket.Views.TableView do
           missed_blinds: seat.missed_blinds,
           time_bank: seat.time_bank,
           preselect: seat.preselect,
+          straddle: seat.straddle,
           # Право на ручной запуск считает ядро; роль игрока наружу не уходит
           # ни здесь, ни где-либо ещё.
           can_start_manual: RoomState.can_start_manual?(room, user_id),

@@ -1,0 +1,117 @@
+defmodule BlockPoker.Engine.Straddle do
+  @moduledoc """
+  Страддл — ставка вслепую, сделанная до карт.
+
+  Игрок объявляет её заранее и деньги вносит, ещё не зная руки. Взамен он
+  получает то, ради чего это делают: банк, за который остальные вынуждены
+  играть по его цене. Ставка **живая** — она становится ставкой круга, и
+  уравнять её обязаны все, кто хочет увидеть флоп.
+
+  Три правила, которые отличают наш страддл от классического:
+
+    * **Ставит кто угодно.** Не только первый после блайнда: любое место,
+      включая кнопку и сами блайнды. Поэтому страддл — не часть структуры
+      ставок (`Engine.BettingStructure`), а отдельная надстройка над ней:
+      блайндам и анте кнопки он одинаково безразличен.
+    * **Порядок хода не меняется.** Первым говорит тот же, кто говорил бы
+      без страддла, последним — тоже. Страддл — это блайндовый рейз,
+      сделанный заранее; права переспросить у поставившего нет, как нет
+      его у обычного рейзера, когда все уравняли. Отсюда `option?: false`
+      в вынужденной ставке.
+    * **Номинал круга становится страддлом.** Поставили 10 BB — торговля
+      идёт от 10 BB, и минимальный рейз считается от них же, а не от
+      блайнда. Иначе «рейз» после страддла оказался бы меньше страддла.
+
+  Размер — от двух номиналов стола (2 BB на блайндах, 2 анте в Short Deck)
+  до всего стека: олл-ин вслепую разрешён и отдельным случаем не является.
+  Верхнюю границу задаёт стек, поэтому урезание живёт здесь же — комната
+  не должна знать, во что превращается заявка на 100 BB при стеке в 40.
+
+  Модуль чистый: числа и места на входе, данные на выходе.
+  """
+
+  alias BlockPoker.Engine.HandSetup
+
+  @typedoc "Разрешённый страддл раздачи: кто ставит и сколько."
+  @type t :: %{seat: pos_integer(), amount: pos_integer()}
+
+  @typedoc "Заявка места: то же самое до проверки стеком и составом раздачи."
+  @type intent :: %{seat: pos_integer(), amount: pos_integer()}
+
+  # Два номинала — минимум, при котором ставка вообще что-то меняет: ровно
+  # один номинал равен большому блайнду, то есть не является ставкой вслепую,
+  # а просто повторяет её.
+  @min_units 2
+
+  @doc "Наименьший осмысленный страддл: два номинала стола."
+  @spec min_amount(non_neg_integer()) :: pos_integer()
+  def min_amount(bet_unit), do: max(bet_unit, 1) * @min_units
+
+  @doc """
+  Хватает ли стека на страддл. Меньше минимума поставить нельзя даже
+  олл-ином: короткий стек уравнивает, а не страддлит.
+  """
+  @spec available?(non_neg_integer(), non_neg_integer()) :: boolean()
+  def available?(stack, bet_unit), do: stack >= min_amount(bet_unit)
+
+  @doc """
+  Привести заявку к допустимой: не меньше двух номиналов, не больше стека.
+
+  Заявка сверх стека — не ошибка, а олл-ин вслепую: игрок объявил «на всё,
+  что есть», и его стек мог уменьшиться между объявлением и раздачей.
+  """
+  @spec normalize(term(), non_neg_integer(), non_neg_integer()) ::
+          {:ok, pos_integer()} | {:error, :invalid_straddle | :straddle_unavailable}
+  def normalize(amount, bet_unit, stack) do
+    cond do
+      not is_integer(amount) or amount <= 0 -> {:error, :invalid_straddle}
+      not available?(stack, bet_unit) -> {:error, :straddle_unavailable}
+      amount < min_amount(bet_unit) -> {:error, :invalid_straddle}
+      true -> {:ok, min(amount, stack)}
+    end
+  end
+
+  @doc """
+  Кто страддлит, если заявок несколько.
+
+  Страддл в раздаче один: две ставки вслепую подряд превратили бы префлоп
+  в аукцион вслепую. Право достаётся большей сумме — она и есть более
+  дорогая заявка на банк; при равенстве — лучшей позиции, то есть
+  ближайшему к кнопке (сама кнопка — лучшая).
+
+  `order` — места в порядке хода от кнопки, как их отдаёт
+  `HandSetup.order_from_button/1`: кнопка в этом списке последняя.
+  """
+  @spec choose([intent()], [pos_integer()]) :: t() | nil
+  def choose([], _order), do: nil
+
+  def choose(intents, order) do
+    Enum.max_by(intents, fn %{seat: seat, amount: amount} ->
+      {amount, Enum.find_index(order, &(&1 == seat)) || -1}
+    end)
+  end
+
+  @doc """
+  Вынужденная ставка раздачи — или пустой список, если страддла нет.
+
+  `top_up?` означает, что сумма — **итог**, а не добавка: страддливший
+  блайнд доплачивает разницу, а не вносит страддл поверх блайнда.
+  `option?: false` — права переспросить у страддлера нет (см. moduledoc).
+  """
+  @spec forced_bets(HandSetup.t()) :: [map()]
+  def forced_bets(%HandSetup{straddle: nil}), do: []
+
+  def forced_bets(%HandSetup{straddle: %{seat: seat, amount: amount}}) do
+    [%{seat: seat, kind: :straddle, amount: amount, live?: true, option?: false, top_up?: true}]
+  end
+
+  @doc "Номинал круга с учётом страддла: он поднимает планку минимального рейза."
+  @spec bet_unit(HandSetup.t(), non_neg_integer()) :: non_neg_integer()
+  def bet_unit(%HandSetup{straddle: nil}, base), do: base
+  def bet_unit(%HandSetup{straddle: %{amount: amount}}, base), do: max(base, amount)
+
+  @doc "Место страддлера — последний агрессор префлопа ещё до первого хода."
+  @spec seat(HandSetup.t()) :: pos_integer() | nil
+  def seat(%HandSetup{straddle: nil}), do: nil
+  def seat(%HandSetup{straddle: %{seat: seat}}), do: seat
+end

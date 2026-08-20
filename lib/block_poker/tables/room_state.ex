@@ -13,12 +13,12 @@ defmodule BlockPoker.Tables.RoomState do
 
   alias BlockPoker.CashGames.CashGameSetting
   alias BlockPoker.Chat
-  alias BlockPoker.Engine.{EntryRules, Hand, Preselect, Stats, TimeBank}
+  alias BlockPoker.Engine.{EntryRules, Hand, Preselect, Straddle, Stats, TimeBank}
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.Reactions
   alias BlockPoker.Tables.Seat
 
-  @type phase :: :idle | :button_draw | :hand
+  @type phase :: :idle | :button_draw | :straddle | :hand
   @type entry :: :wait_bb | :post
 
   @typedoc "Снимок профиля игрока: то, чем стол его показывает."
@@ -49,6 +49,9 @@ defmodule BlockPoker.Tables.RoomState do
           deadline_at: integer() | nil,
           showdown: map() | nil,
           rit_deadline_at: integer() | nil,
+          straddle_allowed?: boolean(),
+          straddle_deadline_at: integer() | nil,
+          straddle_done?: boolean(),
           rabbit: rabbit() | nil
         }
 
@@ -109,7 +112,17 @@ defmodule BlockPoker.Tables.RoomState do
     # игрок должен увидеть остаток времени, а не начать отсчёт заново.
     rit_deadline_at: nil,
     # Снимок rabbit hunting прошедшей раздачи; живёт паузу между раздачами.
-    rabbit: nil
+    rabbit: nil,
+    # Разрешён ли за этим столом страддл. Решает режим игры (`GameMode`),
+    # а не шаблон: в кэше он есть всегда, в любом другом формате его нет.
+    straddle_allowed?: false,
+    # Дедлайн окна, в котором объявившие страддл называют сумму (монотонные
+    # мс). Хранится рядом с `deadline_at` и по той же причине: подключившийся
+    # внутри окна обязан увидеть остаток, а не начать отсчёт заново.
+    straddle_deadline_at: nil,
+    # Окно этой раздачи уже прошло. Без флага раздача, которую окно
+    # откладывает, откладывалась бы им бесконечно.
+    straddle_done?: false
   ]
 
   @spec new(Ecto.UUID.t(), CashGameSetting.t()) :: t()
@@ -287,6 +300,76 @@ defmodule BlockPoker.Tables.RoomState do
   def clear_preselects(%__MODULE__{} = state) do
     seats = Map.new(state.seats, fn {number, seat} -> {number, %{seat | preselect: nil}} end)
     %{state | seats: seats}
+  end
+
+  @doc """
+  Объявить страддл или снять объявление. `nil` — режим выключен.
+
+  Сумма приводится к допустимой сразу (`Engine.Straddle`): игрок не должен
+  узнавать о том, что 100 BB при стеке в 40 — это олл-ин, в момент раздачи.
+  """
+  @spec set_straddle(t(), Ecto.UUID.t(), pos_integer() | nil) ::
+          {:ok, t(), Seat.t()} | {:error, atom()}
+  def set_straddle(%__MODULE__{} = state, user_id, nil) do
+    with {:ok, seat} <- fetch_player(state, user_id) do
+      seat = %{seat | straddle: nil}
+      {:ok, put_seat(state, seat), seat}
+    end
+  end
+
+  def set_straddle(%__MODULE__{} = state, user_id, amount) do
+    with {:ok, seat} <- fetch_player(state, user_id),
+         :ok <- ensure_straddle_allowed(state),
+         {:ok, amount} <- Straddle.normalize(amount, bet_unit(state), seat.stack) do
+      seat = %{seat | straddle: amount}
+      {:ok, put_seat(state, seat), seat}
+    end
+  end
+
+  defp ensure_straddle_allowed(%__MODULE__{straddle_allowed?: true}), do: :ok
+  defp ensure_straddle_allowed(_state), do: {:error, :straddle_unavailable}
+
+  @doc """
+  Заявки на страддл среди мест, которые эту раздачу играют.
+
+  Возвращаются уже урезанные по стеку: объявление живёт дольше раздачи,
+  а стек между ними меняется. Место, которому на страддл уже не хватает,
+  из списка выпадает молча — объявление при этом сохраняется, чтобы после
+  докупки не пришлось ставить галочку заново.
+  """
+  @spec straddle_intents(t(), [pos_integer()]) :: [Straddle.intent()]
+  def straddle_intents(%__MODULE__{straddle_allowed?: false}, _seats), do: []
+
+  def straddle_intents(%__MODULE__{} = state, seats) do
+    unit = bet_unit(state)
+
+    seats
+    |> Enum.map(&Map.get(state.seats, &1))
+    |> Enum.reject(&(&1 == nil or &1.straddle == nil))
+    |> Enum.flat_map(fn seat ->
+      case Straddle.normalize(seat.straddle, unit, seat.stack) do
+        {:ok, amount} -> [%{seat: seat.number, amount: amount}]
+        {:error, _reason} -> []
+      end
+    end)
+  end
+
+  @doc "Открыть окно объявления суммы: до этого момента раздача не стартует."
+  @spec open_straddle_window(t(), integer()) :: t()
+  def open_straddle_window(%__MODULE__{} = state, deadline_at) do
+    %{state | phase: :straddle, straddle_deadline_at: deadline_at}
+  end
+
+  @doc "Окно закрылось: суммы объявлены, раздача может начинаться."
+  @spec close_straddle_window(t()) :: t()
+  def close_straddle_window(%__MODULE__{} = state) do
+    %{state | phase: :idle, straddle_deadline_at: nil, straddle_done?: true}
+  end
+
+  @doc "Раздача началась или кончилась — окно следующей ещё не проводилось."
+  @spec reset_straddle_window(t()) :: t()
+  def reset_straddle_window(%__MODULE__{} = state) do
+    %{state | straddle_deadline_at: nil, straddle_done?: false}
   end
 
   @doc "Включить тайм-банк на текущем решении."

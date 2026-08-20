@@ -50,6 +50,17 @@ defmodule BlockPoker.GameMode do
   """
   @callback run_it_twice?(RoomState.t()) :: boolean()
 
+  @doc """
+  Разрешён ли за этим столом страддл.
+
+  Кэш отвечает `true` всегда, любой другой режим — `false`. Ставка вслепую
+  вне очереди осмысленна там, где фишки покупаются и продаются: игрок платит
+  за банк своими деньгами и в любой момент может встать. В турнире тот же
+  жест — это отказ от позиции в структуре мест, и решается он не настройкой
+  стола, а тем, что режим его не предлагает вовсе.
+  """
+  @callback straddle?(RoomState.t()) :: boolean()
+
   @doc "Вернуть фишки игроку: в кэше — cash-out в кошелёк, в турнире — no-op."
   @callback return_chips(RoomState.t(), Ecto.UUID.t(), non_neg_integer(), String.t()) ::
               :ok | {:error, atom()}

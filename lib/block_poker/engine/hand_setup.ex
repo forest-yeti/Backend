@@ -10,7 +10,7 @@ defmodule BlockPoker.Engine.HandSetup do
   Структура чистая: ни кошельков, ни `Repo`, ни процессов.
   """
 
-  alias BlockPoker.Engine.{BettingStructure, Variant}
+  alias BlockPoker.Engine.{BettingStructure, Straddle, Variant}
 
   @type player :: %{
           seat: pos_integer(),
@@ -28,6 +28,7 @@ defmodule BlockPoker.Engine.HandSetup do
           big_blind: non_neg_integer(),
           ante: non_neg_integer(),
           ante_type: :big_blind | :per_player,
+          straddle: Straddle.t() | nil,
           run_it_twice_allowed: boolean()
         }
 
@@ -42,6 +43,10 @@ defmodule BlockPoker.Engine.HandSetup do
     big_blind: 0,
     ante: 0,
     ante_type: :big_blind,
+    # Ставка вслепую, объявленная до карт (`Engine.Straddle`). Приходит уже
+    # разрешённой — одна на раздачу, с проверенной суммой: выбирать между
+    # заявками мест обязан тот, кто их собирал, а не движок раздачи.
+    straddle: nil,
     # Разрешение приходит флагом, а не ссылкой на шаблон, — по той же причине,
     # что и блайнды. Дефолт `false`: новый режим и искусственный вариант в
     # тестах получают функцию выключенной молча, а не по забывчивости.

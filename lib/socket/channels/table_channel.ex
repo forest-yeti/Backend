@@ -73,6 +73,18 @@ defmodule Socket.Channels.TableChannel do
     |> Message.reply(socket)
   end
 
+  def handle_in("straddle", payload, socket) do
+    case Message.fetch_straddle(payload) do
+      {:ok, amount} ->
+        socket.assigns.room_id
+        |> Tables.straddle(socket.assigns.user_id, amount)
+        |> Message.reply(socket)
+
+      {:error, code} ->
+        Message.error_reply(code, socket)
+    end
+  end
+
   def handle_in("post_blind", payload, socket) do
     socket.assigns.room_id
     |> Tables.request_post(socket.assigns.user_id, Map.get(payload, "post", true) == true)

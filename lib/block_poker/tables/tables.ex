@@ -310,6 +310,19 @@ defmodule BlockPoker.Tables do
   end
 
   @doc """
+  Объявить страддл — ставку вслепую до карт — или снять объявление (`nil`).
+
+  Это настройка места, а не действие в раздаче: объявление держится, пока
+  игрок его не снимет, и перед каждой раздачей стол даёт объявившим окно
+  назвать сумму. Размер и его границы считает ядро (`Engine.Straddle`).
+  """
+  @spec straddle(Ecto.UUID.t(), Ecto.UUID.t(), pos_integer() | nil) ::
+          {:ok, map()} | {:error, error()}
+  def straddle(room_id, user_id, amount) do
+    with {:ok, pid} <- fetch_room(room_id), do: TableServer.straddle(pid, user_id, amount)
+  end
+
+  @doc """
   «Не ждать большого блайнда». Намерение, а не решение: во что обойдётся
   вход, считает ядро в момент старта раздачи (§6 задачи 3).
   """
@@ -333,6 +346,13 @@ defmodule BlockPoker.Tables do
   def react(room_id, user_id, id) do
     with {:ok, pid} <- fetch_room(room_id), do: TableServer.react(pid, user_id, id)
   end
+
+  @doc """
+  Длина окна объявления страддла. Клиент рисует по ней шкалу отсчёта, а
+  не хранит собственную копию тайминга.
+  """
+  @spec straddle_offer_ms() :: pos_integer()
+  defdelegate straddle_offer_ms(), to: TableServer
 
   @doc "Доступный набор реакций в порядке отображения."
   @spec reactions() :: [String.t()]

@@ -36,6 +36,11 @@ defmodule BlockPoker.Tables.Seat do
   `waiting_for_bb`, `missed_blinds` и `can_post` — вход в игру (§6 задачи 3).
   Само решение принимает `Engine.EntryRules`, здесь только его результат.
 
+  `straddle` — объявленная ставка вслепую: сумма, которую игрок готов
+  поставить до карт, либо `nil` — режим выключен. Живёт в месте, а не в
+  раздаче, потому что это настройка игрока за столом: она переживает
+  раздачу и гаснет вместе с уходом с места (`Engine.Straddle`).
+
   `time_bank` — личный запас времени сверх обычного времени на ход
   (`Engine.TimeBank`), `preselect` — заранее выбранное действие
   (`Engine.Preselect`). Оба живут в месте по той же причине, что и `stats`:
@@ -87,6 +92,7 @@ defmodule BlockPoker.Tables.Seat do
           dead_post: non_neg_integer(),
           time_bank: non_neg_integer(),
           preselect: Preselect.t() | nil,
+          straddle: pos_integer() | nil,
           add_chips: add_chips() | nil,
           chat_sent_at: [integer()],
           reacted_at: integer() | nil,
@@ -123,6 +129,10 @@ defmodule BlockPoker.Tables.Seat do
     # Одноразовые — раздача их забирает и обнуляет.
     post: 0,
     dead_post: 0,
+    # Объявленный страддл: сумма в фишках либо `nil`. Галочка постоянная —
+    # игрок включает режим один раз, и перед каждой раздачей стол
+    # переспрашивает его суммой, а не самим фактом.
+    straddle: nil,
     time_bank: 0,
     preselect: nil,
     # Докупка, начатая с этого места: ключ идемпотентности и её судьба.

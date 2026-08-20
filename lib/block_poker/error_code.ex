@@ -29,6 +29,8 @@ defmodule BlockPoker.ErrorCode do
           | :add_chips_in_progress
           | :add_chips_lost
           | :post_not_available
+          | :straddle_unavailable
+          | :invalid_straddle
           | :start_not_available
           | :zero_stack
           | :already_sitting_out
@@ -71,6 +73,8 @@ defmodule BlockPoker.ErrorCode do
     add_chips_in_progress: {409, "Предыдущая докупка ещё не завершена"},
     add_chips_lost: {409, "Докупка потеряна, повторите"},
     post_not_available: {409, "Войти за взнос сейчас нельзя"},
+    straddle_unavailable: {409, "Страддл сейчас недоступен"},
+    invalid_straddle: {422, "Размер страддла вне допустимых границ"},
     start_not_available: {409, "Запустить игру сейчас нельзя"},
     zero_stack: {409, "Нулевой стек: сначала докупитесь"},
     already_sitting_out: {409, "Вы уже в паузе"},

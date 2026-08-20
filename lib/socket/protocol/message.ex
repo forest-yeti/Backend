@@ -29,6 +29,24 @@ defmodule Socket.Protocol.Message do
     end
   end
 
+  @doc """
+  Объявление страддла: сумма либо снятие.
+
+  Снять можно двумя способами — `%{"on" => false}` и `%{"amount" => null}`:
+  клиенту с галочкой удобнее первое, клиенту с полем суммы — второе.
+  Границы суммы канал не проверяет, это правило игры (§3 CLAUDE.md).
+  """
+  @spec fetch_straddle(map()) :: {:ok, pos_integer() | nil} | {:error, :validation_failed}
+  def fetch_straddle(%{"on" => false}), do: {:ok, nil}
+
+  def fetch_straddle(payload) do
+    case Map.get(payload, "amount") do
+      nil -> {:ok, nil}
+      value when is_integer(value) and value > 0 -> {:ok, value}
+      _other -> {:error, :validation_failed}
+    end
+  end
+
   @spec fetch_seat(map(), String.t()) :: {:ok, pos_integer()} | {:error, :validation_failed}
   def fetch_seat(payload, key) do
     case Map.get(payload, key) do

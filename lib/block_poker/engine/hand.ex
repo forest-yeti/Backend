@@ -24,6 +24,7 @@ defmodule BlockPoker.Engine.Hand do
     Rng,
     RunItTwice,
     Showdown,
+    Straddle,
     Variant
   }
 
@@ -150,12 +151,16 @@ defmodule BlockPoker.Engine.Hand do
       players: players,
       order: order,
       button_seat: setup.button_seat,
-      bet_unit: structure.bet_unit(setup),
+      # Страддл поднимает номинал круга: после ставки вслепую в 10 BB
+      # минимальный рейз считается от неё, а не от блайнда.
+      bet_unit: Straddle.bet_unit(setup, structure.bet_unit(setup)),
       run_it_twice_allowed?: setup.run_it_twice_allowed,
       rake_fun: Keyword.get(opts, :rake)
     }
 
-    {hand, forced_events} = post_forced_bets(hand, structure.forced_bets(setup))
+    forced = structure.forced_bets(setup) ++ Straddle.forced_bets(setup)
+    {hand, forced_events} = post_forced_bets(hand, forced)
+    hand = %{hand | aggressor: Straddle.seat(setup)}
     {hand, entry_events} = post_entries(hand, setup)
     hand = deal_hole(hand)
 
@@ -886,7 +891,7 @@ defmodule BlockPoker.Engine.Hand do
   defp post_forced_bet(hand, bet) do
     player = Map.fetch!(hand.players, bet.seat)
     committed = player.committed
-    amount = min(bet.amount, player.stack)
+    amount = min(due(bet, player), player.stack)
 
     hand = commit(hand, player, amount)
     hand = settle_forced_bet(hand, bet, committed, amount)
@@ -895,8 +900,17 @@ defmodule BlockPoker.Engine.Hand do
      [{:posted, %{seat: bet.seat, kind: to_string(bet.kind), amount: amount, pot: hand.pot}}]}
   end
 
-  defp settle_forced_bet(hand, %{live?: true, seat: seat}, _committed, _amount) do
-    put_player(hand, %{Map.fetch!(hand.players, seat) | acted?: false})
+  # Сумма к постановке. Обычная вынужденная ставка вносится поверх уже
+  # вложенного, `top_up?` — до указанного итога: страддливший блайнд платит
+  # разницу, а не страддл сверх блайнда.
+  defp due(%{top_up?: true, amount: amount}, player), do: max(amount - player.committed, 0)
+  defp due(%{amount: amount}, _player), do: amount
+
+  defp settle_forced_bet(hand, %{live?: true, seat: seat} = bet, _committed, _amount) do
+    # `option?` — сохраняет ли поставивший право голоса, когда до него дойдёт
+    # очередь. Блайнд и анте кнопки сохраняют, страддл — нет: порядок хода он
+    # не меняет и переспрашивать уравнявших ему не за чем.
+    put_player(hand, %{Map.fetch!(hand.players, seat) | acted?: not option?(bet)})
   end
 
   defp settle_forced_bet(hand, %{seat: seat}, committed, amount) do
@@ -904,6 +918,8 @@ defmodule BlockPoker.Engine.Hand do
     |> put_player(%{Map.fetch!(hand.players, seat) | committed: committed})
     |> mark_dead(seat, amount)
   end
+
+  defp option?(bet), do: Map.get(bet, :option?, true)
 
   # Взнос за вход вне очереди: игрок, не дожидавшийся своего большого
   # блайнда, платит столько же, сколько круг стоил бы сидящему.

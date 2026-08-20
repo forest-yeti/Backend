@@ -18,7 +18,8 @@ defmodule BlockPoker.Tables.TableServer do
 
   use GenServer, restart: :temporary
 
-  alias BlockPoker.Engine.{ButtonDraw, Hand, HandStats, Preselect, Rabbit, Rng, Stats}
+  alias BlockPoker.Engine.{ButtonDraw, Hand, HandSetup, HandStats, Preselect, Rabbit, Rng, Stats}
+  alias BlockPoker.Engine.Straddle
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.Tables.{RoomState, Seat, TableRegistry}
   alias Phoenix.PubSub
@@ -32,6 +33,9 @@ defmodule BlockPoker.Tables.TableServer do
   # короткое: стол не может ждать думающего дольше, чем длится его ход.
   @rit_offer_ms 8_000
   @next_hand_ms 2_500
+  # Сколько объявивший страддл думает над суммой. Окно короткое намеренно:
+  # оно стоит перед каждой раздачей и платят за него ожиданием все за столом.
+  @straddle_offer_ms 3_000
   # Насколько показ rabbit-карт отодвигает следующую раздачу: ровно столько,
   # чтобы их успели рассмотреть, и не настолько, чтобы стол простаивал.
   @rabbit_extra_ms 1_000
@@ -131,6 +135,15 @@ defmodule BlockPoker.Tables.TableServer do
           :ok | {:error, atom()}
   def act(room, user_id, action, seq), do: GenServer.call(room, {:act, user_id, action, seq})
 
+  @doc "Длина окна, в котором объявившие страддл называют сумму."
+  @spec straddle_offer_ms() :: pos_integer()
+  def straddle_offer_ms, do: @straddle_offer_ms
+
+  @doc "Объявить страддл (сумма) или снять объявление (`nil`)."
+  @spec straddle(GenServer.server(), Ecto.UUID.t(), pos_integer() | nil) ::
+          {:ok, map()} | {:error, atom()}
+  def straddle(room, user_id, amount), do: GenServer.call(room, {:straddle, user_id, amount})
+
   @doc "Выбрать действие заранее (`nil` — снять выбор)."
   @spec preselect(GenServer.server(), Ecto.UUID.t(), Preselect.t() | nil) ::
           :ok | {:error, atom()}
@@ -225,6 +238,9 @@ defmodule BlockPoker.Tables.TableServer do
       evict: Keyword.get(opts, :evict, &default_evict/2)
     }
 
+    state =
+      put_room(state, %{state.room | straddle_allowed?: state.game_mode.straddle?(state.room)})
+
     {:ok, state, {:continue, :announce}}
   end
 
@@ -294,6 +310,22 @@ defmodule BlockPoker.Tables.TableServer do
         # Выбор мог совпасть с уже наступившей очередью хода: игрок нажал
         # «фолд» ровно в тот момент, когда ход дошёл до него.
         {:reply, :ok, apply_pending_preselect(state, seat.number)}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:straddle, user_id, amount}, _from, state) do
+    case RoomState.set_straddle(state.room, user_id, amount) do
+      {:ok, room, seat} ->
+        state = put_room(state, room)
+
+        # Режим публичен: стол обязан знать, что кто-то ставит вслепую, —
+        # это меняет цену раздачи для всех, а не только для объявившего.
+        broadcast(state, "straddle_mode", %{seat: seat.number, straddle: seat.straddle})
+
+        {:reply, {:ok, %{straddle: seat.straddle}}, state}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -684,6 +716,13 @@ defmodule BlockPoker.Tables.TableServer do
   # Пауза между раздачами: игрок должен успеть увидеть, чем всё кончилось.
   defp do_timeout(:next_hand, state), do: start_hand(state)
 
+  # Окно объявления суммы закрылось: молчание — согласие на объявленную
+  # ранее сумму, а не отказ. Дальше раздача идёт обычным путём.
+  defp do_timeout(:straddle, state) do
+    state = put_room(state, RoomState.close_straddle_window(state.room))
+    start_hand(state)
+  end
+
   # Время на ответ вышло: неотвеченное — отказ, и доводка идёт одним бордом.
   defp do_timeout(:rit, state) do
     with {:ok, hand} <- fetch_hand(state),
@@ -739,6 +778,10 @@ defmodule BlockPoker.Tables.TableServer do
 
   defp start_hand(%State{room: %RoomState{phase: :hand}} = state), do: state
 
+  # Окно страддла уже открыто: раздача ждёт его, а севший в этот момент
+  # игрок не должен открывать второе.
+  defp start_hand(%State{room: %RoomState{phase: :straddle}} = state), do: state
+
   defp start_hand(state), do: start_hand(state, length(in_game_seats(state.room)))
 
   # `attempts` — по одному обороту блайндов на каждое занятое место: если за
@@ -753,6 +796,50 @@ defmodule BlockPoker.Tables.TableServer do
     # кресла — блайнды платят не те.
     state = put_room(state, ensure_button_in_play(state.room))
 
+    case offer_straddle(state) do
+      {:open, state} -> state
+      :none -> deal_hand(state, attempts)
+    end
+  end
+
+  # Объявившим страддл даётся окно назвать сумму — до карт и до блайндов:
+  # ставка вслепую тем и является, что делается вслепую. Окно открывается
+  # один раз на раздачу (`straddle_done?`) и только если объявившие есть:
+  # стол без страддла не должен ждать ни секунды.
+  defp offer_straddle(%State{room: %RoomState{straddle_done?: true}}), do: :none
+
+  defp offer_straddle(state) do
+    seats = in_game_seats(state.room)
+    intents = RoomState.straddle_intents(state.room, seats)
+
+    if length(seats) >= 2 and intents != [] do
+      state =
+        put_room(state, RoomState.open_straddle_window(state.room, straddle_deadline(state)))
+
+      broadcast(state, "straddle_offer", %{
+        deadline_ms: @straddle_offer_ms,
+        min: Straddle.min_amount(RoomState.bet_unit(state.room)),
+        seats: intents
+      })
+
+      {:open, schedule(state, :straddle, @straddle_offer_ms)}
+    else
+      :none
+    end
+  end
+
+  defp straddle_deadline(state), do: now_ms(state) + @straddle_offer_ms
+
+  # Страддл в раздаче один, и выбирает его чистое ядро: заявок могло прийти
+  # несколько, а спорят они суммой и позицией — это правило игры (§3).
+  defp resolve_straddle(state, setup) do
+    order = setup |> HandSetup.order_from_button() |> Enum.map(& &1.seat)
+    intents = RoomState.straddle_intents(state.room, order)
+
+    %{setup | straddle: Straddle.choose(intents, order)}
+  end
+
+  defp deal_hand(state, attempts) do
     # Намерения превращаются в решения ровно здесь: кнопка на месте, и
     # стоимость входа считается по той обстановке, в которой раздача пойдёт.
     state = put_room(state, RoomState.resolve_post_intents(state.room))
@@ -760,12 +847,13 @@ defmodule BlockPoker.Tables.TableServer do
 
     case state.game_mode.hand_setup(state.room) do
       {:ok, setup} ->
+        setup = resolve_straddle(state, setup)
         {hand, events} = Hand.start(setup, state.rng, rake: rake_fun(state))
         room = RoomState.clear_posts(state.room, Map.keys(hand.players))
 
         state =
           put_room(state, %{
-            room
+            RoomState.reset_straddle_window(room)
             | phase: :hand,
               hand: hand,
               hand_stats: HandStats.new(hand),
@@ -775,6 +863,7 @@ defmodule BlockPoker.Tables.TableServer do
 
         broadcast(state, "hand_started", %{
           button_seat: setup.button_seat,
+          straddle: setup.straddle,
           players: seat_stacks(hand)
         })
 
@@ -1013,6 +1102,7 @@ defmodule BlockPoker.Tables.TableServer do
           showdown: nil
       }
       |> RoomState.clear_preselects()
+      |> RoomState.reset_straddle_window()
       |> RoomState.refill_time_banks(owners_of(hand))
 
     room = state.game_mode.on_hand_finished(room, hand.results)
@@ -1257,6 +1347,11 @@ defmodule BlockPoker.Tables.TableServer do
   # Кнопка разыграна один раз за стол, а раздач за ним — много. Если игра
   # уже начата и раздача сейчас не идёт, сажать нового игрока значит начать
   # следующую руку: иначе стол молча стоит с полным составом.
+  # Кнопка ещё разыгрывается: севший в этот момент игрок раздачу не начинает.
+  # Иначе она стартовала бы посреди анимации, а доигравший её таймер розыгрыша
+  # начинал бы поверх неё вторую.
+  defp maybe_start_game(%State{room: %RoomState{phase: :button_draw}} = state), do: state
+
   defp maybe_start_game(%State{room: %RoomState{game_started?: true, hand: nil}} = state) do
     start_hand(state)
   end

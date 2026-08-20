@@ -29,12 +29,21 @@ defmodule BlockPoker.Engine.BettingStructure do
   уравнять, и поставивший сохраняет право голоса, когда очередь дойдёт до
   него. Мёртвая уходит в банк, ставкой не считается и права чека не даёт.
   Большой блайнд и дополнительное анте кнопки живые; обычное анте — нет.
+
+  Два ключа необязательны, и по умолчанию они описывают поведение блайнда:
+  `option?` (по умолчанию `true`) — сохраняет ли поставивший право голоса,
+  когда очередь дойдёт до него; `top_up?` (по умолчанию `false`) — считать
+  ли сумму итогом вложенного, а не добавкой к нему. Оба нужны страддлу
+  (`Engine.Straddle`), который структурой ставок не является, но ставится
+  тем же механизмом.
   """
   @type forced_bet :: %{
-          seat: pos_integer(),
-          kind: :ante | :button_ante | :small_blind | :big_blind,
-          amount: non_neg_integer(),
-          live?: boolean()
+          required(:seat) => pos_integer(),
+          required(:kind) => :ante | :button_ante | :small_blind | :big_blind | :straddle,
+          required(:amount) => non_neg_integer(),
+          required(:live?) => boolean(),
+          optional(:option?) => boolean(),
+          optional(:top_up?) => boolean()
         }
 
   @typedoc """
