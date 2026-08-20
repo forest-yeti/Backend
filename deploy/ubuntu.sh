@@ -33,6 +33,8 @@
 #   APP_USER          системный пользователь (по умолчанию blockpoker)
 #   BASE_DIR          корень установки (по умолчанию /opt/block_poker)
 #   ELIXIR_VERSION    версия Elixir (по умолчанию 1.18.4)
+#   ERLANG_VERSION    версия OTP для сборки из исходников (по умолчанию 27.2.4);
+#                     используется, только если готовых пакетов нужной версии нет
 #   SKIP_TLS=1        не выпускать сертификат
 
 set -Eeuo pipefail
@@ -45,6 +47,7 @@ ENV_FILE="/etc/block_poker.env"
 DB_NAME="block-poker"
 DB_USER="blockpoker"
 ELIXIR_VERSION="${ELIXIR_VERSION:-1.18.4}"
+ERLANG_VERSION="${ERLANG_VERSION:-27.2.4}"
 REPO_REF="${REPO_REF:-master}"
 SERVICE="block-poker"
 
@@ -124,38 +127,100 @@ apt-get install -y -qq \
 # 2. Erlang/OTP
 # --------------------------------------------------------------------------
 
-install_erlang() {
-  if command -v erl >/dev/null 2>&1; then
-    log "Erlang уже установлен: $(erl -noshell -eval 'io:format("~s",[erlang:system_info(otp_release)]),halt().')"
-    return
-  fi
+# Elixir 1.17+ требует минимум OTP 25. На Ubuntu 22.04 в репозитории лежит
+# OTP 24 — под него сборок Elixir просто нет, поэтому версию обязательно
+# проверяем, а не полагаемся на факт наличия `erl`.
+MIN_OTP=25
 
+otp_major() {
+  command -v erl >/dev/null 2>&1 || return 1
+  erl -noshell -eval 'io:format("~s",[erlang:system_info(otp_release)]),halt().' 2>/dev/null
+}
+
+erlang_from_esl() {
   local codename
   codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
 
   log "Пробую Erlang/OTP 27 из репозитория Erlang Solutions"
-  if curl -fsSL --max-time 30 https://binaries2.erlang-solutions.com/GPG-KEY-pmanager.asc \
-       | gpg --dearmor -o /usr/share/keyrings/erlang-solutions.gpg 2>/dev/null; then
-    echo "deb [signed-by=/usr/share/keyrings/erlang-solutions.gpg] https://binaries2.erlang-solutions.com/ubuntu/ ${codename}-esl-erlang-27 contrib" \
-      > /etc/apt/sources.list.d/erlang-solutions.list
+  curl -fsSL --max-time 30 https://binaries2.erlang-solutions.com/GPG-KEY-pmanager.asc \
+    | gpg --dearmor -o /usr/share/keyrings/erlang-solutions.gpg 2>/dev/null \
+    || { warn "Ключ Erlang Solutions не скачался"; return 1; }
 
-    if apt-get update -qq 2>/dev/null && apt-get install -y -qq esl-erlang; then
-      return
-    fi
-    warn "Репозиторий Erlang Solutions недоступен для ${codename} — откатываюсь на пакеты Ubuntu"
-    rm -f /etc/apt/sources.list.d/erlang-solutions.list
-    apt-get update -qq
-  else
-    warn "Не удалось получить ключ Erlang Solutions — беру Erlang из репозитория Ubuntu"
+  echo "deb [signed-by=/usr/share/keyrings/erlang-solutions.gpg] https://binaries2.erlang-solutions.com/ubuntu/ ${codename}-esl-erlang-27 contrib" \
+    > /etc/apt/sources.list.d/erlang-solutions.list
+
+  if apt-get update -qq 2>/dev/null && apt-get install -y -qq esl-erlang; then
+    return 0
   fi
 
-  # Запасной путь: OTP из Ubuntu (26.x на 24.04). Elixir подбирается под него ниже.
-  apt-get install -y -qq erlang-nox erlang-dev
+  warn "Репозиторий Erlang Solutions не отдал esl-erlang для ${codename}"
+  rm -f /etc/apt/sources.list.d/erlang-solutions.list
+  apt-get update -qq
+  return 1
+}
+
+erlang_from_source() {
+  log "Собираю Erlang/OTP $ERLANG_VERSION из исходников — это 15–25 минут"
+  log "(быстрых путей не осталось: в репозитории этой Ubuntu OTP слишком старый)"
+
+  # Старый OTP из apt только мешает: он останется в /usr/bin и будет путать.
+  apt-get purge -y -qq 'erlang-*' >/dev/null 2>&1 || true
+  apt-get install -y -qq autoconf m4 libncurses-dev libssl-dev
+
+  local src="/usr/local/src/otp_src_${ERLANG_VERSION}"
+  rm -rf "$src" "/usr/local/src/otp.tar.gz"
+  mkdir -p /usr/local/src
+
+  curl -fsSL --retry 3 -o /usr/local/src/otp.tar.gz \
+    "https://github.com/erlang/otp/releases/download/OTP-${ERLANG_VERSION}/otp_src_${ERLANG_VERSION}.tar.gz" \
+    || die "Не скачались исходники OTP ${ERLANG_VERSION}"
+
+  tar -C /usr/local/src -xzf /usr/local/src/otp.tar.gz
+  (
+    cd "$src"
+    # Ни JVM, ни GUI-приложений на сервере нет и не надо — экономим минуты сборки.
+    ./configure --without-javac --without-wx --without-debugger \
+                --without-observer --without-et --enable-kernel-poll >/dev/null
+    make -j"$(nproc)" >/dev/null
+    make install >/dev/null
+  ) || die "Сборка OTP не удалась. Чаще всего это нехватка памяти — добавьте swap."
+
+  rm -rf "$src" /usr/local/src/otp.tar.gz
+  hash -r
+}
+
+install_erlang() {
+  local have
+  have="$(otp_major || echo 0)"
+
+  if [[ "${have:-0}" -ge "$MIN_OTP" ]]; then
+    log "Erlang/OTP $have уже установлен"
+    return
+  fi
+
+  [[ "${have:-0}" != "0" ]] && \
+    warn "Установлен OTP $have — для Elixir нужен минимум OTP $MIN_OTP, буду обновлять"
+
+  erlang_from_esl || true
+
+  have="$(otp_major || echo 0)"
+  [[ "${have:-0}" -ge "$MIN_OTP" ]] && return
+
+  # Пакеты Ubuntu пробуем только там, где они достаточно свежие (24.04 и новее).
+  if [[ "${have:-0}" == "0" ]]; then
+    apt-get install -y -qq erlang-nox erlang-dev >/dev/null 2>&1 || true
+    have="$(otp_major || echo 0)"
+    [[ "${have:-0}" -ge "$MIN_OTP" ]] && return
+  fi
+
+  erlang_from_source
 }
 
 install_erlang
 
-OTP_MAJOR="$(erl -noshell -eval 'io:format("~s",[erlang:system_info(otp_release)]),halt().')"
+OTP_MAJOR="$(otp_major)"
+[[ "$OTP_MAJOR" -ge "$MIN_OTP" ]] \
+  || die "После установки получился OTP $OTP_MAJOR, а нужен минимум $MIN_OTP. Сборок Elixir под OTP $OTP_MAJOR не существует."
 log "Erlang/OTP $OTP_MAJOR"
 
 # --------------------------------------------------------------------------
