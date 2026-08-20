@@ -1067,12 +1067,20 @@ defmodule BlockPoker.Engine.Hand do
 
   defp finish_payload(hand, results) do
     %{
-      runs: results.runs,
+      runs: Enum.map(results.runs, &run_payload/1),
       payouts: results.payouts,
       rake: Map.get(results, :rake, 0),
       showdown: results.showdown?,
       shown: shown_cards(hand, results)
     }
+  end
+
+  # Прогон наружу: борд, банки и номер. Ранжировка (`placements`) остаётся
+  # внутри движка — она нужна расчёту и статистике, а в сообщении несёт
+  # структуру `HandRank`, которую JSON не кодирует. Отправка такого payload
+  # роняла канал, и вскрытие до клиента не доезжало вовсе.
+  defp run_payload(run) do
+    %{run: run.run, board: run.board, pots: run.pots}
   end
 
   # Что реально уходит в сокет: на вскрытии карты показывают участники,

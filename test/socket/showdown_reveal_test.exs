@@ -106,5 +106,16 @@ defmodule Socket.Channels.ShowdownRevealTest do
     assert length(finished.shown) == 2, "на вскрытии обязаны открыться обе руки"
     assert Enum.all?(finished.shown, &(length(&1.cards) == 2))
     assert Enum.all?(finished.shown, &(&1.category != nil))
+
+    # Сообщение обязано пережить JSON: ExUnit сравнивает термы и кодирование
+    # не выполняет, поэтому структура внутри payload проходила все проверки
+    # и роняла канал уже на живом столе.
+    assert {:ok, _json} = Jason.encode(finished)
+
+    # И каждое сообщение раздачи целиком: незакодированное падает не тестом,
+    # а каналом, и выглядит на столе как пропавшее событие.
+    for {event, payload} <- stream, is_map(payload) do
+      assert {:ok, _} = Jason.encode(payload), "#{event} не кодируется в JSON"
+    end
   end
 end
