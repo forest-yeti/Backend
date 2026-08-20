@@ -648,10 +648,21 @@ defmodule BlockPoker.Tables.TableServer do
     end
   end
 
+  # Окно на докупку истекло: место возвращается столу. Игрок с нулевым стеком
+  # не играет, а кресло за кэш-столом — дефицит; уход при этом всё равно идёт
+  # обычным путём, а не «освобождением места» здесь: стек нулевой не всегда —
+  # между истечением и этой строкой могла пройти докупка, чей ключ уже
+  # отработал, и терять её фишки нельзя.
   defp do_timeout({:rebuy, seat_number}, state) do
-    seat = Map.fetch!(state.room.seats, seat_number)
-    broadcast(state, "rebuy_expired", %{seat: seat_number, user_id: seat.user_id})
-    state
+    case Map.fetch(state.room.seats, seat_number) do
+      {:ok, %Seat{user_id: user_id} = seat} when user_id != nil ->
+        broadcast(state, "rebuy_expired", %{seat: seat.number, user_id: user_id})
+        state.evict.(state.room.room_id, user_id)
+        state
+
+      _other ->
+        state
+    end
   end
 
   defp do_timeout(:button_draw, state) do
