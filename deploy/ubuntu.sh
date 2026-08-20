@@ -142,9 +142,15 @@ erlang_from_esl() {
   codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
 
   log "Пробую Erlang/OTP 27 из репозитория Erlang Solutions"
+
+  # Хвосты прошлого прогона убираем сразу: недописанный source-лист сломал бы
+  # любой последующий apt-get update.
+  # --batch --yes обязательны: без них gpg спрашивает, перезаписывать ли
+  # существующий файл, и скрипт встаёт на вопросе.
+  rm -f /usr/share/keyrings/erlang-solutions.gpg /etc/apt/sources.list.d/erlang-solutions.list
   curl -fsSL --max-time 30 https://binaries2.erlang-solutions.com/GPG-KEY-pmanager.asc \
-    | gpg --dearmor -o /usr/share/keyrings/erlang-solutions.gpg 2>/dev/null \
-    || { warn "Ключ Erlang Solutions не скачался"; return 1; }
+    | gpg --batch --yes --dearmor -o /usr/share/keyrings/erlang-solutions.gpg 2>/dev/null \
+    || { warn "Ключ Erlang Solutions не скачался — перехожу к следующему способу"; return 1; }
 
   echo "deb [signed-by=/usr/share/keyrings/erlang-solutions.gpg] https://binaries2.erlang-solutions.com/ubuntu/ ${codename}-esl-erlang-27 contrib" \
     > /etc/apt/sources.list.d/erlang-solutions.list
