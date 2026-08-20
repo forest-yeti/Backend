@@ -132,6 +132,39 @@ apt-get install -y -qq \
 # проверяем, а не полагаемся на факт наличия `erl`.
 MIN_OTP=25
 
+mem_gb() {
+  awk '/MemTotal/ { printf "%d", $2 / 1024 / 1024 }' /proc/meminfo
+}
+
+# Каждая параллельная задача компиляции съедает 300–500 МБ. На маленьком VDS
+# `make -j$(nproc)` — это верный OOM, поэтому потоки ограничены и памятью тоже.
+build_jobs() {
+  local cpus mem jobs
+  cpus="$(nproc)"
+  mem="$(mem_gb)"
+  jobs="$cpus"
+  [[ "$mem" -lt "$cpus" ]] && jobs="$mem"
+  [[ "$jobs" -lt 1 ]] && jobs=1
+  echo "$jobs"
+}
+
+# Сборка Erlang и Elixir-кода на 2 ГБ без подкачки падает по OOM. Заводим swap
+# сами, чтобы это не приходилось помнить руками.
+ensure_swap() {
+  local mem
+  mem="$(mem_gb)"
+
+  [[ "$mem" -ge 3 ]] && return
+  [[ -n "$(swapon --show --noheadings 2>/dev/null)" ]] && return
+
+  log "На машине ${mem} ГБ RAM и нет swap — создаю /swapfile на 2 ГБ"
+  fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+  chmod 600 /swapfile
+  mkswap /swapfile >/dev/null
+  swapon /swapfile
+  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+}
+
 otp_major() {
   command -v erl >/dev/null 2>&1 || return 1
   erl -noshell -eval 'io:format("~s",[erlang:system_info(otp_release)]),halt().' 2>/dev/null
@@ -187,7 +220,7 @@ erlang_from_source() {
     # Ни JVM, ни GUI-приложений на сервере нет и не надо — экономим минуты сборки.
     ./configure --without-javac --without-wx --without-debugger \
                 --without-observer --without-et --enable-kernel-poll >/dev/null
-    make -j"$(nproc)" >/dev/null
+    make -j"$(build_jobs)" >/dev/null
     make install >/dev/null
   ) || die "Сборка OTP не удалась. Чаще всего это нехватка памяти — добавьте swap."
 
@@ -222,6 +255,7 @@ install_erlang() {
   erlang_from_source
 }
 
+ensure_swap
 install_erlang
 
 OTP_MAJOR="$(otp_major)"
