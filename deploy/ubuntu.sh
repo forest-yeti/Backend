@@ -1,0 +1,413 @@
+#!/usr/bin/env bash
+#
+# Block Poker — развёртывание на чистой Ubuntu 22.04 / 24.04 одним прогоном.
+#
+# Ставит Erlang/Elixir, MySQL, nginx с TLS, собирает релиз, накатывает
+# миграции, засевает сетку лимитов и поднимает systemd-юнит.
+#
+# Запуск (из корня склонированного репозитория, от root):
+#
+#     DOMAIN=poker.example.com EMAIL=admin@example.com bash deploy/ubuntu.sh
+#
+# Скрипт идемпотентен: повторный прогон обновляет релиз и перезапускает
+# сервис, не трогая базу, пароли и сертификат. Именно так и деплоятся
+# обновления.
+#
+# Переменные окружения:
+#   DOMAIN            (обязательно) домен, на который уже смотрит A-запись
+#   EMAIL             (обязательно) почта для Let's Encrypt
+#   REPO_URL          если задан — исходники клонируются отсюда, а не берутся
+#                     из каталога рядом со скриптом
+#   REPO_REF          ветка/тег для клона (по умолчанию master)
+#   APP_USER          системный пользователь (по умолчанию blockpoker)
+#   BASE_DIR          корень установки (по умолчанию /opt/block_poker)
+#   ELIXIR_VERSION    версия Elixir (по умолчанию 1.18.4)
+#   SKIP_TLS=1        не выпускать сертификат (только для отладки: приложение
+#                     собрано с force_ssl, по HTTP оно работать не будет)
+
+set -Eeuo pipefail
+
+APP_USER="${APP_USER:-blockpoker}"
+BASE_DIR="${BASE_DIR:-/opt/block_poker}"
+SRC_DIR="$BASE_DIR/src"
+REL_DIR="$BASE_DIR/current"
+ENV_FILE="/etc/block_poker.env"
+DB_NAME="block-poker"
+DB_USER="blockpoker"
+ELIXIR_VERSION="${ELIXIR_VERSION:-1.18.4}"
+REPO_REF="${REPO_REF:-master}"
+SERVICE="block-poker"
+
+log()  { printf '\n\033[1;32m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
+
+trap 'die "Прервано на строке $LINENO. Скрипт можно перезапустить — он идемпотентен."' ERR
+
+# --------------------------------------------------------------------------
+# 0. Проверки
+# --------------------------------------------------------------------------
+
+[[ $EUID -eq 0 ]] || die "Запускать от root: sudo -E bash deploy/ubuntu.sh"
+[[ -n "${DOMAIN:-}" ]] || die "Не задан DOMAIN (домен, на который смотрит A-запись сервера)"
+
+if [[ "${SKIP_TLS:-0}" != "1" ]]; then
+  [[ -n "${EMAIL:-}" ]] || die "Не задан EMAIL для Let's Encrypt (или SKIP_TLS=1)"
+fi
+
+command -v apt-get >/dev/null || die "Скрипт рассчитан на Ubuntu/Debian"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOCAL_SRC="$(dirname "$SCRIPT_DIR")"
+
+if [[ -z "${REPO_URL:-}" && ! -f "$LOCAL_SRC/mix.exs" ]]; then
+  die "Рядом со скриптом нет mix.exs. Запустите его из репозитория или задайте REPO_URL."
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+
+# --------------------------------------------------------------------------
+# 1. Системные пакеты
+# --------------------------------------------------------------------------
+
+log "Ставлю системные пакеты"
+apt-get update -qq
+apt-get install -y -qq \
+  build-essential git curl unzip ca-certificates gnupg \
+  libssl-dev libncurses-dev \
+  mysql-server \
+  nginx \
+  ufw
+
+# --------------------------------------------------------------------------
+# 2. Erlang/OTP
+# --------------------------------------------------------------------------
+
+install_erlang() {
+  if command -v erl >/dev/null 2>&1; then
+    log "Erlang уже установлен: $(erl -noshell -eval 'io:format("~s",[erlang:system_info(otp_release)]),halt().')"
+    return
+  fi
+
+  local codename
+  codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+
+  log "Пробую Erlang/OTP 27 из репозитория Erlang Solutions"
+  if curl -fsSL --max-time 30 https://binaries2.erlang-solutions.com/GPG-KEY-pmanager.asc \
+       | gpg --dearmor -o /usr/share/keyrings/erlang-solutions.gpg 2>/dev/null; then
+    echo "deb [signed-by=/usr/share/keyrings/erlang-solutions.gpg] https://binaries2.erlang-solutions.com/ubuntu/ ${codename}-esl-erlang-27 contrib" \
+      > /etc/apt/sources.list.d/erlang-solutions.list
+
+    if apt-get update -qq 2>/dev/null && apt-get install -y -qq esl-erlang; then
+      return
+    fi
+    warn "Репозиторий Erlang Solutions недоступен для ${codename} — откатываюсь на пакеты Ubuntu"
+    rm -f /etc/apt/sources.list.d/erlang-solutions.list
+    apt-get update -qq
+  else
+    warn "Не удалось получить ключ Erlang Solutions — беру Erlang из репозитория Ubuntu"
+  fi
+
+  # Запасной путь: OTP из Ubuntu (26.x на 24.04). Elixir подбирается под него ниже.
+  apt-get install -y -qq erlang-nox erlang-dev
+}
+
+install_erlang
+
+OTP_MAJOR="$(erl -noshell -eval 'io:format("~s",[erlang:system_info(otp_release)]),halt().')"
+log "Erlang/OTP $OTP_MAJOR"
+
+# --------------------------------------------------------------------------
+# 3. Elixir (готовая сборка под установленный OTP)
+# --------------------------------------------------------------------------
+
+if command -v elixir >/dev/null 2>&1 && elixir -v 2>/dev/null | grep -q "Elixir $ELIXIR_VERSION"; then
+  log "Elixir $ELIXIR_VERSION уже установлен"
+else
+  log "Ставлю Elixir $ELIXIR_VERSION (сборка под OTP $OTP_MAJOR)"
+  ZIP_URL="https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-otp-${OTP_MAJOR}.zip"
+  rm -rf /opt/elixir /tmp/elixir.zip
+  curl -fsSL --retry 3 -o /tmp/elixir.zip "$ZIP_URL" \
+    || die "Не скачался $ZIP_URL — проверьте, что для Elixir $ELIXIR_VERSION есть сборка под OTP $OTP_MAJOR"
+  mkdir -p /opt/elixir
+  unzip -q /tmp/elixir.zip -d /opt/elixir
+  rm -f /tmp/elixir.zip
+  for b in elixir elixirc mix iex; do
+    ln -sf "/opt/elixir/bin/$b" "/usr/local/bin/$b"
+  done
+  echo 'export PATH="/opt/elixir/bin:$PATH"' > /etc/profile.d/elixir.sh
+fi
+
+elixir -v | tail -1
+
+# --------------------------------------------------------------------------
+# 4. Пользователь и каталоги
+# --------------------------------------------------------------------------
+
+if ! id -u "$APP_USER" >/dev/null 2>&1; then
+  log "Создаю пользователя $APP_USER"
+  useradd --system --create-home --home-dir "$BASE_DIR" --shell /bin/bash "$APP_USER"
+fi
+
+mkdir -p "$SRC_DIR" "$REL_DIR"
+chown -R "$APP_USER:$APP_USER" "$BASE_DIR"
+
+# --------------------------------------------------------------------------
+# 5. MySQL: база, пользователь, пароль
+# --------------------------------------------------------------------------
+
+systemctl enable --now mysql
+
+if [[ -f "$ENV_FILE" ]] && grep -q '^DATABASE_URL=' "$ENV_FILE"; then
+  log "Переиспользую существующие секреты из $ENV_FILE"
+  # shellcheck disable=SC1090
+  DB_PASS="$(sed -n 's|^DATABASE_URL=ecto://[^:]*:\([^@]*\)@.*|\1|p' "$ENV_FILE")"
+  SECRET_KEY_BASE="$(sed -n 's/^SECRET_KEY_BASE=//p' "$ENV_FILE")"
+else
+  DB_PASS="$(openssl rand -hex 24)"
+  SECRET_KEY_BASE="$(openssl rand -base64 64 | tr -d '\n')"
+fi
+
+log "Настраиваю MySQL"
+mysql <<SQL
+CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`
+  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
+ALTER USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
+GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';
+FLUSH PRIVILEGES;
+SQL
+
+# --------------------------------------------------------------------------
+# 6. Файл окружения
+# --------------------------------------------------------------------------
+
+log "Пишу $ENV_FILE"
+cat > "$ENV_FILE" <<ENV
+PHX_SERVER=true
+PORT=4000
+PHX_HOST=${DOMAIN}
+SECRET_KEY_BASE=${SECRET_KEY_BASE}
+DATABASE_URL=ecto://${DB_USER}:${DB_PASS}@127.0.0.1/${DB_NAME}
+POOL_SIZE=10
+MIX_ENV=prod
+LANG=C.UTF-8
+ENV
+chmod 600 "$ENV_FILE"
+chown root:root "$ENV_FILE"
+
+# --------------------------------------------------------------------------
+# 7. Исходники
+# --------------------------------------------------------------------------
+
+if [[ -n "${REPO_URL:-}" ]]; then
+  if [[ -d "$SRC_DIR/.git" ]]; then
+    log "Обновляю исходники из $REPO_URL"
+    sudo -u "$APP_USER" git -C "$SRC_DIR" fetch --all --prune
+    sudo -u "$APP_USER" git -C "$SRC_DIR" checkout "$REPO_REF"
+    sudo -u "$APP_USER" git -C "$SRC_DIR" reset --hard "origin/$REPO_REF"
+  else
+    log "Клонирую $REPO_URL"
+    rm -rf "$SRC_DIR"
+    sudo -u "$APP_USER" git clone --branch "$REPO_REF" "$REPO_URL" "$SRC_DIR"
+  fi
+elif [[ "$(readlink -f "$LOCAL_SRC")" == "$(readlink -f "$SRC_DIR")" ]]; then
+  log "Скрипт запущен из $SRC_DIR — исходники уже на месте"
+  chown -R "$APP_USER:$APP_USER" "$SRC_DIR"
+else
+  log "Копирую исходники из $LOCAL_SRC"
+  mkdir -p "$SRC_DIR"
+  # _build и deps не переносим: NIF собираются здесь, под этой машиной.
+  tar -C "$LOCAL_SRC" \
+      --exclude=.git --exclude=_build --exclude=deps --exclude=priv/plts \
+      -cf - . | tar -C "$SRC_DIR" -xf -
+  chown -R "$APP_USER:$APP_USER" "$SRC_DIR"
+fi
+
+# --------------------------------------------------------------------------
+# 8. Сборка релиза
+# --------------------------------------------------------------------------
+
+log "Собираю релиз (первый раз это несколько минут: argon2_elixir — NIF на C)"
+systemctl stop "$SERVICE" 2>/dev/null || true
+
+sudo -u "$APP_USER" env \
+  MIX_ENV=prod \
+  HOME="$BASE_DIR" \
+  PATH="/opt/elixir/bin:/usr/local/bin:/usr/bin:/bin" \
+  bash -c "
+    set -e
+    cd '$SRC_DIR'
+    mix local.hex --force --if-missing
+    mix local.rebar --force --if-missing
+    mix deps.get --only prod
+    mix deps.compile
+    mix compile
+    mix release --overwrite --path '$REL_DIR'
+  "
+
+# --------------------------------------------------------------------------
+# 9. Миграции и сид
+# --------------------------------------------------------------------------
+
+# PHX_SERVER намеренно не передаётся: `eval` не должен поднимать эндпоинт.
+release_eval() {
+  sudo -u "$APP_USER" env \
+    HOME="$BASE_DIR" \
+    LANG=C.UTF-8 \
+    DATABASE_URL="ecto://${DB_USER}:${DB_PASS}@127.0.0.1/${DB_NAME}" \
+    SECRET_KEY_BASE="$SECRET_KEY_BASE" \
+    PHX_HOST="$DOMAIN" \
+    POOL_SIZE=2 \
+    "$REL_DIR/bin/block_poker" eval "$1"
+}
+
+log "Накатываю миграции"
+release_eval "BlockPoker.Release.migrate()"
+
+log "Засеваю сетку лимитов кэш-игры (идемпотентно)"
+release_eval "BlockPoker.Release.seed_cash_games()"
+
+# --------------------------------------------------------------------------
+# 10. systemd
+# --------------------------------------------------------------------------
+
+log "Ставлю systemd-юнит"
+cat > "/etc/systemd/system/${SERVICE}.service" <<UNIT
+[Unit]
+Description=Block Poker backend
+After=network-online.target mysql.service
+Wants=network-online.target
+Requires=mysql.service
+
+[Service]
+Type=exec
+User=${APP_USER}
+Group=${APP_USER}
+WorkingDirectory=${BASE_DIR}
+EnvironmentFile=${ENV_FILE}
+Environment=HOME=${BASE_DIR}
+ExecStart=${REL_DIR}/bin/block_poker start
+ExecStop=${REL_DIR}/bin/block_poker stop
+Restart=on-failure
+RestartSec=5
+# Столы держат тысячи WebSocket-соединений.
+LimitNOFILE=65536
+# Рестарт аннулирует незавершённые раздачи (см. §8 CLAUDE.md) —
+# даём процессам столов время корректно погаснуть.
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable "$SERVICE"
+systemctl restart "$SERVICE"
+
+# --------------------------------------------------------------------------
+# 11. nginx
+# --------------------------------------------------------------------------
+
+log "Настраиваю nginx для $DOMAIN"
+rm -f /etc/nginx/sites-enabled/default
+
+cat > "/etc/nginx/sites-available/${SERVICE}" <<'NGINX_HEAD'
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+NGINX_HEAD
+
+cat >> "/etc/nginx/sites-available/${SERVICE}" <<NGINX
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN};
+
+    # Клиент — Electron, статики нет. Загружать нечего, но auth-запросы
+    # не должны упираться в дефолтный лимит.
+    client_max_body_size 1m;
+
+    # Основной канал связи. Без Upgrade-заголовков и длинных таймаутов
+    # nginx рвал бы игровые сокеты каждые 60 секунд, и игроки уходили бы
+    # в grace-период и авто-фолд.
+    location /socket/ {
+        proxy_pass http://127.0.0.1:4000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:4000;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        # Без этого заголовка force_ssl из config/prod.exs уходит в петлю редиректов.
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+NGINX
+
+ln -sf "/etc/nginx/sites-available/${SERVICE}" "/etc/nginx/sites-enabled/${SERVICE}"
+nginx -t
+systemctl reload nginx
+
+# --------------------------------------------------------------------------
+# 12. Файрвол и TLS
+# --------------------------------------------------------------------------
+
+log "Открываю порты"
+ufw allow OpenSSH >/dev/null
+ufw allow 'Nginx Full' >/dev/null
+ufw --force enable >/dev/null
+
+if [[ "${SKIP_TLS:-0}" == "1" ]]; then
+  warn "SKIP_TLS=1 — сертификат не выпущен. Приложение собрано с force_ssl,"
+  warn "по http:// оно будет отдавать редирект на https. Это режим отладки."
+else
+  log "Выпускаю сертификат Let's Encrypt"
+  apt-get install -y -qq certbot python3-certbot-nginx
+  if [[ -d "/etc/letsencrypt/live/${DOMAIN}" ]]; then
+    log "Сертификат для $DOMAIN уже есть — пропускаю выпуск"
+  else
+    certbot --nginx -d "$DOMAIN" -m "$EMAIL" --agree-tos --non-interactive --redirect \
+      || die "certbot не справился. Обычно причина одна: A-запись $DOMAIN ещё не смотрит на этот сервер."
+  fi
+  systemctl reload nginx
+fi
+
+# --------------------------------------------------------------------------
+# Готово
+# --------------------------------------------------------------------------
+
+sleep 2
+systemctl is-active --quiet "$SERVICE" || die "Сервис не поднялся: journalctl -u $SERVICE -n 50"
+
+cat <<DONE
+
+$(log "Готово")
+
+  WebSocket:  wss://${DOMAIN}/socket/websocket?token=...
+  HTTP API:   https://${DOMAIN}/api/auth/login
+  Healthcheck: https://${DOMAIN}/health
+
+  Логи:        journalctl -u ${SERVICE} -f
+  Рестарт:     systemctl restart ${SERVICE}
+  Консоль:     sudo -u ${APP_USER} ${REL_DIR}/bin/block_poker remote
+  Секреты:     ${ENV_FILE}
+
+  Обновление — этот же скрипт ещё раз:
+      cd ${SRC_DIR} && DOMAIN=${DOMAIN} EMAIL=\${EMAIL} bash deploy/ubuntu.sh
+
+DONE
