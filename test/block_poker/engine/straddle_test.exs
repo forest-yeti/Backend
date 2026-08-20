@@ -32,7 +32,7 @@ defmodule BlockPoker.Engine.StraddleTest do
     }
   end
 
-  defp start(stacks, opts \\ []) do
+  defp start(stacks, opts) do
     setup = setup_hand(stacks, opts)
     {hand, events} = Hand.start(setup, Rng.seeded(<<7::256>>))
     assert Hand.total_chips(hand) == HandSetup.total_chips(setup)
@@ -61,9 +61,18 @@ defmodule BlockPoker.Engine.StraddleTest do
       assert {:ok, 400} = Straddle.normalize(10_000, 10, 400)
     end
 
-    test "короткому стеку страддл недоступен вовсе" do
-      refute Straddle.available?(19, 10)
-      assert {:error, :straddle_unavailable} = Straddle.normalize(19, 10, 19)
+    test "короткий стек ставит вслепую всё, что есть, даже ниже минимума" do
+      assert Straddle.available?(19, 10)
+      assert {:ok, 19} = Straddle.normalize(19, 10, 19)
+      assert {:ok, 19} = Straddle.normalize(200, 10, 19)
+    end
+
+    test "ниже минимума можно только олл-ином, а не выборочной суммой" do
+      assert {:error, :invalid_straddle} = Straddle.normalize(15, 10, 19)
+    end
+
+    test "пустому стеку страддлить нечем" do
+      assert {:error, :straddle_unavailable} = Straddle.normalize(100, 10, 0)
     end
 
     test "мусор вместо суммы отвергается" do
@@ -162,6 +171,16 @@ defmodule BlockPoker.Engine.StraddleTest do
       assert {:posted, %{seat: 2, amount: 20}} = posted(events, "straddle")
       assert hand.bet == 20
       assert hand.bet_unit == 20
+    end
+
+    test "олл-ин ниже блайнда ставкой круга не становится" do
+      # Место 2 (малый блайнд) уходит вслепую на 8 при блайнде 10: это
+      # короткий олл-ин, и цена раздачи для остальных не меняется.
+      {hand, _events} = start([1000, 8, 1000], button: 1, straddle: %{seat: 2, amount: 8})
+
+      assert Map.fetch!(hand.players, 2).status == :all_in
+      assert hand.bet == 10
+      assert hand.bet_unit == 10
     end
 
     test "без страддла раздача идёт ровно как раньше" do

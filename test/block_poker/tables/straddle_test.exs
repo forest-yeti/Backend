@@ -61,6 +61,20 @@ defmodule BlockPoker.Tables.StraddleTest do
       assert {:ok, %{straddle: 1_000}} = TableServer.straddle(pid, "user-1", 99_999)
     end
 
+    test "короткий стек объявляет олл-ин вслепую ниже минимума" do
+      # Стол с низким порогом входа: у места 3 всего 15 фишек при блайнде 10,
+      # то есть на два номинала не хватает. Поставить вслепую всё, что есть,
+      # он всё равно вправе — а выбрать сумму ниже минимума нет.
+      %{pid: pid} = start_room!(%{min_buy_in: 1})
+      seat!(pid, "user-1", 1, 1_000, :post)
+      seat!(pid, "user-2", 2, 1_000, :post)
+      seat!(pid, "user-3", 3, 15, :post)
+
+      assert {:ok, %{straddle: 15}} = TableServer.straddle(pid, "user-3", 15)
+      assert {:ok, %{straddle: 15}} = TableServer.straddle(pid, "user-3", 900)
+      assert {:error, :invalid_straddle} = TableServer.straddle(pid, "user-3", 12)
+    end
+
     test "`nil` снимает объявление" do
       %{pid: pid} = started_room()
       {:ok, _} = TableServer.straddle(pid, "user-1", 200)
