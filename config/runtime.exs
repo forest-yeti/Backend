@@ -66,7 +66,13 @@ if config_env() == :prod do
       # for details about using IPv6 vs IPv4 and loopback vs public addresses.
       ip: {0, 0, 0, 0, 0, 0, 0, 0}
     ],
-    secret_key_base: secret_key_base
+    secret_key_base: secret_key_base,
+    # Клиент — Electron: Origin у него `file://` (или вовсе отсутствует), и
+    # проверка против `:url` его отвергнет. Отключаем осознанно: check_origin
+    # защищает от CSRF, а CSRF живёт на неявных учётных данных (куках). У нас
+    # соединение авторизуется явным socket-токеном из `UserSocket.connect/3`,
+    # который чужая страница подставить не может.
+    check_origin: false
 
   # ## SSL Support
   #

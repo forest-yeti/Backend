@@ -7,23 +7,33 @@
 #
 # Запуск (из корня склонированного репозитория, от root):
 #
+#     # свой домен
 #     DOMAIN=poker.example.com EMAIL=admin@example.com bash deploy/ubuntu.sh
+#
+#     # только IP, домена нет — берётся <ip>.sslip.io и настоящий TLS
+#     bash deploy/ubuntu.sh
+#
+#     # только IP и совсем без TLS (отладка, трафик открытым текстом)
+#     ALLOW_PLAIN_HTTP=1 bash deploy/ubuntu.sh
 #
 # Скрипт идемпотентен: повторный прогон обновляет релиз и перезапускает
 # сервис, не трогая базу, пароли и сертификат. Именно так и деплоятся
 # обновления.
 #
 # Переменные окружения:
-#   DOMAIN            (обязательно) домен, на который уже смотрит A-запись
-#   EMAIL             (обязательно) почта для Let's Encrypt
+#   DOMAIN            домен, на который уже смотрит A-запись. Если не задан —
+#                     подставляется <публичный-ip>.sslip.io
+#   EMAIL             почта для Let's Encrypt (без неё сертификат выпускается
+#                     без контакта — не будет писем об истечении)
+#   ALLOW_PLAIN_HTTP=1  собрать без force_ssl и работать по http:// на голом IP.
+#                     Небезопасно: пароли и токены идут открытым текстом.
 #   REPO_URL          если задан — исходники клонируются отсюда, а не берутся
 #                     из каталога рядом со скриптом
 #   REPO_REF          ветка/тег для клона (по умолчанию master)
 #   APP_USER          системный пользователь (по умолчанию blockpoker)
 #   BASE_DIR          корень установки (по умолчанию /opt/block_poker)
 #   ELIXIR_VERSION    версия Elixir (по умолчанию 1.18.4)
-#   SKIP_TLS=1        не выпускать сертификат (только для отладки: приложение
-#                     собрано с force_ssl, по HTTP оно работать не будет)
+#   SKIP_TLS=1        не выпускать сертификат
 
 set -Eeuo pipefail
 
@@ -49,13 +59,44 @@ trap 'die "Прервано на строке $LINENO. Скрипт можно �
 # --------------------------------------------------------------------------
 
 [[ $EUID -eq 0 ]] || die "Запускать от root: sudo -E bash deploy/ubuntu.sh"
-[[ -n "${DOMAIN:-}" ]] || die "Не задан DOMAIN (домен, на который смотрит A-запись сервера)"
+command -v apt-get >/dev/null || die "Скрипт рассчитан на Ubuntu/Debian"
 
-if [[ "${SKIP_TLS:-0}" != "1" ]]; then
-  [[ -n "${EMAIL:-}" ]] || die "Не задан EMAIL для Let's Encrypt (или SKIP_TLS=1)"
+apt-get install -y -qq curl >/dev/null 2>&1 || true
+
+detect_public_ip() {
+  local ip
+  for url in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com; do
+    ip="$(curl -fsS --max-time 10 "$url" 2>/dev/null | tr -d '[:space:]')" || continue
+    [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] && { echo "$ip"; return 0; }
+  done
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] && { echo "$ip"; return 0; }
+  return 1
+}
+
+PLAIN_HTTP="${ALLOW_PLAIN_HTTP:-0}"
+
+if [[ -z "${DOMAIN:-}" ]]; then
+  PUBLIC_IP="$(detect_public_ip)" || die "Не определился публичный IP — задайте DOMAIN или IP=x.x.x.x"
+
+  if [[ "$PLAIN_HTTP" == "1" ]]; then
+    # Голый IP без TLS. Домена нет, сертификата нет, шифрования нет.
+    DOMAIN="$PUBLIC_IP"
+  else
+    # sslip.io резолвит любое имя вида 1-2-3-4.sslip.io в 1.2.3.4. Регистрация
+    # не нужна, домен в Public Suffix List, поэтому Let's Encrypt выдаёт на него
+    # обычный доверенный сертификат. Это способ получить TLS, имея только IP.
+    DOMAIN="${PUBLIC_IP//./-}.sslip.io"
+    log "DOMAIN не задан — беру $DOMAIN (публичный IP $PUBLIC_IP через sslip.io)"
+  fi
 fi
 
-command -v apt-get >/dev/null || die "Скрипт рассчитан на Ubuntu/Debian"
+if [[ "$PLAIN_HTTP" == "1" ]]; then
+  warn "ALLOW_PLAIN_HTTP=1: релиз будет собран без force_ssl."
+  warn "Пароли и socket-токены пойдут по сети открытым текстом. Только для отладки."
+  export BLOCK_POKER_ALLOW_PLAIN_HTTP=1
+  SKIP_TLS=1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_SRC="$(dirname "$SCRIPT_DIR")"
@@ -231,9 +272,20 @@ fi
 log "Собираю релиз (первый раз это несколько минут: argon2_elixir — NIF на C)"
 systemctl stop "$SERVICE" 2>/dev/null || true
 
+# force_ssl попадает в релиз на этапе компиляции, а Elixir отслеживает
+# изменения конфига по файлам, а не по переменным окружения. Поэтому смену
+# режима фиксируем маркером и пересобираем приложение начисто.
+MARKER="$SRC_DIR/.deploy-plain-http"
+if [[ "$(cat "$MARKER" 2>/dev/null || echo 0)" != "$PLAIN_HTTP" ]]; then
+  rm -rf "$SRC_DIR/_build/prod/lib/block_poker"
+  echo "$PLAIN_HTTP" > "$MARKER"
+  chown "$APP_USER:$APP_USER" "$MARKER"
+fi
+
 sudo -u "$APP_USER" env \
   MIX_ENV=prod \
   HOME="$BASE_DIR" \
+  BLOCK_POKER_ALLOW_PLAIN_HTTP="$PLAIN_HTTP" \
   PATH="/opt/elixir/bin:/usr/local/bin:/usr/bin:/bin" \
   bash -c "
     set -e
@@ -312,6 +364,13 @@ systemctl restart "$SERVICE"
 log "Настраиваю nginx для $DOMAIN"
 rm -f /etc/nginx/sites-enabled/default
 
+# На голом IP имени нет — ловим любой Host.
+if [[ "$PLAIN_HTTP" == "1" ]]; then
+  SERVER_NAME="_"
+else
+  SERVER_NAME="$DOMAIN"
+fi
+
 cat > "/etc/nginx/sites-available/${SERVICE}" <<'NGINX_HEAD'
 map $http_upgrade $connection_upgrade {
     default upgrade;
@@ -324,7 +383,7 @@ cat >> "/etc/nginx/sites-available/${SERVICE}" <<NGINX
 server {
     listen 80;
     listen [::]:80;
-    server_name ${DOMAIN};
+    server_name ${SERVER_NAME};
 
     # Клиент — Electron, статики нет. Загружать нечего, но auth-запросы
     # не должны упираться в дефолтный лимит.
@@ -373,18 +432,26 @@ ufw allow 'Nginx Full' >/dev/null
 ufw --force enable >/dev/null
 
 if [[ "${SKIP_TLS:-0}" == "1" ]]; then
-  warn "SKIP_TLS=1 — сертификат не выпущен. Приложение собрано с force_ssl,"
-  warn "по http:// оно будет отдавать редирект на https. Это режим отладки."
+  warn "TLS не настраивается: сервер отвечает по обычному http:// на $DOMAIN"
+  SCHEME="http"
+  WS_SCHEME="ws"
 else
-  log "Выпускаю сертификат Let's Encrypt"
+  log "Выпускаю сертификат Let's Encrypt для $DOMAIN"
   apt-get install -y -qq certbot python3-certbot-nginx
+
   if [[ -d "/etc/letsencrypt/live/${DOMAIN}" ]]; then
     log "Сертификат для $DOMAIN уже есть — пропускаю выпуск"
   else
-    certbot --nginx -d "$DOMAIN" -m "$EMAIL" --agree-tos --non-interactive --redirect \
-      || die "certbot не справился. Обычно причина одна: A-запись $DOMAIN ещё не смотрит на этот сервер."
+    CERTBOT_MAIL=(--register-unsafely-without-email)
+    [[ -n "${EMAIL:-}" ]] && CERTBOT_MAIL=(-m "$EMAIL")
+
+    certbot --nginx -d "$DOMAIN" "${CERTBOT_MAIL[@]}" \
+      --agree-tos --non-interactive --redirect \
+      || die "certbot не справился. Проверьте, что порт 80 открыт снаружи и $DOMAIN резолвится в этот сервер."
   fi
   systemctl reload nginx
+  SCHEME="https"
+  WS_SCHEME="wss"
 fi
 
 # --------------------------------------------------------------------------
@@ -398,9 +465,9 @@ cat <<DONE
 
 $(log "Готово")
 
-  WebSocket:  wss://${DOMAIN}/socket/websocket?token=...
-  HTTP API:   https://${DOMAIN}/api/auth/login
-  Healthcheck: https://${DOMAIN}/health
+  WebSocket:   ${WS_SCHEME}://${DOMAIN}/socket/websocket?token=...
+  HTTP API:    ${SCHEME}://${DOMAIN}/api/auth/login
+  Healthcheck: ${SCHEME}://${DOMAIN}/health
 
   Логи:        journalctl -u ${SERVICE} -f
   Рестарт:     systemctl restart ${SERVICE}
