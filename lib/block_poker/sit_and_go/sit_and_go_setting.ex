@@ -31,7 +31,12 @@ defmodule BlockPoker.SitAndGo.SitAndGoSetting do
 
   @type t :: %__MODULE__{}
 
+  # Порядок валют фиксирован и задаёт разделы витрины: реальные деньги
+  # выше игровых. То же правило действует в кэше (`Tables.LobbyQuery`),
+  # и разъезжаться им нельзя — игрок видит один рум, а не два списка
+  # с разной логикой.
   @currencies [:main, :play_money]
+  @currency_order @currencies |> Enum.with_index() |> Map.new()
 
   @editable [
     :name,
@@ -97,6 +102,27 @@ defmodule BlockPoker.SitAndGo.SitAndGoSetting do
 
   @spec currencies() :: [atom()]
   def currencies, do: @currencies
+
+  @doc """
+  Ключ сортировки витрины — единственное правило порядка турниров.
+
+  Валюта первым разрядом: сперва весь раздел на реальные деньги, потом
+  игровые. Дальше — порядок оператора, взнос и рассадка; `id` замыкает,
+  чтобы порядок был полным и не «дрожал» между запросами при равенстве
+  всех прочих полей.
+  """
+  @spec sort_key(t()) :: tuple()
+  def sort_key(%__MODULE__{} = setting) do
+    {currency_rank(setting), setting.sort_order, setting.buy_in, setting.max_players, setting.id}
+  end
+
+  @doc "Разряд валюты: чем меньше, тем выше в витрине."
+  @spec currency_rank(t()) :: non_neg_integer()
+  def currency_rank(%__MODULE__{currency: currency}) do
+    # Неизвестная валюта уезжает в конец, а не роняет сортировку: список
+    # валют может вырасти раньше, чем это правило.
+    Map.get(@currency_order, currency, 99)
+  end
 
   @doc """
   Структура ставок турнира. Как и в кэше, её задаёт вид покера, а не поле:

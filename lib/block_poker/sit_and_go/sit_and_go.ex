@@ -40,9 +40,13 @@ defmodule BlockPoker.SitAndGo do
     |> filter_enabled(Keyword.get(filter, :enabled, true))
     |> filter_game_types(Keyword.get(filter, :game_types, []))
     |> filter_currency(Keyword.get(filter, :currency))
-    |> order_by([s], asc: s.sort_order, asc: s.buy_in, asc: s.max_players)
     |> preload([:blind_levels, :prize_tiers])
     |> Repo.all()
+    # Порядок задаётся в Elixir, а не в SQL: разряд валюты — доменное
+    # правило, а не алфавит. `ORDER BY currency` работал бы сегодня по
+    # случайности (main < play_money как строки) и молча сломался бы на
+    # первой же валюте, чьё имя встало не туда.
+    |> Enum.sort_by(&SitAndGoSetting.sort_key/1)
   end
 
   @spec get_setting(Ecto.UUID.t()) :: {:ok, SitAndGoSetting.t()} | {:error, :not_found}

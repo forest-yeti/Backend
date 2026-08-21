@@ -100,6 +100,51 @@ defmodule Socket.Channels.SitAndGoChannelTest do
     end
   end
 
+  describe "порядок витрины" do
+    setup do
+      # Игровой стол заводится первым и с меньшим взносом: если бы порядок
+      # определялся вставкой или суммой, он оказался бы наверху.
+      play = SitAndGoFixtures.setting_fixture(%{currency: :play_money, buy_in: 25})
+      main = SitAndGoFixtures.setting_fixture(%{currency: :main, buy_in: 10_000})
+
+      :ok = SitAndGoLobby.reload()
+
+      %{play: play, main: main}
+    end
+
+    test "реальные деньги всегда выше игровых", %{main: main} do
+      %{snapshot: snapshot} = join_channel()
+
+      currencies = Enum.map(snapshot.tournaments, & &1.currency)
+
+      # Ни один play_money не может стоять выше любого main.
+      assert Enum.find_index(currencies, &(&1 == :main)) <
+               Enum.find_index(currencies, &(&1 == :play_money))
+
+      assert hd(snapshot.tournaments).setting_id == main.id
+    end
+
+    test "внутри валюты порядок идёт по взносу", %{play: play} do
+      %{snapshot: snapshot} = join_channel()
+
+      buy_ins =
+        snapshot.tournaments
+        |> Enum.filter(&(&1.currency == :play_money))
+        |> Enum.map(& &1.buy_in)
+
+      assert buy_ins == Enum.sort(buy_ins)
+      assert play.buy_in == hd(buy_ins)
+    end
+
+    test "фильтр по дисциплине порядка не ломает" do
+      %{snapshot: snapshot} = join_channel(%{"game_types" => ["texas_holdem"]})
+
+      currencies = Enum.map(snapshot.tournaments, & &1.currency)
+
+      assert currencies == Enum.sort_by(currencies, &if(&1 == :main, do: 0, else: 1))
+    end
+  end
+
   describe "фильтр по дисциплине" do
     test "без фильтра видны все дисциплины" do
       %{snapshot: snapshot} = join_channel()

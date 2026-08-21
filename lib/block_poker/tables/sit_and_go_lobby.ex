@@ -325,7 +325,7 @@ defmodule BlockPoker.Tables.SitAndGoLobby do
     state.settings
     |> Map.values()
     |> Enum.filter(&(&1.enabled and matches?(&1, game_types)))
-    |> Enum.sort_by(&{&1.sort_order, &1.buy_in, &1.max_players})
+    |> Enum.sort_by(&SitAndGoSetting.sort_key/1)
     |> Enum.map(&setting_snapshot(state, &1))
   end
 
