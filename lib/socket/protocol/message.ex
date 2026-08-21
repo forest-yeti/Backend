@@ -80,6 +80,19 @@ defmodule Socket.Protocol.Message do
     end
   end
 
+  @doc """
+  Какие из своих карт игрок открывает: список индексов либо `:all`.
+
+  Проверяется только форма — что это целые числа. Существуют ли такие
+  карты у этого места и вправе ли он их показать, решает контекст.
+  """
+  @spec card_indexes(map()) :: [non_neg_integer()] | :all
+  def card_indexes(%{"cards" => cards}) when is_list(cards) do
+    Enum.filter(cards, &(is_integer(&1) and &1 >= 0))
+  end
+
+  def card_indexes(_payload), do: :all
+
   @doc "Счётчик стола, который видел клиент. Без него действие не проверяется."
   @spec action_seq(map()) :: non_neg_integer() | nil
   def action_seq(%{"action_seq" => seq}) when is_integer(seq) and seq >= 0, do: seq

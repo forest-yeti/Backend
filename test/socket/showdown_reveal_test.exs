@@ -103,9 +103,20 @@ defmodule Socket.Channels.ShowdownRevealTest do
     assert finished, "hand_finished до клиента не доехал"
 
     assert finished.showdown, "раздача дошла до ривера, а showdown? = false"
-    assert length(finished.shown) == 2, "на вскрытии обязаны открыться обе руки"
+
+    # Открывается не обязательно каждый: заведомо проигравшую руку игрок
+    # показывать не обязан и уходит в мук (`Engine.Reveal`). Но участники
+    # вскрытия обязаны быть учтены все — либо в показе, либо в муке.
+    assert finished.shown != [], "победитель обязан открыть руку"
+    assert length(finished.shown) + length(finished.mucked) == 2
     assert Enum.all?(finished.shown, &(length(&1.cards) == 2))
     assert Enum.all?(finished.shown, &(&1.category != nil))
+
+    # Забравший банк — всегда среди открывшихся: выиграть, не показав руку,
+    # на вскрытии нельзя.
+    winners = finished.runs |> Enum.flat_map(& &1.pots) |> Enum.flat_map(& &1.winners)
+    shown_seats = Enum.map(finished.shown, & &1.seat)
+    assert Enum.all?(winners, &(&1 in shown_seats))
 
     # Сообщение обязано пережить JSON: ExUnit сравнивает термы и кодирование
     # не выполняет, поэтому структура внутри payload проходила все проверки

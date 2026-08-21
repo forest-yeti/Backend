@@ -396,13 +396,16 @@ defmodule BlockPoker.Engine.HandTest do
     assert {:error, :not_your_turn} = Hand.act(hand, 2, :call, nil)
   end
 
-  test "сбросивший может открыть карты по желанию" do
+  test "карманные карты раздачи отдаются по местам — из них собирается окно показа" do
     {hand, _events} = start([1000, 1000, 1000])
     {hand, _} = act!(hand, 1, :fold)
 
-    {:ok, hand, [{:cards_shown, payload}]} = Hand.show_cards(hand, 1)
-    assert length(payload.cards) == 2
-    assert hand.players[1].show?
+    cards = Hand.hole_cards(hand)
+
+    # Сброс карт не отбирает: показать их после раздачи игрок вправе.
+    assert map_size(cards) == 3
+    assert length(cards[1]) == 2
+    assert Hand.player_id(hand, 1) == "p1"
   end
 
   test "комбинация игрока считается на каждой улице" do

@@ -13,7 +13,7 @@ defmodule BlockPoker.Tables.RoomState do
 
   alias BlockPoker.CashGames.CashGameSetting
   alias BlockPoker.Chat
-  alias BlockPoker.Engine.{EntryRules, Hand, Preselect, Straddle, Stats, TimeBank}
+  alias BlockPoker.Engine.{Card, EntryRules, Hand, Preselect, Straddle, Stats, TimeBank}
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.Reactions
   alias BlockPoker.Tables.Seat
@@ -52,7 +52,27 @@ defmodule BlockPoker.Tables.RoomState do
           straddle_allowed?: boolean(),
           straddle_deadline_at: integer() | nil,
           straddle_done?: boolean(),
-          rabbit: rabbit() | nil
+          rabbit: rabbit() | nil,
+          reveal: reveal() | nil
+        }
+
+  @typedoc """
+  Окно добровольного показа карт после раздачи.
+
+  Правила покера не обязывают показывать руку, которую никто не купил:
+  забравший банк по фолдам и ушедший в мук на вскрытии вправе оставить
+  карты закрытыми. Но и запрета нет — открыться можно, и это часть игры.
+
+  Окно живёт ровно паузу между раздачами и хранит **только карманные карты
+  прошедшей раздачи**: показывать по нему больше нечего, а утечь оттуда
+  нечему. `shown` — индексы уже открытых карт по местам: показать можно и
+  одну карту, и обе, и повтор ничего не меняет.
+  """
+  @type reveal :: %{
+          cards: %{pos_integer() => [map()]},
+          users: %{pos_integer() => Ecto.UUID.t()},
+          shown: %{pos_integer() => [non_neg_integer()]},
+          expires_at: integer()
         }
 
   @typedoc """
@@ -113,6 +133,8 @@ defmodule BlockPoker.Tables.RoomState do
     rit_deadline_at: nil,
     # Снимок rabbit hunting прошедшей раздачи; живёт паузу между раздачами.
     rabbit: nil,
+    # Окно добровольного показа карт; живёт ту же паузу и той же длины.
+    reveal: nil,
     # Разрешён ли за этим столом страддл. Решает режим игры (`GameMode`),
     # а не шаблон: в кэше он есть всегда, в любом другом формате его нет.
     straddle_allowed?: false,
@@ -503,6 +525,144 @@ defmodule BlockPoker.Tables.RoomState do
     if Hand.offering_run_it_twice?(hand) do
       %{seats: hand.rit.seats, deadline_ms: max((state.rit_deadline_at || now) - now, 0)}
     end
+  end
+
+  @doc """
+  Заложить окно показа карт на паузу между раздачами.
+
+  Что уже открылось на вскрытии, комната знает из самой раздачи: такие
+  места попадают в окно с полностью открытыми картами, и кнопки показа у
+  них не будет — показывать нечего.
+  """
+  @spec put_reveal(t(), Hand.t(), integer()) :: t()
+  def put_reveal(%__MODULE__{} = state, hand, expires_at) do
+    cards = Hand.hole_cards(hand)
+    decision = Hand.reveal_decision(hand)
+
+    reveal = %{
+      cards: Map.new(cards, fn {seat, hole} -> {seat, Enum.map(hole, &Card.to_map/1)} end),
+      users: Map.new(cards, fn {seat, _hole} -> {seat, Hand.player_id(hand, seat)} end),
+      shown:
+        Map.new(cards, fn {seat, hole} ->
+          open =
+            if Map.get(decision, seat) == :show, do: Enum.to_list(0..(length(hole) - 1)), else: []
+
+          {seat, open}
+        end),
+      expires_at: expires_at
+    }
+
+    %{state | reveal: reveal}
+  end
+
+  @spec clear_reveal(t()) :: t()
+  def clear_reveal(%__MODULE__{} = state), do: %{state | reveal: nil}
+
+  @doc """
+  Показать столу свои карты прошедшей раздачи.
+
+  Право проверяется **здесь**: показать можно только свои карты, только
+  сидя за столом и только пока идёт пауза после раздачи. Во время раздачи
+  показ запрещён — открытая карта сбросившего это подсказка тем, кто ещё
+  торгуется, и в живом покере за неё наказывают.
+
+  `indexes` — какие именно карты открыть. Повтор идемпотентен: уже
+  открытая карта второй раз ничего не меняет и события не порождает.
+  """
+  @spec show_cards(t(), Ecto.UUID.t(), [non_neg_integer()] | :all, integer()) ::
+          {:ok, t(), map()} | {:error, atom()}
+  def show_cards(%__MODULE__{} = state, user_id, indexes, now) do
+    with {:ok, _seat} <- fetch_player(state, user_id),
+         {:ok, reveal} <- fetch_reveal(state, now),
+         {:ok, seat_number} <- reveal_seat(reveal, user_id) do
+      hole = Map.fetch!(reveal.cards, seat_number)
+      open = Map.fetch!(reveal.shown, seat_number)
+      wanted = wanted_indexes(indexes, hole)
+
+      case Enum.sort(Enum.uniq(open ++ wanted)) do
+        ^open ->
+          {:error, :already_shown}
+
+        shown ->
+          reveal = %{reveal | shown: Map.put(reveal.shown, seat_number, shown)}
+          {:ok, %{state | reveal: reveal}, shown_payload(seat_number, hole, shown)}
+      end
+    end
+  end
+
+  @doc """
+  Что стол видит из добровольно открытых карт: место и его карты, где
+  закрытая карта — `nil`. Пустой список, если окна нет.
+
+  Нужно не только событием: подключившийся в паузу игрок обязан увидеть
+  уже открытые карты, а не пустой стол.
+  """
+  @spec revealed(t(), integer()) :: [map()]
+  def revealed(%__MODULE__{} = state, now) do
+    case fetch_reveal(state, now) do
+      {:ok, reveal} ->
+        reveal.shown
+        |> Enum.reject(fn {_seat, shown} -> shown == [] end)
+        |> Enum.sort_by(fn {seat, _shown} -> seat end)
+        |> Enum.map(fn {seat, shown} ->
+          shown_payload(seat, Map.fetch!(reveal.cards, seat), shown)
+        end)
+
+      {:error, _reason} ->
+        []
+    end
+  end
+
+  @doc """
+  Что игрок видит про свой показ: какие карты ещё можно открыть и сколько
+  осталось времени. `nil` — показывать нечего или окно закрыто.
+  """
+  @spec reveal_view(t(), Ecto.UUID.t(), integer()) :: map() | nil
+  def reveal_view(%__MODULE__{} = state, user_id, now) do
+    with {:ok, reveal} <- fetch_reveal(state, now),
+         {:ok, seat_number} <- reveal_seat(reveal, user_id) do
+      hole = Map.fetch!(reveal.cards, seat_number)
+      shown = Map.fetch!(reveal.shown, seat_number)
+
+      %{
+        expires_ms: reveal.expires_at - now,
+        cards: hole,
+        shown: shown,
+        hidden: Enum.reject(0..(length(hole) - 1), &(&1 in shown))
+      }
+    else
+      _other -> nil
+    end
+  end
+
+  defp wanted_indexes(:all, hole), do: Enum.to_list(0..(length(hole) - 1))
+
+  defp wanted_indexes(indexes, hole) do
+    Enum.filter(indexes, &(is_integer(&1) and &1 >= 0 and &1 < length(hole)))
+  end
+
+  defp shown_payload(seat, hole, shown) do
+    cards = hole |> Enum.with_index() |> Enum.map(fn {card, i} -> if i in shown, do: card end)
+    %{seat: seat, cards: cards}
+  end
+
+  defp reveal_seat(reveal, user_id) do
+    case Enum.find(reveal.users, fn {_seat, id} -> id == user_id end) do
+      {seat, _id} -> {:ok, seat}
+      nil -> {:error, :not_a_contender}
+    end
+  end
+
+  # Окно закрыто, если его нет, оно истекло или уже идёт следующая раздача.
+  # Последнее — то самое правило, ради которого всё и проверяется: показ
+  # своих карт посреди живой раздачи меняет решения тех, кто ещё в игре.
+  defp fetch_reveal(%__MODULE__{hand: hand}, _now) when not is_nil(hand),
+    do: {:error, :hand_in_progress}
+
+  defp fetch_reveal(%__MODULE__{reveal: nil}, _now), do: {:error, :reveal_unavailable}
+
+  defp fetch_reveal(%__MODULE__{reveal: reveal}, now) do
+    if reveal.expires_at > now, do: {:ok, reveal}, else: {:error, :reveal_unavailable}
   end
 
   @doc """

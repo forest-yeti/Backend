@@ -55,6 +55,9 @@ defmodule Socket.Views.TableView do
       button_draw: button_draw(room),
       hand: hand(room),
       showdown: room.showdown,
+      # Добровольно открытые карты прошедшей раздачи. Приходят и снапшотом,
+      # а не только событием: подключившийся в паузу должен их увидеть.
+      revealed: RoomState.revealed(room, System.monotonic_time(:millisecond)),
       # Открытый вопрос про два прогона с остатком времени: вернувшийся
       # внутри окна игрок должен успеть ответить.
       run_it_twice: RoomState.run_it_twice_view(room, System.monotonic_time(:millisecond)),
@@ -140,8 +143,7 @@ defmodule Socket.Views.TableView do
            %{
              committed: player.committed,
              total: player.total,
-             status: player.status,
-             cards: if(player.show?, do: Enum.map(player.hole, &Card.to_map/1))
+             status: player.status
            }}
         end)
     }
@@ -214,7 +216,10 @@ defmodule Socket.Views.TableView do
           can_react: RoomState.can_react?(room, user_id),
           # Rabbit hunting — только сидящему: наблюдатель этих карт не
           # получает ни в снапшоте, ни событием.
-          rabbit: RoomState.rabbit_view(room, System.monotonic_time(:millisecond))
+          rabbit: RoomState.rabbit_view(room, System.monotonic_time(:millisecond)),
+          # Что игрок может показать столу после раздачи: свои карты и то,
+          # какие из них ещё закрыты. Только владельцу — как и `hole_cards`.
+          reveal: RoomState.reveal_view(room, user_id, System.monotonic_time(:millisecond))
         }
         |> Map.merge(private_hand(room, seat.number))
     end

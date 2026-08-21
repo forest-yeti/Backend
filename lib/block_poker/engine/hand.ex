@@ -21,6 +21,7 @@ defmodule BlockPoker.Engine.Hand do
     HandRank,
     HandSetup,
     Outs,
+    Reveal,
     Rng,
     RunItTwice,
     Showdown,
@@ -42,8 +43,7 @@ defmodule BlockPoker.Engine.Hand do
           total: non_neg_integer(),
           dead: non_neg_integer(),
           status: status(),
-          acted?: boolean(),
-          show?: boolean()
+          acted?: boolean()
         }
 
   @type t :: %__MODULE__{
@@ -136,8 +136,7 @@ defmodule BlockPoker.Engine.Hand do
            total: 0,
            dead: 0,
            status: :active,
-           acted?: false,
-           show?: false
+           acted?: false
          }}
       end)
 
@@ -224,22 +223,32 @@ defmodule BlockPoker.Engine.Hand do
   end
 
   @doc """
-  Просьба показать карты. Сбросивший может открыться по желанию, дошедший
-  до вскрытия — тоже: правила не обязывают показывать всё, но и не мешают.
+  Кто на вскрытии открылся, а кто ушёл в мук (`Engine.Reveal`).
+
+  До конца раздачи решения ещё нет — пустая карта.
   """
-  @spec show_cards(t(), pos_integer()) :: {:ok, t(), [tuple()]} | {:error, atom()}
-  def show_cards(%__MODULE__{} = hand, seat) do
+  @spec reveal_decision(t()) :: %{pos_integer() => :show | :muck}
+  def reveal_decision(%__MODULE__{results: %{reveal: reveal}}), do: reveal
+  def reveal_decision(%__MODULE__{}), do: %{}
+
+  @doc "Кому принадлежит место в этой раздаче."
+  @spec player_id(t(), pos_integer()) :: term() | nil
+  def player_id(%__MODULE__{} = hand, seat) do
     case Map.get(hand.players, seat) do
-      nil ->
-        {:error, :not_seated}
-
-      %{hole: []} ->
-        {:error, :no_cards}
-
-      player ->
-        hand = put_player(hand, %{player | show?: true})
-        {:ok, hand, [{:cards_shown, %{seat: seat, cards: Enum.map(player.hole, &Card.to_map/1)}}]}
+      nil -> nil
+      player -> player.id
     end
+  end
+
+  @doc """
+  Карманные карты по местам — то, из чего собирается окно показа после
+  раздачи. Живой раздаче эта функция не нужна и ею не вызывается.
+  """
+  @spec hole_cards(t()) :: %{pos_integer() => [Card.t()]}
+  def hole_cards(%__MODULE__{} = hand) do
+    hand.players
+    |> Enum.filter(fn {_seat, player} -> player.hole != [] end)
+    |> Map.new(fn {seat, player} -> {seat, player.hole} end)
   end
 
   @doc "Текущая лучшая комбинация игрока — то, что клиент подписывает под столом."
@@ -647,12 +656,18 @@ defmodule BlockPoker.Engine.Hand do
   defp finish(hand) do
     results = payout(hand)
 
+    # Кто открывается, а кто мучует, решается здесь: дальше `runout?`
+    # обнуляется, и признак «торговли больше не было» уже не восстановить.
+    reveal = Reveal.decide(hand, results)
+
     hand = %{
       hand
       | street: :complete,
         to_act: nil,
         runout?: false,
-        results: results,
+        # Решение о показе едет вместе с результатом: комната по нему
+        # заводит окно добровольного показа и не пересчитывает его сама.
+        results: Map.put(results, :reveal, reveal),
         # Банк уехал в стеки: держать его ещё и в `pot` значило бы удвоить
         # фишки в инварианте. Итоговый размер живёт в `results.pots`.
         pot: 0,
@@ -662,7 +677,7 @@ defmodule BlockPoker.Engine.Hand do
           end)
     }
 
-    {hand, [{:hand_finished, finish_payload(hand, results)}]}
+    {hand, [{:hand_finished, finish_payload(hand, results, reveal)}]}
   end
 
   # --- банк и вскрытие ------------------------------------------------------
@@ -1065,13 +1080,16 @@ defmodule BlockPoker.Engine.Hand do
   defp second_board_payload(%__MODULE__{board_2: nil}), do: nil
   defp second_board_payload(%__MODULE__{board_2: board_2}), do: Enum.map(board_2, &Card.to_map/1)
 
-  defp finish_payload(hand, results) do
+  defp finish_payload(hand, results, reveal) do
     %{
       runs: Enum.map(results.runs, &run_payload/1),
       payouts: results.payouts,
       rake: Map.get(results, :rake, 0),
       showdown: results.showdown?,
-      shown: shown_cards(hand, results)
+      shown: shown_cards(hand, reveal),
+      # Кто дошёл до вскрытия, но карт не открыл. Стол должен видеть, что
+      # рука ушла в мук, а не просто «ничего не показали».
+      mucked: mucked_seats(hand, reveal)
     }
   end
 
@@ -1083,14 +1101,13 @@ defmodule BlockPoker.Engine.Hand do
     %{run: run.run, board: run.board, pots: run.pots}
   end
 
-  # Что реально уходит в сокет: на вскрытии карты показывают участники,
-  # без вскрытия — только те, кто попросил открыться сам.
-  defp shown_cards(hand, results) do
+  # Что реально уходит в сокет. Кого открывать, решает `Engine.Reveal` по
+  # правилам вскрытия; добровольный показ здесь не участвует — он живёт в
+  # окне после раздачи и приезжает отдельным событием.
+  defp shown_cards(hand, reveal) do
     hand
     |> players()
-    |> Enum.filter(fn player ->
-      player.hole != [] and (player.show? or (results.showdown? and player.status != :folded))
-    end)
+    |> Enum.filter(&(&1.hole != [] and Map.get(reveal, &1.seat) == :show))
     |> Enum.sort_by(& &1.seat)
     |> Enum.map(fn player ->
       rank = Showdown.evaluate(player.hole, hand.board, hand.context)
@@ -1101,5 +1118,15 @@ defmodule BlockPoker.Engine.Hand do
         category: rank && rank.category
       }
     end)
+  end
+
+  # Мук — только про тех, кто до вскрытия дошёл. Сбросивший руку раньше
+  # ничего не мучует: он и не был обязан показывать.
+  defp mucked_seats(hand, reveal) do
+    hand
+    |> players()
+    |> Enum.filter(&(&1.status != :folded and Map.get(reveal, &1.seat) == :muck))
+    |> Enum.map(& &1.seat)
+    |> Enum.sort()
   end
 end

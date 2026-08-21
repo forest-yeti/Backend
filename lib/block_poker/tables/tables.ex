@@ -381,9 +381,10 @@ defmodule BlockPoker.Tables do
   end
 
   @doc "Показать свои карты по желанию — сбросив или дойдя до вскрытия."
-  @spec show_cards(Ecto.UUID.t(), Ecto.UUID.t()) :: :ok | {:error, error()}
-  def show_cards(room_id, user_id) do
-    with {:ok, pid} <- fetch_room(room_id), do: TableServer.show_cards(pid, user_id)
+  @spec show_cards(Ecto.UUID.t(), Ecto.UUID.t(), [non_neg_integer()] | :all) ::
+          :ok | {:error, error()}
+  def show_cards(room_id, user_id, cards \\ :all) do
+    with {:ok, pid} <- fetch_room(room_id), do: TableServer.show_cards(pid, user_id, cards)
   end
 
   @doc """

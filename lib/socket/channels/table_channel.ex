@@ -108,9 +108,9 @@ defmodule Socket.Channels.TableChannel do
     |> Message.reply(socket)
   end
 
-  def handle_in("show_cards", _payload, socket) do
+  def handle_in("show_cards", payload, socket) do
     socket.assigns.room_id
-    |> Tables.show_cards(socket.assigns.user_id)
+    |> Tables.show_cards(socket.assigns.user_id, Message.card_indexes(payload))
     |> Message.reply(socket)
   end
 

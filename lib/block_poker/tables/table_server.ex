@@ -170,8 +170,10 @@ defmodule BlockPoker.Tables.TableServer do
   def react(room, user_id, id), do: GenServer.call(room, {:react, user_id, id})
 
   @doc "Открыть свои карты по желанию."
-  @spec show_cards(GenServer.server(), Ecto.UUID.t()) :: :ok | {:error, atom()}
-  def show_cards(room, user_id), do: GenServer.call(room, {:show_cards, user_id})
+  @spec show_cards(GenServer.server(), Ecto.UUID.t(), [non_neg_integer()] | :all) ::
+          :ok | {:error, atom()}
+  def show_cards(room, user_id, cards \\ :all),
+    do: GenServer.call(room, {:show_cards, user_id, cards})
 
   @doc "Ответ игрока на предложение сыграть дважды."
   @spec answer_run_it_twice(GenServer.server(), Ecto.UUID.t(), boolean()) ::
@@ -376,13 +378,18 @@ defmodule BlockPoker.Tables.TableServer do
     end
   end
 
-  def handle_call({:show_cards, user_id}, _from, state) do
-    with {:ok, hand} <- fetch_hand(state),
-         {:ok, seat} <- seat_of(state, user_id),
-         {:ok, hand, events} <- Hand.show_cards(hand, seat) do
-      {:reply, :ok, apply_hand(state, hand, events)}
-    else
-      {:error, reason} -> {:reply, {:error, reason}, state}
+  # Показ карт живёт в окне после раздачи, а не в самой раздаче: во время
+  # торговли открытая карта — подсказка тем, кто ещё принимает решения.
+  # Кому и когда можно, решает `RoomState`, комната лишь рассылает событие.
+  def handle_call({:show_cards, user_id, cards}, _from, state) do
+    case RoomState.show_cards(state.room, user_id, cards, now_ms(state)) do
+      {:ok, room, payload} ->
+        state = put_room(state, room)
+        broadcast(state, "cards_shown", payload)
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -862,7 +869,10 @@ defmodule BlockPoker.Tables.TableServer do
               hand: hand,
               hand_stats: HandStats.new(hand),
               showdown: nil,
-              rabbit: nil
+              rabbit: nil,
+              # Новая раздача закрывает окно показа прошлой: карты, которые
+              # не открыли за паузу, остаются закрытыми навсегда.
+              reveal: nil
           })
 
         broadcast(state, "hand_started", %{
@@ -1113,6 +1123,9 @@ defmodule BlockPoker.Tables.TableServer do
     room = %{room | button_seat: next_button(room)}
     room = %{room | big_blind_seat: big_blind_seat_for(room)}
     room = put_rabbit(room, hand, now_ms(state))
+
+    # Окно показа живёт ту же паузу, что и стол стоит после раздачи.
+    room = RoomState.put_reveal(room, hand, now_ms(state) + @next_hand_ms)
 
     state =
       state

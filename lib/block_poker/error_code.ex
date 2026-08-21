@@ -44,6 +44,8 @@ defmodule BlockPoker.ErrorCode do
           | :chat_rate_limited
           | :reaction_rate_limited
           | :rabbit_unavailable
+          | :reveal_unavailable
+          | :already_shown
           | :run_it_twice_not_offered
           | :not_a_contender
           | :already_answered
@@ -88,6 +90,8 @@ defmodule BlockPoker.ErrorCode do
     chat_rate_limited: {429, "Слишком часто: подождите немного"},
     reaction_rate_limited: {429, "Реакцию можно отправить раз в минуту"},
     rabbit_unavailable: {409, "Посмотреть карты сейчас нельзя"},
+    reveal_unavailable: {409, "Показать карты сейчас нельзя"},
+    already_shown: {409, "Эти карты уже открыты"},
     run_it_twice_not_offered: {409, "Сыграть дважды сейчас не предлагают"},
     not_a_contender: {403, "Вы не участвуете в этой раздаче"},
     already_answered: {409, "Вы уже ответили"},
