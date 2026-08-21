@@ -26,7 +26,16 @@ defmodule BlockPoker.Tables do
   alias BlockPoker.Engine.Preselect
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.Reactions
-  alias BlockPoker.Tables.{Lobby, LobbyQuery, RoomState, TableRegistry, TableServer}
+
+  alias BlockPoker.Tables.{
+    Lobby,
+    LobbyQuery,
+    RoomState,
+    SitAndGoLobby,
+    TableRegistry,
+    TableServer
+  }
+
   alias BlockPoker.Wallet
 
   @type entry :: :wait_bb | :post
@@ -157,6 +166,34 @@ defmodule BlockPoker.Tables do
     attempts = Lobby.rooms_for(setting_id) |> Enum.sort_by(&{-&1.seats_taken, &1.room_id})
     try_rooms(attempts, user_id, buy_in, entry(opts), :no_seats_available)
   end
+
+  @doc """
+  Регистрация в Sit & Go: игрок садится в тот турнир шаблона, который
+  сейчас набирается.
+
+  Отдельной сущности «регистрация» нет намеренно — посадка за турнирный
+  стол ею и является. Взнос списывает режим (`GameMode.Tournament`),
+  стек выдаёт турнир, и обе величины берутся из шаблона, а не от клиента:
+  выбирать тут нечего, все входят одинаково.
+  """
+  @spec register(Ecto.UUID.t(), Ecto.UUID.t()) :: {:ok, map()} | {:error, error()}
+  def register(setting_id, user_id) do
+    with {:ok, room_id} <- SitAndGoLobby.open_room(setting_id),
+         {:ok, pid} <- fetch_room(room_id) do
+      room = TableServer.state(pid)
+
+      seat_player(pid, room_id, user_id, :first_free, room.setting.starting_stack, :wait_bb)
+    end
+  end
+
+  @doc """
+  Отмена регистрации до старта: взнос возвращается в кошелёк.
+
+  Тот же путь, что и уход из-за стола, — и это не совпадение: право уйти
+  решает режим, и в турнире оно есть ровно до первой карты.
+  """
+  @spec unregister(Ecto.UUID.t(), Ecto.UUID.t()) :: {:ok, map()} | {:error, error()}
+  def unregister(room_id, user_id), do: leave_seat(room_id, user_id)
 
   @doc """
   Где игрок сидит прямо сейчас — по всем комнатам сразу.

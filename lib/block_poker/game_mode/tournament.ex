@@ -198,6 +198,34 @@ defmodule BlockPoker.GameMode.Tournament do
   @impl true
   def auto_start?(%RoomState{}), do: true
 
+  @doc "Номиналы турнира — это текущий уровень структуры, а не поля шаблона."
+  @impl true
+  def limits(%RoomState{} = state) do
+    case RoomState.current_level(state) do
+      nil -> %{small_blind: 0, big_blind: 0, ante: 0}
+      level -> %{small_blind: level.small_blind, big_blind: level.big_blind, ante: level.ante}
+    end
+  end
+
+  @doc """
+  Тайминги турнира. Докупки и тайм-аута паузы здесь нет вовсе, поэтому
+  этих ключей в карте нет — вместо нулей, по которым клиент нарисовал бы
+  счётчик несуществующей механики.
+  """
+  @impl true
+  def timings(%RoomState{setting: setting}) do
+    %{
+      action_timeout_ms: setting.action_timeout_ms,
+      time_bank_ms: setting.time_bank_ms,
+      time_bank_refill: setting.time_bank_refill,
+      disconnect_grace_ms: setting.disconnect_grace_ms,
+      prize_reveal_ms: setting.prize_reveal_ms
+    }
+  end
+
+  @impl true
+  def display_name(%RoomState{setting: setting}), do: setting.name
+
   @doc """
   Турнир начинается только полным составом.
 

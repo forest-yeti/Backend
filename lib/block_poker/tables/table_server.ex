@@ -49,6 +49,11 @@ defmodule BlockPoker.Tables.TableServer do
   # сколько, поэтому пауза заметно длиннее любой другой: её укорачивание
   # первым делом ломает читаемость раздачи.
   @next_hand_ms 5_000
+
+  # Сколько доигранный турнир стоит с итоговой таблицей, прежде чем
+  # свернуться. Не настройка шаблона: это длительность экрана, а не
+  # правило игры.
+  @tournament_close_ms 15_000
   # Сколько объявивший страддл думает над суммой. Окно короткое намеренно:
   # оно стоит перед каждой раздачей и платят за него ожиданием все за столом.
   @straddle_offer_ms 3_000
@@ -685,6 +690,9 @@ defmodule BlockPoker.Tables.TableServer do
     end
   end
 
+  # Итоговую таблицу показали — турнир сворачивается.
+  defp do_timeout(:tournament_close, state), do: close_tournament(state)
+
   # Grace-период истёк: место освобождается, фишки возвращать некому —
   # это делает `Tables`, поэтому наружу уходит событие.
   defp do_timeout({:grace, seat_number}, state) do
@@ -1251,10 +1259,23 @@ defmodule BlockPoker.Tables.TableServer do
       })
 
       state.payout.(room, results)
-      state
+
+      # Стол не исчезает в ту же секунду: игроки должны увидеть итоговую
+      # таблицу. По истечении паузы места освобождаются и комната уходит
+      # в drain — без этого доигранный турнир не опустеет никогда,
+      # потому что вылетевшие остаются за столом зрителями.
+      schedule(state, :tournament_close, @tournament_close_ms)
     else
       state
     end
+  end
+
+  defp close_tournament(state) do
+    room = state.room |> RoomState.clear_seats() |> RoomState.mark_draining()
+    state = put_room(state, room)
+
+    announce(state)
+    state
   end
 
   defp default_payout(%RoomState{} = room, results) do

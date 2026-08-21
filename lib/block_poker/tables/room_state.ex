@@ -1411,8 +1411,27 @@ defmodule BlockPoker.Tables.RoomState do
       seats_taken: seats_taken(state),
       max_players: state.setting.max_players,
       phase: state.phase,
-      draining?: state.draining?
+      draining?: state.draining?,
+      # Началась ли игра. Пулу турниров этого достаточно, чтобы отличить
+      # «идёт регистрация» от «уже играют»: свободных мест у стартовавшего
+      # турнира не бывает, но занятость мест сохраняется и после вылетов.
+      game_started?: state.game_started?
     }
+  end
+
+  @doc """
+  Освобождает все места.
+
+  Нужно доигранному турниру: вылетевшие остаются за столом зрителями, и
+  без явной очистки комната никогда не опустеет, а значит и не закроется.
+  Кэш-стол этого не делает никогда — там место освобождает только сам
+  игрок.
+  """
+  @spec clear_seats(t()) :: t()
+  def clear_seats(%__MODULE__{} = state) do
+    seats = Map.new(state.seats, fn {number, _seat} -> {number, Seat.new(number)} end)
+
+    %{state | seats: seats}
   end
 
   @spec bump_seq(t()) :: t()

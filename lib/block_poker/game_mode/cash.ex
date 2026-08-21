@@ -89,6 +89,27 @@ defmodule BlockPoker.GameMode.Cash do
 
   @doc "Двое — минимум, при котором покер возможен; дальше стол играет любым составом."
   @impl true
+  def limits(%RoomState{setting: setting}) do
+    %{small_blind: setting.small_blind, big_blind: setting.big_blind, ante: setting.ante}
+  end
+
+  @impl true
+  def timings(%RoomState{setting: setting}) do
+    %{
+      action_timeout_ms: setting.action_timeout_ms,
+      time_bank_ms: setting.time_bank_ms,
+      time_bank_refill: setting.time_bank_refill,
+      disconnect_grace_ms: setting.disconnect_grace_ms,
+      rebuy_prompt_ms: setting.rebuy_prompt_ms,
+      straddle_offer_ms: BlockPoker.Tables.straddle_offer_ms(),
+      sit_out_timeout_ms: setting.sit_out_timeout_ms
+    }
+  end
+
+  @impl true
+  def display_name(%RoomState{setting: setting}), do: CashGameSetting.display_name(setting)
+
+  @impl true
   def start_threshold(%RoomState{}), do: 2
 
   @impl true

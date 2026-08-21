@@ -5,7 +5,7 @@ defmodule BlockPoker.Application do
 
   use Application
 
-  alias BlockPoker.Tables.{Lobby, TableRegistry, TableSupervisor}
+  alias BlockPoker.Tables.{Lobby, SitAndGoLobby, TableRegistry, TableSupervisor}
 
   @impl true
   def start(_type, _args) do
@@ -26,7 +26,7 @@ defmodule BlockPoker.Application do
     # Лобби поднимается последним и не поднимается в тестах: при старте оно
     # читает шаблоны из БД, а в тестах база живёт под Sandbox и принадлежит
     # тест-процессу. Тесты пула запускают своё лобби явно.
-    children = children ++ List.wrap(lobby_child())
+    children = children ++ lobby_children()
 
     # See https://elixir.hexdocs.pm/Supervisor.html
     # for other strategies and supported options
@@ -34,8 +34,15 @@ defmodule BlockPoker.Application do
     Supervisor.start_link(children, opts)
   end
 
-  defp lobby_child do
-    if Application.get_env(:block_poker, :start_lobby, true), do: Lobby
+  # Два пула: кэшевый и турнирный. Они не знают друг о друге и владеют
+  # разными комнатами — общее у них только дерево супервизоров и топик,
+  # в котором комнаты рассказывают о себе.
+  defp lobby_children do
+    if Application.get_env(:block_poker, :start_lobby, true) do
+      [Lobby, SitAndGoLobby]
+    else
+      []
+    end
   end
 
   # Tell Phoenix to update the endpoint configuration
