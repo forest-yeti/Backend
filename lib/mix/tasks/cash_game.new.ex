@@ -23,6 +23,9 @@ defmodule Mix.Tasks.CashGame.New do
       больших блайндах у холдема, анте у Short Deck (по умолчанию `40-100`;
       `40-` — стол без потолка);
     * `--rake` — рейк в сотых долях процента: `450` — это 4.5% (по умолчанию 0);
+    * `--bomb-pot` — шанс бомб-пота в десятитысячных: `5000` — это 50%
+      (по умолчанию 0 — механики за столом нет);
+    * `--bomb-pot-ante` — взнос бомб-пота в номиналах стола (по умолчанию 2);
     * `--felt` и `--background` — цвета сукна и фона комнаты (`#RRGGBB`);
     * `--private` — комнаты нет в общей сетке лобби, вход только по коду;
       код выдаётся сервером и печатается по завершении;
@@ -38,6 +41,7 @@ defmodule Mix.Tasks.CashGame.New do
 
   alias BlockPoker.CashGames
   alias BlockPoker.CashGames.CashGameSetting
+  alias BlockPoker.Engine.BombPot
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
 
   @requirements ["app.start"]
@@ -51,6 +55,8 @@ defmodule Mix.Tasks.CashGame.New do
     buy_in: :string,
     ante: :integer,
     rake: :integer,
+    bomb_pot: :integer,
+    bomb_pot_ante: :integer,
     felt: :string,
     background: :string,
     private: :boolean,
@@ -108,6 +114,8 @@ defmodule Mix.Tasks.CashGame.New do
       min_buy_in: min_buy_in,
       max_buy_in: max_buy_in,
       rake_percent: opts[:rake] || 0,
+      bomb_pot_chance: opts[:bomb_pot] || 0,
+      bomb_pot_ante: opts[:bomb_pot_ante] || 2,
       felt_color: opts[:felt],
       background_color: opts[:background],
       auto_start: opts[:auto_start] != false,
@@ -196,8 +204,15 @@ defmodule Mix.Tasks.CashGame.New do
 
     "#{name} — #{attrs.currency} #{limits_label(attrs)}, " <>
       "мест #{attrs.max_players}, бай-ин #{attrs.min_buy_in}-#{Map.get(attrs, :max_buy_in) || "∞"}" <>
+      bomb_pot_label(attrs) <>
       if(attrs.auto_start, do: "", else: ", ручной старт")
   end
+
+  defp bomb_pot_label(%{bomb_pot_chance: chance}) when chance > 0 do
+    ", бомб-пот #{BombPot.percent_label(chance)}%"
+  end
+
+  defp bomb_pot_label(_attrs), do: ""
 
   defp limits_label(%{big_blind: 0} = attrs), do: "анте #{attrs.ante}"
   defp limits_label(attrs), do: "#{attrs.small_blind}/#{attrs.big_blind}"
