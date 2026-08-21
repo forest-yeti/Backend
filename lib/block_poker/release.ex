@@ -112,7 +112,19 @@ defmodule BlockPoker.Release do
     Application.fetch_env!(@app, :ecto_repos)
   end
 
+  # Logger поднимается **до** всего остального, и это не перестраховка.
+  #
+  # В режиме `eval` приложения не стартуют, поэтому Elixir-овый Logger не
+  # успевает поставить свой обработчик. А `sys.config` релиза штатный
+  # обработчик `kernel` уже снял — в расчёте на то, что Logger его заменит.
+  # Обработчиков не остаётся вовсе, и первая же строка лога валит ноду
+  # с `Kernel pid terminated (logger)`.
+  #
+  # Коварство в том, что молчащая операция проходит успешно: пока миграций
+  # нет, `Ecto.Migrator` ничего не пишет и падать нечему. Ошибка ждёт
+  # ровно того прогона, где появятся новые миграции, — то есть худшего.
   defp load_app do
+    {:ok, _apps} = Application.ensure_all_started(:logger)
     Application.load(@app)
   end
 end
