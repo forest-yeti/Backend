@@ -15,6 +15,7 @@ defmodule BlockPoker.Engine.Hand do
   """
 
   alias BlockPoker.Engine.{
+    BombPot,
     Card,
     Deck,
     Equity,
@@ -58,6 +59,7 @@ defmodule BlockPoker.Engine.Hand do
           street: street(),
           board: [Card.t()],
           board_2: [Card.t()] | nil,
+          bomb_pot: BombPot.t() | nil,
           run_it_twice_allowed?: boolean(),
           rit: RunItTwice.t() | nil,
           pot: non_neg_integer(),
@@ -89,6 +91,8 @@ defmodule BlockPoker.Engine.Hand do
     :board_2,
     # Открытый вопрос «играем дважды?». `nil` — не спрашивали.
     :rit,
+    # Взнос бомб-пота, если раздача им оказалась. `nil` — обычная раздача.
+    :bomb_pot,
     # Номинал структуры ставок: от него считаются минимальный бет и рейз.
     # Блайндов и анте раздача не знает — только эту величину.
     bet_unit: 0,
@@ -154,6 +158,7 @@ defmodule BlockPoker.Engine.Hand do
       # минимальный рейз считается от неё, а не от блайнда.
       bet_unit: Straddle.bet_unit(setup, structure.bet_unit(setup)),
       run_it_twice_allowed?: setup.run_it_twice_allowed,
+      bomb_pot: setup.bomb_pot,
       rake_fun: Keyword.get(opts, :rake)
     }
 
@@ -164,11 +169,33 @@ defmodule BlockPoker.Engine.Hand do
     hand = deal_hole(hand)
 
     hand = %{hand | bet: max_committed(hand), min_raise: hand.bet_unit}
-    hand = %{hand | to_act: first_to_act(hand, structure.last_to_act_preflop(setup))}
+    {hand, opening_events} = open(hand, setup, structure)
 
     {hand,
      forced_events ++
-       entry_events ++ [{:hole_dealt, hole_payload(hand)}] ++ prompt(hand)}
+       entry_events ++ [{:hole_dealt, hole_payload(hand)}] ++ opening_events}
+  end
+
+  # Чем раздача открывается. Обычная — префлопом: торговля начинается после
+  # того, кто по структуре ставок говорит последним. Бомб-пот — сразу флопом:
+  # заплатили все и поровну, торговаться до карт борда не о чем и некому.
+  defp open(hand, %HandSetup{bomb_pot: nil} = setup, structure) do
+    hand = %{hand | to_act: first_to_act(hand, structure.last_to_act_preflop(setup))}
+    {hand, prompt(hand)}
+  end
+
+  defp open(hand, %HandSetup{}, _structure) do
+    {hand, event} = deal_street(hand)
+    hand = %{hand | to_act: first_to_act(hand)}
+
+    # Взнос мог оказаться больше короткого стека: тогда говорить на флопе
+    # уже некому и борд доводится до конца, как при обычном олл-ине.
+    if hand.to_act == nil do
+      {hand, events} = begin_runout(hand)
+      {hand, [event | events]}
+    else
+      {hand, [event | prompt(hand)]}
+    end
   end
 
   @doc "Легальные действия игрока — единственный источник правды для кнопок."

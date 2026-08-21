@@ -44,6 +44,11 @@ defmodule Socket.Views.TableView do
       straddle_min: Straddle.min_amount(RoomState.bet_unit(room)),
       # Идущее окно объявления суммы: остаток на момент отправки снапшота.
       straddle_ms: remaining(room.straddle_deadline_at),
+      # Бомб-пот: правила стола (шанс и взнос) и решение по ближайшей
+      # раздаче. Второе — не то же самое, что первое: шанс постоянен,
+      # а `bomb_pot_next` появляется только когда кубик уже выпал.
+      bomb_pot: CashGameSetting.bomb_pot(room.setting),
+      bomb_pot_next: room.bomb_pot,
       max_players: room.setting.max_players,
       timings: timings(room.setting),
       action_seq: room.action_seq,
@@ -126,6 +131,9 @@ defmodule Socket.Views.TableView do
   defp hand(%RoomState{hand: hand} = room) do
     %{
       street: hand.street,
+      # Взнос идущей раздачи, если она бомбовая: по нему клиент подписывает
+      # банк, а не пересчитывает его сам.
+      bomb_pot: hand.bomb_pot,
       board: Enum.map(hand.board, &Card.to_map/1),
       # Второй прогон борда; `nil` — обычная раздача.
       board_2: hand.board_2 && Enum.map(hand.board_2, &Card.to_map/1),

@@ -13,7 +13,7 @@ defmodule BlockPoker.Tables.RoomState do
 
   alias BlockPoker.CashGames.CashGameSetting
   alias BlockPoker.Chat
-  alias BlockPoker.Engine.{Card, EntryRules, Hand, Preselect, Straddle, Stats, TimeBank}
+  alias BlockPoker.Engine.{BombPot, Card, EntryRules, Hand, Preselect, Straddle, Stats, TimeBank}
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.Reactions
   alias BlockPoker.Tables.Seat
@@ -52,6 +52,8 @@ defmodule BlockPoker.Tables.RoomState do
           straddle_allowed?: boolean(),
           straddle_deadline_at: integer() | nil,
           straddle_done?: boolean(),
+          bomb_pot: BombPot.t() | nil,
+          bomb_pot_rolled?: boolean(),
           rabbit: rabbit() | nil,
           reveal: reveal() | nil
         }
@@ -144,7 +146,16 @@ defmodule BlockPoker.Tables.RoomState do
     straddle_deadline_at: nil,
     # Окно этой раздачи уже прошло. Без флага раздача, которую окно
     # откладывает, откладывалась бы им бесконечно.
-    straddle_done?: false
+    straddle_done?: false,
+    # Решение по ближайшей раздаче: взнос бомб-пота либо `nil` — обычная
+    # раздача. Хранится рядом с окном страддла и по той же причине: оно
+    # принято **до** карт, и подключившийся между раздачами должен увидеть
+    # то же, что и остальные.
+    bomb_pot: nil,
+    # Кубик на эту раздачу уже брошен. Флаг обязателен: `start_hand`
+    # переигрывается (кнопка, ожидающие блайнда, окно страддла), а бросков
+    # на раздачу должно быть ровно ноль или один.
+    bomb_pot_rolled?: false
   ]
 
   @spec new(Ecto.UUID.t(), CashGameSetting.t()) :: t()
@@ -386,6 +397,21 @@ defmodule BlockPoker.Tables.RoomState do
   @spec close_straddle_window(t()) :: t()
   def close_straddle_window(%__MODULE__{} = state) do
     %{state | phase: :idle, straddle_deadline_at: nil, straddle_done?: true}
+  end
+
+  @doc """
+  Решение по бомб-поту принято: `nil` — раздача обычная. Помечается и то,
+  и другое, потому что важен сам факт броска, а не его исход.
+  """
+  @spec put_bomb_pot(t(), BombPot.t() | nil) :: t()
+  def put_bomb_pot(%__MODULE__{} = state, bomb_pot) do
+    %{state | bomb_pot: bomb_pot, bomb_pot_rolled?: true}
+  end
+
+  @doc "Раздача кончилась: следующей нужен свой бросок."
+  @spec reset_bomb_pot(t()) :: t()
+  def reset_bomb_pot(%__MODULE__{} = state) do
+    %{state | bomb_pot: nil, bomb_pot_rolled?: false}
   end
 
   @doc "Раздача началась или кончилась — окно следующей ещё не проводилось."

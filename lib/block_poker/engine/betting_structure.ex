@@ -39,7 +39,8 @@ defmodule BlockPoker.Engine.BettingStructure do
   """
   @type forced_bet :: %{
           required(:seat) => pos_integer(),
-          required(:kind) => :ante | :button_ante | :small_blind | :big_blind | :straddle,
+          required(:kind) =>
+            :ante | :button_ante | :small_blind | :big_blind | :straddle | :bomb_pot_ante,
           required(:amount) => non_neg_integer(),
           required(:live?) => boolean(),
           optional(:option?) => boolean(),

@@ -51,6 +51,9 @@ defmodule BlockPoker.GameMode.Cash do
   def straddle?(%RoomState{}), do: true
 
   @impl true
+  def bomb_pot(%RoomState{setting: setting}), do: CashGameSetting.bomb_pot(setting)
+
+  @impl true
   def take_buy_in(%RoomState{} = state, user_id, amount, reservation_id) do
     case Wallet.buy_in(user_id, state.setting.currency, amount, "buyin:#{reservation_id}",
            ref_id: state.room_id
@@ -98,6 +101,7 @@ defmodule BlockPoker.GameMode.Cash do
 
   defp build_setup(state, players) do
     setting = state.setting
+    bomb_pot = state.bomb_pot
 
     %HandSetup{
       variant: VariantRegistry.fetch!(setting.game_type),
@@ -107,10 +111,16 @@ defmodule BlockPoker.GameMode.Cash do
             seat: seat.number,
             id: seat.user_id,
             stack: seat.stack,
-            post: seat.post,
-            dead_post: seat.dead_post
+            # Взносы за вход в бомб-поте не берутся: платить блайндовую цену
+            # круга не за что — блайндов в этой раздаче нет, а взнос бомб-пота
+            # игрок платит наравне со всеми и он же оказывается ценой входа.
+            # Право «войти сейчас» при этом гасится, как обычным взносом:
+            # круг игрок отыграл полностью.
+            post: entry_amount(seat.post, bomb_pot),
+            dead_post: entry_amount(seat.dead_post, bomb_pot)
           }
         end),
+      bomb_pot: bomb_pot,
       button_seat: state.button_seat || hd(players).number,
       run_it_twice_allowed: run_it_twice?(state),
       small_blind: setting.small_blind,
@@ -119,6 +129,9 @@ defmodule BlockPoker.GameMode.Cash do
       ante_type: setting.ante_type
     }
   end
+
+  defp entry_amount(_amount, %{} = _bomb_pot), do: 0
+  defp entry_amount(amount, nil), do: amount
 
   defp wallet_error(:insufficient_funds), do: :insufficient_funds
   defp wallet_error(:not_found), do: :wallet_not_found

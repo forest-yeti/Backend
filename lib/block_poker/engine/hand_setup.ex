@@ -10,7 +10,7 @@ defmodule BlockPoker.Engine.HandSetup do
   Структура чистая: ни кошельков, ни `Repo`, ни процессов.
   """
 
-  alias BlockPoker.Engine.{BettingStructure, Straddle, Variant}
+  alias BlockPoker.Engine.{BettingStructure, BombPot, Straddle, Variant}
 
   @type player :: %{
           seat: pos_integer(),
@@ -29,6 +29,7 @@ defmodule BlockPoker.Engine.HandSetup do
           ante: non_neg_integer(),
           ante_type: :big_blind | :per_player,
           straddle: Straddle.t() | nil,
+          bomb_pot: BombPot.t() | nil,
           run_it_twice_allowed: boolean()
         }
 
@@ -47,6 +48,10 @@ defmodule BlockPoker.Engine.HandSetup do
     # разрешённой — одна на раздачу, с проверенной суммой: выбирать между
     # заявками мест обязан тот, кто их собирал, а не движок раздачи.
     straddle: nil,
+    # Выпавший бомб-пот (`Engine.BombPot`): взнос со всех и раздача сразу
+    # с флопа. Приходит уже решённым — бросок делает тот, кто владеет
+    # источником случайности стола, а не раздача.
+    bomb_pot: nil,
     # Разрешение приходит флагом, а не ссылкой на шаблон, — по той же причине,
     # что и блайнды. Дефолт `false`: новый режим и искусственный вариант в
     # тестах получают функцию выключенной молча, а не по забывчивости.
@@ -56,9 +61,18 @@ defmodule BlockPoker.Engine.HandSetup do
   @doc """
   Структура ставок этой раздачи. Её задаёт вид покера, а не шаблон стола:
   холдем играется на блайндах, Short Deck — на анте кнопки.
+
+  Исключение одно — бомб-пот: он отменяет вынужденные ставки стола на одну
+  раздачу и потому подменяет структуру целиком, а не правит её по полям.
   """
   @spec structure(t()) :: BettingStructure.t()
+  def structure(%__MODULE__{bomb_pot: %{}}), do: BettingStructure.BombPot
   def structure(%__MODULE__{variant: variant}), do: variant.betting_structure()
+
+  @doc "Раздача с взносом со всех и без префлопа."
+  @spec bomb_pot?(t()) :: boolean()
+  def bomb_pot?(%__MODULE__{bomb_pot: nil}), do: false
+  def bomb_pot?(%__MODULE__{}), do: true
 
   @doc """
   Сумма фишек, с которой раздача начинается. Инвариант «фишки не возникают

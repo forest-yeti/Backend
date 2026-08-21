@@ -26,6 +26,10 @@ defmodule Socket.Views.LobbyView do
       ante: setting.ante,
       ante_type: setting.ante_type,
       bet_unit: CashGameSetting.bet_unit(setting),
+      # Бомб-пот шаблона либо `nil`. Шанс приходит и числом, и готовой
+      # подписью: делить десятитысячные на проценты — арифметика над
+      # доменным значением, и её место в ядре (§3 CLAUDE.md).
+      bomb_pot: CashGameSetting.bomb_pot(setting),
       max_players: setting.max_players,
       table_size: entry_field(snapshot, :table_size),
       limit_tier: entry_field(snapshot, :limit_tier),
@@ -58,6 +62,7 @@ defmodule Socket.Views.LobbyView do
       ante: setting.ante,
       ante_type: setting.ante_type,
       bet_unit: CashGameSetting.bet_unit(setting),
+      bomb_pot: CashGameSetting.bomb_pot(setting),
       min_buy_in: range.min,
       max_buy_in: range.max,
       seats_taken: found.seats_taken,

@@ -18,6 +18,7 @@ defmodule BlockPoker.CashGames.CashGameSetting do
   import Ecto.Changeset
 
   alias BlockPoker.Engine.BettingStructure
+  alias BlockPoker.Engine.BombPot
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
 
   @type t :: %__MODULE__{}
@@ -51,6 +52,8 @@ defmodule BlockPoker.CashGames.CashGameSetting do
     :allow_post_blind,
     :auto_start,
     :allowed_run_it_twice,
+    :bomb_pot_chance,
+    :bomb_pot_ante,
     :blind_dodge_window_hands,
     :felt_color,
     :background_color,
@@ -107,6 +110,13 @@ defmodule BlockPoker.CashGames.CashGameSetting do
     # она выключена всегда и настройкой не управляется (§3.1 задачи 5).
     field :allowed_run_it_twice, :boolean, default: true
 
+    # Бомб-пот: шанс раздачи без префлопа в десятитысячных (500 = 5%,
+    # 0 = механики нет) и взнос за неё в номиналах стола. Шанс разыгрывается
+    # заново перед каждой раздачей — «раз в двадцать раздач» это про
+    # вероятность, а не про расписание.
+    field :bomb_pot_chance, :integer, default: 0
+    field :bomb_pot_ante, :integer, default: 2
+
     # Стол с `false` сам не стартует, даже когда за ним собрался полный состав:
     # первую раздачу запускает администратор командой `start_game`. Дальше
     # раздачи идут обычным порядком.
@@ -154,6 +164,33 @@ defmodule BlockPoker.CashGames.CashGameSetting do
   @spec bet_unit(t()) :: non_neg_integer()
   def bet_unit(%__MODULE__{} = setting) do
     structure(setting).bet_unit(%{big_blind: setting.big_blind, ante: setting.ante})
+  end
+
+  @doc """
+  Бомб-пот шаблона: шанс, взнос в фишках и подпись для лобби — или `nil`,
+  если за этим столом механики нет.
+
+  Взнос считается здесь, а не во view: перевод номиналов в фишки — это
+  арифметика над деньгами, и её место в ядре (§3 CLAUDE.md).
+  """
+  @spec bomb_pot(t()) ::
+          %{
+            chance: pos_integer(),
+            chance_percent: String.t(),
+            ante: pos_integer(),
+            ante_units: pos_integer()
+          }
+          | nil
+  def bomb_pot(%__MODULE__{bomb_pot_chance: chance}) when not is_integer(chance) or chance <= 0,
+    do: nil
+
+  def bomb_pot(%__MODULE__{} = setting) do
+    %{
+      chance: setting.bomb_pot_chance,
+      chance_percent: BombPot.percent_label(setting.bomb_pot_chance),
+      ante: BombPot.ante(bet_unit(setting), setting.bomb_pot_ante),
+      ante_units: setting.bomb_pot_ante
+    }
   end
 
   @spec visibilities() :: [atom()]
@@ -224,6 +261,8 @@ defmodule BlockPoker.CashGames.CashGameSetting do
     |> validate_inclusion(:max_players, 2..9)
     |> validate_number(:min_buy_in, greater_than_or_equal_to: 20)
     |> validate_inclusion(:rake_percent, 0..1000)
+    |> validate_inclusion(:bomb_pot_chance, 0..BombPot.scale())
+    |> validate_number(:bomb_pot_ante, greater_than: 0)
     |> validate_number(:sort_order, greater_than_or_equal_to: 0)
     |> validate_number(:max_rooms, greater_than: 0)
     |> validate_length(:name, max: 80)

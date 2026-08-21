@@ -18,7 +18,18 @@ defmodule BlockPoker.Tables.TableServer do
 
   use GenServer, restart: :temporary
 
-  alias BlockPoker.Engine.{ButtonDraw, Hand, HandSetup, HandStats, Preselect, Rabbit, Rng, Stats}
+  alias BlockPoker.Engine.{
+    BombPot,
+    ButtonDraw,
+    Hand,
+    HandSetup,
+    HandStats,
+    Preselect,
+    Rabbit,
+    Rng,
+    Stats
+  }
+
   alias BlockPoker.Engine.Straddle
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.Tables.{RoomState, Seat, TableRegistry}
@@ -806,6 +817,7 @@ defmodule BlockPoker.Tables.TableServer do
     # которое эту раздачу не играет. Позиции тогда считаются от пустого
     # кресла — блайнды платят не те.
     state = put_room(state, ensure_button_in_play(state.room))
+    state = roll_bomb_pot(state)
 
     case offer_straddle(state) do
       {:open, state} -> state
@@ -818,6 +830,12 @@ defmodule BlockPoker.Tables.TableServer do
   # один раз на раздачу (`straddle_done?`) и только если объявившие есть:
   # стол без страддла не должен ждать ни секунды.
   defp offer_straddle(%State{room: %RoomState{straddle_done?: true}}), do: :none
+
+  # В бомб-поте страддла нет: ставка вслепую поднимает цену префлопа, а
+  # префлопа в этой раздаче не будет. Объявления при этом не снимаются —
+  # они сработают на следующей обычной раздаче.
+  defp offer_straddle(%State{room: %RoomState{bomb_pot: bomb_pot}}) when bomb_pot != nil,
+    do: :none
 
   defp offer_straddle(state) do
     seats = in_game_seats(state.room)
@@ -840,6 +858,30 @@ defmodule BlockPoker.Tables.TableServer do
   end
 
   defp straddle_deadline(state), do: now_ms(state) + @straddle_offer_ms
+
+  # Кубик бросается один раз на раздачу и **до** карт: игрок обязан узнать,
+  # что раздача бомбовая, раньше, чем увидит свои карты, — иначе взнос
+  # оказывается платой за уже известную руку.
+  #
+  # RNG возвращается в состояние стола: раздача воспроизводится по seed
+  # целиком, включая сам бросок.
+  defp roll_bomb_pot(%State{room: %RoomState{bomb_pot_rolled?: true}} = state), do: state
+
+  defp roll_bomb_pot(state) do
+    case state.game_mode.bomb_pot(state.room) do
+      nil ->
+        put_room(state, RoomState.put_bomb_pot(state.room, nil))
+
+      %{chance: chance, ante: ante} ->
+        {bomb?, rng} = BombPot.roll(state.rng, chance)
+        bomb_pot = if bomb?, do: %{ante: ante}, else: nil
+        state = put_room(%{state | rng: rng}, RoomState.put_bomb_pot(state.room, bomb_pot))
+
+        if bomb?, do: broadcast(state, "bomb_pot", %{ante: ante})
+
+        state
+    end
+  end
 
   # Страддл в раздаче один, и выбирает его чистое ядро: заявок могло прийти
   # несколько, а спорят они суммой и позицией — это правило игры (§3).
@@ -878,6 +920,9 @@ defmodule BlockPoker.Tables.TableServer do
         broadcast(state, "hand_started", %{
           button_seat: setup.button_seat,
           straddle: setup.straddle,
+          # Взнос бомб-пота либо `nil`: раздача, начинающаяся с флопа,
+          # обязана объявить себя тем же событием, что и обычная.
+          bomb_pot: setup.bomb_pot,
           players: seat_stacks(hand)
         })
 
@@ -1117,6 +1162,7 @@ defmodule BlockPoker.Tables.TableServer do
       }
       |> RoomState.clear_preselects()
       |> RoomState.reset_straddle_window()
+      |> RoomState.reset_bomb_pot()
       |> RoomState.refill_time_banks(owners_of(hand))
 
     room = state.game_mode.on_hand_finished(room, hand.results)

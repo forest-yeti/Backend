@@ -61,6 +61,20 @@ defmodule BlockPoker.GameMode do
   """
   @callback straddle?(RoomState.t()) :: boolean()
 
+  @doc """
+  Бомб-пот за этим столом: шанс раздачи без префлопа и взнос за неё —
+  или `nil`, если механики нет.
+
+  Кэш читает шаблон, любой другой режим отвечает `nil`. Причина та же, что
+  у run it twice: бомб-пот меняет цену круга для всех сразу, и в турнире
+  это была бы правка структуры блайндов посреди уровня, а не развлечение.
+
+  Режим отвечает только «сколько и с каким шансом»; бросает кубик стол,
+  потому что источник случайности принадлежит ему (`Engine.BombPot`).
+  """
+  @callback bomb_pot(RoomState.t()) ::
+              %{chance: pos_integer(), ante: pos_integer()} | nil
+
   @doc "Вернуть фишки игроку: в кэше — cash-out в кошелёк, в турнире — no-op."
   @callback return_chips(RoomState.t(), Ecto.UUID.t(), non_neg_integer(), String.t()) ::
               :ok | {:error, atom()}
