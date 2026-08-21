@@ -25,6 +25,7 @@ defmodule BlockPoker.Tables.TableServer do
     HandSetup,
     HandStats,
     Preselect,
+    PrizePool,
     Rabbit,
     Rng,
     Stats
@@ -57,8 +58,8 @@ defmodule BlockPoker.Tables.TableServer do
 
   defmodule State do
     @moduledoc false
-    @enforce_keys [:room, :game_mode, :timer_mode, :rng, :clock, :evict]
-    defstruct [:room, :game_mode, :timer_mode, :rng, :clock, :evict, timers: %{}]
+    @enforce_keys [:room, :timer_mode, :rng, :clock, :evict]
+    defstruct [:room, :timer_mode, :rng, :clock, :evict, timers: %{}]
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -241,8 +242,8 @@ defmodule BlockPoker.Tables.TableServer do
     room_id = Keyword.fetch!(opts, :room_id)
 
     state = %State{
-      room: RoomState.new(room_id, setting),
-      game_mode: Keyword.get(opts, :game_mode, BlockPoker.GameMode.Cash),
+      room:
+        RoomState.new(room_id, setting, Keyword.get(opts, :game_mode, BlockPoker.GameMode.Cash)),
       timer_mode: Keyword.get(opts, :timers, :real),
       rng: Keyword.get_lazy(opts, :rng, &Rng.default/0),
       # Часы инжектируются: тайм-банк считает прошедшее время, и тесты
@@ -255,8 +256,10 @@ defmodule BlockPoker.Tables.TableServer do
       evict: Keyword.get(opts, :evict, &default_evict/2)
     }
 
-    state =
-      put_room(state, %{state.room | straddle_allowed?: state.game_mode.straddle?(state.room)})
+    # Режим заводит своё состояние сам: стол не спрашивает, турнир это или
+    # кэш, — он зовёт колбэк всегда.
+    room = state.room.mode.init_room(state.room)
+    state = put_room(state, %{room | straddle_allowed?: room.mode.straddle?(room)})
 
     {:ok, state, {:continue, :announce}}
   end
@@ -652,7 +655,7 @@ defmodule BlockPoker.Tables.TableServer do
         {:error, :leave_in_progress}
 
       seat ->
-        if state.game_mode.can_leave?(state.room, seat),
+        if state.room.mode.can_leave?(state.room, seat),
           do: :ok,
           else: {:error, :hand_in_progress}
     end
@@ -816,6 +819,8 @@ defmodule BlockPoker.Tables.TableServer do
     # между раздачами игрок вправе встать, и кнопка остаётся на месте,
     # которое эту раздачу не играет. Позиции тогда считаются от пустого
     # кресла — блайнды платят не те.
+    state = maybe_draw_prize(state)
+    state = maybe_advance_level(state)
     state = put_room(state, ensure_button_in_play(state.room))
     state = roll_bomb_pot(state)
 
@@ -868,7 +873,7 @@ defmodule BlockPoker.Tables.TableServer do
   defp roll_bomb_pot(%State{room: %RoomState{bomb_pot_rolled?: true}} = state), do: state
 
   defp roll_bomb_pot(state) do
-    case state.game_mode.bomb_pot(state.room) do
+    case state.room.mode.bomb_pot(state.room) do
       nil ->
         put_room(state, RoomState.put_bomb_pot(state.room, nil))
 
@@ -881,6 +886,84 @@ defmodule BlockPoker.Tables.TableServer do
 
         state
     end
+  end
+
+  # Приз тянется один раз за турнир и **до** первой карты: игрок обязан
+  # знать, за что играет, раньше, чем сядет играть. RNG возвращается в
+  # состояние стола — розыгрыш воспроизводится по seed, как и раздача.
+  defp maybe_draw_prize(%State{room: %RoomState{tournament: %{prize: %{}}}} = state), do: state
+
+  defp maybe_draw_prize(state) do
+    case state.room.mode.prize_table(state.room) do
+      nil ->
+        state
+
+      tiers ->
+        {tier, rng} = PrizePool.draw(state.rng, tiers)
+        prize = build_prize(state.room, tier)
+
+        state =
+          %{state | rng: rng}
+          |> put_room(RoomState.put_prize(state.room, prize))
+          |> then(&put_room(&1, RoomState.arm_level(&1.room, now_ms(&1))))
+
+        broadcast(state, "prize_revealed", prize)
+        state
+    end
+  end
+
+  defp build_prize(%RoomState{setting: setting}, tier) do
+    %{
+      multiplier: tier.multiplier,
+      label: PrizePool.multiplier_label(tier.multiplier),
+      pool: PrizePool.prize_pool(setting.buy_in, tier.multiplier),
+      payouts: tier.payouts
+    }
+  end
+
+  # Уровень поднимается **между раздачами**, и проверяется это здесь, а не
+  # таймером: поднимать номиналы посреди улицы нельзя — это меняет цену уже
+  # принятого решения. Таймер при этом не нужен вовсе, а дедлайн, который
+  # проспали на длинной раздаче, догоняется циклом: время шло, и уровней
+  # могло смениться несколько.
+  defp maybe_advance_level(%State{room: %RoomState{tournament: nil}} = state), do: state
+
+  defp maybe_advance_level(
+         %State{room: %RoomState{tournament: %{level_deadline_at: nil}}} = state
+       ),
+       do: state
+
+  defp maybe_advance_level(state) do
+    if now_ms(state) >= state.room.tournament.level_deadline_at do
+      room = RoomState.advance_level(state.room, now_ms(state))
+      state = put_room(state, room)
+
+      broadcast(state, "level_up", level_view(room, now_ms(state)))
+
+      maybe_advance_level(state)
+    else
+      state
+    end
+  end
+
+  # Часы приходят аргументом, а не берутся из системы: тайминги стола
+  # прогоняются в тестах вручную (§11 CLAUDE.md).
+  defp level_view(%RoomState{tournament: tournament} = room, now) do
+    level = RoomState.current_level(room)
+
+    %{
+      level: tournament.level,
+      small_blind: level.small_blind,
+      big_blind: level.big_blind,
+      ante: level.ante,
+      next_level_in_ms: remaining_level_ms(room, now)
+    }
+  end
+
+  defp remaining_level_ms(%RoomState{tournament: %{level_deadline_at: nil}}, _now), do: nil
+
+  defp remaining_level_ms(%RoomState{tournament: tournament}, now) do
+    max(tournament.level_deadline_at - now, 0)
   end
 
   # Страддл в раздаче один, и выбирает его чистое ядро: заявок могло прийти
@@ -898,7 +981,7 @@ defmodule BlockPoker.Tables.TableServer do
     state = put_room(state, RoomState.resolve_post_intents(state.room))
     state = put_room(state, activate_big_blind(state.room))
 
-    case state.game_mode.hand_setup(state.room) do
+    case state.room.mode.hand_setup(state.room) do
       {:ok, setup} ->
         setup = resolve_straddle(state, setup)
         {hand, events} = Hand.start(setup, state.rng, rake: rake_fun(state))
@@ -977,7 +1060,7 @@ defmodule BlockPoker.Tables.TableServer do
 
   defp rake_fun(state) do
     setting = state.room.setting
-    fn pot, players, opts -> state.game_mode.rake(setting, pot, players, opts) end
+    fn pot, players, opts -> state.room.mode.rake(setting, pot, players, opts) end
   end
 
   # Пока раздача идёт, источник правды по стекам — она: комната только
@@ -1114,7 +1197,17 @@ defmodule BlockPoker.Tables.TableServer do
 
   defp now_ms(%State{clock: clock}), do: clock.()
 
-  defp sit_out_deadline(state), do: now_ms(state) + state.room.setting.sit_out_timeout_ms
+  defp sit_out_timeout_ms(state), do: state.room.mode.sit_out_timeout_ms(state.room)
+
+  # `nil` — режим, в котором пауза бессрочна: место не освобождается, и
+  # возвращать фишки некуда. Турнир именно такой, и это не тайм-аут длиной
+  # в бесконечность, а отсутствие механики.
+  defp sit_out_deadline(state) do
+    case sit_out_timeout_ms(state) do
+      nil -> nil
+      ms -> now_ms(state) + ms
+    end
+  end
 
   # Отложенные паузы становятся настоящими ровно здесь: раздача доиграна,
   # обязательств у игрока больше нет.
@@ -1131,7 +1224,7 @@ defmodule BlockPoker.Tables.TableServer do
   end
 
   defp arm_sit_out(state, seat_number) do
-    schedule(state, {:sit_out, seat_number}, state.room.setting.sit_out_timeout_ms)
+    schedule(state, {:sit_out, seat_number}, sit_out_timeout_ms(state))
   end
 
   # Вернувшийся из паузы игрок мог оказаться вторым за столом — стол,
@@ -1165,7 +1258,7 @@ defmodule BlockPoker.Tables.TableServer do
       |> RoomState.reset_bomb_pot()
       |> RoomState.refill_time_banks(owners_of(hand))
 
-    room = state.game_mode.on_hand_finished(room, hand.results)
+    room = state.room.mode.on_hand_finished(room, hand.results)
     room = %{room | button_seat: next_button(room)}
     room = %{room | big_blind_seat: big_blind_seat_for(room)}
     room = put_rabbit(room, hand, now_ms(state))
@@ -1242,8 +1335,8 @@ defmodule BlockPoker.Tables.TableServer do
 
       if seat != nil and seat.stack == 0 and Seat.occupied?(seat) do
         acc
-        |> put_room(acc.game_mode.on_zero_stack(acc.room, seat))
-        |> schedule({:rebuy, number}, acc.room.setting.rebuy_prompt_ms)
+        |> put_room(acc.room.mode.on_zero_stack(acc.room, seat))
+        |> schedule({:rebuy, number}, acc.room.mode.rebuy_prompt_ms(acc.room))
       else
         acc
       end
@@ -1364,6 +1457,10 @@ defmodule BlockPoker.Tables.TableServer do
 
     state
   end
+
+  # Таймер, которого у режима нет, не заводится вовсе: снимаем возможный
+  # прежний и уходим. Иначе `nil` доехал бы до `Process.send_after/3`.
+  defp schedule(state, key, nil), do: cancel_timer(state, key)
 
   defp schedule(state, key, ms) do
     state = cancel_timer(state, key)

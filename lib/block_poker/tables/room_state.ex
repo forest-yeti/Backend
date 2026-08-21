@@ -15,6 +15,7 @@ defmodule BlockPoker.Tables.RoomState do
   alias BlockPoker.Chat
 
   alias BlockPoker.Engine.{
+    BlindSchedule,
     BombPot,
     Card,
     EntryRules,
@@ -28,6 +29,7 @@ defmodule BlockPoker.Tables.RoomState do
 
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.Reactions
+  alias BlockPoker.SitAndGo.SitAndGoSetting
   alias BlockPoker.Tables.Seat
 
   @type phase :: :idle | :button_draw | :straddle | :hand
@@ -41,9 +43,20 @@ defmodule BlockPoker.Tables.RoomState do
           optional(:role) => Seat.role()
         }
 
+  @typedoc """
+  Шаблон, из которого развёрнута комната. Тип зависит от режима: кэш живёт
+  из `CashGameSetting`, Sit & Go — из `SitAndGoSetting`.
+
+  Комната читает из шаблона только то, что есть у обоих: вместимость, вид
+  игры, тайминги, косметику. Всё, что различается, спрашивается у режима
+  (`GameMode`), а не выбирается ветвлением по типу структуры.
+  """
+  @type setting :: CashGameSetting.t() | SitAndGoSetting.t()
+
   @type t :: %__MODULE__{
           room_id: Ecto.UUID.t(),
-          setting: CashGameSetting.t(),
+          setting: setting(),
+          mode: module(),
           seats: %{pos_integer() => Seat.t()},
           phase: phase(),
           draining?: boolean(),
@@ -67,7 +80,8 @@ defmodule BlockPoker.Tables.RoomState do
           bomb_pot: BombPot.t() | nil,
           bomb_pot_rolled?: boolean(),
           rabbit: rabbit() | nil,
-          reveal: reveal() | nil
+          reveal: reveal() | nil,
+          tournament: tournament() | nil
         }
 
   @typedoc """
@@ -103,6 +117,41 @@ defmodule BlockPoker.Tables.RoomState do
         }
 
   @typedoc """
+  Турнирное состояние комнаты: уровень, приз и порядок вылета.
+
+  Лежит в комнате, а не в процессе стола, по той же причине, что и окно
+  страддла: игрок, подключившийся посреди турнира, обязан увидеть то же,
+  что видят остальные, — какой сейчас уровень, когда он сменится и за
+  какой приз идёт игра.
+
+  `nil` означает «это не турнир». Ветвления по этому полю в комнате нет:
+  читает его только режим (`GameMode.Tournament`), которому оно и
+  принадлежит.
+
+  `standings` — порядок вылета в обратном порядке, первым последний
+  выбывший. Он и есть распределение мест: в Sit & Go место определяется
+  тем, кто вылетел раньше, а победитель дописывается последним.
+  """
+  @type tournament :: %{
+          level: pos_integer(),
+          levels: [BlindSchedule.level()],
+          level_deadline_at: integer() | nil,
+          prize: prize() | nil,
+          standings: [%{seat: pos_integer(), user_id: Ecto.UUID.t(), place: pos_integer()}]
+        }
+
+  @typedoc """
+  Выпавший призовой тир: множитель, фонд в минимальных единицах и доли
+  мест. Тянется один раз до первой раздачи и больше не меняется.
+  """
+  @type prize :: %{
+          multiplier: pos_integer(),
+          label: String.t(),
+          pool: non_neg_integer(),
+          payouts: [pos_integer()]
+        }
+
+  @typedoc """
   Идущий розыгрыш кнопки. Хранится в состоянии, а не только в событии:
   игрок, посаженный через `quick_seat`, подключается к столу уже после
   старта розыгрыша и иначе не увидел бы карт — а смысл процедуры в том,
@@ -121,6 +170,10 @@ defmodule BlockPoker.Tables.RoomState do
     :seats,
     :button_seat,
     :big_blind_seat,
+    # Режим игры: политика между раздачами (`GameMode`). Модуль, а не флаг,
+    # — ветвление по режиму существует ровно в одном месте, при выборе
+    # реализации, и `case` по :cash / :tournament в комнате не появляется.
+    mode: BlockPoker.GameMode.Cash,
     phase: :idle,
     draining?: false,
     game_started?: false,
@@ -167,13 +220,127 @@ defmodule BlockPoker.Tables.RoomState do
     # Кубик на эту раздачу уже брошен. Флаг обязателен: `start_hand`
     # переигрывается (кнопка, ожидающие блайнда, окно страддла), а бросков
     # на раздачу должно быть ровно ноль или один.
-    bomb_pot_rolled?: false
+    bomb_pot_rolled?: false,
+    # Турнирное состояние либо `nil` — см. `t:tournament/0`.
+    tournament: nil
   ]
 
-  @spec new(Ecto.UUID.t(), CashGameSetting.t()) :: t()
-  def new(room_id, %CashGameSetting{} = setting) do
+  @doc """
+  Новая комната из шаблона.
+
+  Режим передаётся модулем и хранится **в комнате**, а не в процессе стола:
+  так у вопроса «кэш это или турнир» остаётся один источник истины, и
+  чистые функции комнаты отвечают на него без обращения к `TableServer`.
+  """
+  @spec new(Ecto.UUID.t(), setting(), module()) :: t()
+  def new(room_id, setting, mode \\ BlockPoker.GameMode.Cash) do
     seats = Map.new(1..setting.max_players, fn number -> {number, Seat.new(number)} end)
-    %__MODULE__{room_id: room_id, setting: setting, seats: seats}
+    %__MODULE__{room_id: room_id, setting: setting, mode: mode, seats: seats}
+  end
+
+  @doc """
+  Заводит турнирное состояние: расписание уровней, первый уровень, пустой
+  список мест.
+
+  Приз здесь не тянется: розыгрыш требует случайности, а комната ею не
+  владеет — её источник принадлежит столу, как и бросок бомб-пота.
+  """
+  @spec start_tournament(t(), [BlindSchedule.level()]) :: t()
+  def start_tournament(%__MODULE__{} = state, levels) do
+    %{
+      state
+      | tournament: %{
+          level: 1,
+          levels: levels,
+          level_deadline_at: nil,
+          prize: nil,
+          standings: []
+        }
+    }
+  end
+
+  @doc "Номиналы текущего уровня. У не-турнира их нет."
+  @spec current_level(t()) :: BlindSchedule.level() | nil
+  def current_level(%__MODULE__{tournament: nil}), do: nil
+
+  def current_level(%__MODULE__{tournament: tournament}),
+    do: BlindSchedule.at(tournament.levels, tournament.level)
+
+  @doc """
+  Поднимает уровень на следующий и назначает дедлайн следующего повышения.
+
+  Повышение применяется **между раздачами**: поднимать номиналы посреди
+  улицы нельзя — это меняет цену уже принятого решения. Следит за этим
+  вызывающий, а не эта функция: она только считает.
+
+  `nil` в дедлайне означает, что расти больше некуда — последний уровень
+  действует до конца турнира, и таймер под него не заводится.
+  """
+  @spec advance_level(t(), integer()) :: t()
+  def advance_level(%__MODULE__{tournament: nil} = state, _now), do: state
+
+  def advance_level(%__MODULE__{tournament: tournament} = state, now) do
+    next = tournament.level + 1
+
+    # Отсчёт нового уровня идёт от дедлайна прошлого, а не от «сейчас»:
+    # раздача могла затянуться, и считать от момента её конца значило бы
+    # дарить турниру лишнее время на каждом повышении. Расписание обязано
+    # держаться реального времени, а не суммы задержек.
+    from = tournament.level_deadline_at || now
+
+    %{
+      state
+      | tournament: %{
+          tournament
+          | level: next,
+            level_deadline_at: level_deadline(tournament.levels, next, from)
+        }
+    }
+  end
+
+  @doc "Назначает дедлайн повышения для текущего уровня — от него турнир и стартует."
+  @spec arm_level(t(), integer()) :: t()
+  def arm_level(%__MODULE__{tournament: nil} = state, _now), do: state
+
+  def arm_level(%__MODULE__{tournament: tournament} = state, now) do
+    deadline = level_deadline(tournament.levels, tournament.level, now)
+
+    %{state | tournament: %{tournament | level_deadline_at: deadline}}
+  end
+
+  @doc "Кладёт выпавший приз. Тянется один раз, до первой раздачи."
+  @spec put_prize(t(), prize()) :: t()
+  def put_prize(%__MODULE__{tournament: nil} = state, _prize), do: state
+
+  def put_prize(%__MODULE__{tournament: tournament} = state, prize),
+    do: %{state | tournament: %{tournament | prize: prize}}
+
+  @doc """
+  Фиксирует вылет: игрок занимает место с указанным номером.
+
+  Номер приходит снаружи, а не считается здесь: вылететь в одной раздаче
+  могут двое сразу, и тогда места между ними делит режим — по стеку на
+  начало раздачи, а не по порядку обхода мест.
+  """
+  @spec eliminate(t(), Seat.t(), pos_integer()) :: t()
+  def eliminate(%__MODULE__{tournament: nil} = state, _seat, _place), do: state
+
+  def eliminate(%__MODULE__{tournament: tournament} = state, %Seat{} = seat, place) do
+    entry = %{seat: seat.number, user_id: seat.user_id, place: place}
+
+    %{state | tournament: %{tournament | standings: [entry | tournament.standings]}}
+  end
+
+  @doc "Сколько игроков ещё в турнире: место занято и стек не нулевой."
+  @spec alive_count(t()) :: non_neg_integer()
+  def alive_count(%__MODULE__{} = state) do
+    state |> players() |> Enum.count(&(&1.stack > 0))
+  end
+
+  defp level_deadline(levels, number, now) do
+    if BlindSchedule.next?(levels, number) do
+      now + BlindSchedule.duration_ms(levels, number)
+    end
   end
 
   @spec seats(t()) :: [Seat.t()]
@@ -194,7 +361,7 @@ defmodule BlockPoker.Tables.RoomState do
   командой `start_game`; дальше раздачи идут обычным порядком.
   """
   @spec auto_start?(t()) :: boolean()
-  def auto_start?(%__MODULE__{setting: setting}), do: setting.auto_start != false
+  def auto_start?(%__MODULE__{mode: mode} = state), do: mode.auto_start?(state)
 
   @doc """
   Ждёт ли стол ручного запуска: игра ещё не начата, а сам он не начнётся.
@@ -911,15 +1078,17 @@ defmodule BlockPoker.Tables.RoomState do
   """
   @spec entry_decision(t(), Seat.t(), entry()) :: EntryRules.decision()
   def entry_decision(state, seat, intent) do
+    policy = state.mode.entry_policy(state)
+
     entry_rules(state).decide(%{
       seat: seat.number,
       intent: intent,
       seats_in_game: state |> players() |> Enum.map(& &1.number),
       button_seat: state.button_seat,
       big_blind_seat: state.big_blind_seat,
-      big_blind: state.setting.big_blind,
+      big_blind: policy.big_blind,
       heads_up?: heads_up?(state),
-      allow_post_blind?: state.setting.allow_post_blind,
+      allow_post_blind?: policy.allow_post_blind?,
       missed_blinds: seat.missed_blinds,
       dodging?: dodging?(state, seat.user_id)
     })
@@ -928,40 +1097,27 @@ defmodule BlockPoker.Tables.RoomState do
   @doc """
   Базовая единица стола: от неё считаются минимальная ставка и категория
   лимита. На блайндовом столе это большой блайнд, на анте-столе — анте.
-  Величину даёт структура ставок, а не комната: выбирать между полями
-  шаблона значило бы ветвиться по правилам игры.
+
+  Величину даёт режим, а не комната: в кэше номиналы неизменны и лежат
+  в шаблоне, в турнире они растут и приходят из текущего уровня структуры.
+  Выбирать между полями шаблона прямо здесь значило бы ветвиться по
+  правилам игры.
   """
   @spec bet_unit(t()) :: non_neg_integer()
-  def bet_unit(%__MODULE__{setting: setting}), do: CashGameSetting.bet_unit(setting)
+  def bet_unit(%__MODULE__{mode: mode} = state), do: mode.bet_unit(state)
 
   @doc """
-  Границы бай-ина в фишках с учётом уже лежащего перед игроком стека.
+  Допустима ли такая сумма фишек на столе с учётом уже лежащего перед
+  игроком стека.
 
-  Проверяется **итоговый стек**, а не сумма докупки: снизу он не может
-  оказаться меньше `min_buy_in`, сверху — больше `max_buy_in`.
-
-  Нижняя граница считается именно так, а не «только при нулевом стеке»,
-  из-за дырки, которую это оставляло: проигравший почти всё оставался
-  с парой фишек — то есть формально не с нулём — и докупал один большой
-  блайнд, садясь играть на 1.5bb за столом с минимумом в 40bb. Играть
-  коротким стеком, который остался от проигранной раздачи, правила
-  разрешают; **докупать** себе такой стек — нет.
-
-  Дошедшего до минимума правило не касается: его итоговый стек и так выше
-  нижней границы, поэтому докупить он может любую сумму.
+  Границы задаёт режим, а не комната: в кэше это `min_buy_in` / `max_buy_in`
+  шаблона, в турнире — стартовый стек и ничто другое. Почему проверяется
+  итоговый стек, а не сумма операции, объяснено там же, в реализациях.
   """
   @spec validate_buy_in(t(), non_neg_integer(), non_neg_integer()) ::
           :ok | {:error, :invalid_buy_in}
   def validate_buy_in(state, amount, current_stack \\ 0) do
-    min = CashGameSetting.min_buy_in_chips(state.setting)
-    max = CashGameSetting.max_buy_in_chips(state.setting)
-
-    cond do
-      not (is_integer(amount) and amount > 0) -> {:error, :invalid_buy_in}
-      current_stack + amount < min -> {:error, :invalid_buy_in}
-      max != nil and current_stack + amount > max -> {:error, :invalid_buy_in}
-      true -> :ok
-    end
+    state.mode.validate_buy_in(state, amount, current_stack)
   end
 
   @doc """
@@ -1253,8 +1409,11 @@ defmodule BlockPoker.Tables.RoomState do
 
   defp dodging?(state, user_id) do
     case Map.fetch(state.recent_leavers, user_id) do
-      {:ok, hands} -> state.hands_played - hands < state.setting.blind_dodge_window_hands
-      :error -> false
+      {:ok, hands} ->
+        state.hands_played - hands < state.mode.entry_policy(state).dodge_window_hands
+
+      :error ->
+        false
     end
   end
 

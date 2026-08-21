@@ -44,6 +44,55 @@ defmodule BlockPoker.GameMode.Cash do
   def can_leave?(%RoomState{} = state, %Seat{} = seat),
     do: not RoomState.in_hand?(state, seat.number)
 
+  @doc "Кэшу заводить нечего: комната из шаблона уже готова к игре."
+  @impl true
+  def init_room(%RoomState{} = state), do: state
+
+  @doc "Призового фонда в кэше нет: игрок забирает выигранное со стола."
+  @impl true
+  def prize_table(%RoomState{}), do: nil
+
+  @doc """
+  Границы бай-ина шаблона.
+
+  Проверяется итоговый стек, а не сумма докупки: иначе проигравший почти
+  всё оставался бы с парой фишек — формально не с нулём — и докупал один
+  большой блайнд, садясь играть на 1.5bb за столом с минимумом в 40bb.
+  """
+  @impl true
+  def validate_buy_in(%RoomState{setting: setting}, amount, current_stack) do
+    min = CashGameSetting.min_buy_in_chips(setting)
+    max = CashGameSetting.max_buy_in_chips(setting)
+
+    cond do
+      not (is_integer(amount) and amount > 0) -> {:error, :invalid_buy_in}
+      current_stack + amount < min -> {:error, :invalid_buy_in}
+      max != nil and current_stack + amount > max -> {:error, :invalid_buy_in}
+      true -> :ok
+    end
+  end
+
+  @impl true
+  def entry_policy(%RoomState{setting: setting}) do
+    %{
+      big_blind: setting.big_blind,
+      allow_post_blind?: setting.allow_post_blind,
+      dodge_window_hands: setting.blind_dodge_window_hands
+    }
+  end
+
+  @impl true
+  def bet_unit(%RoomState{setting: setting}), do: CashGameSetting.bet_unit(setting)
+
+  @impl true
+  def auto_start?(%RoomState{setting: setting}), do: setting.auto_start != false
+
+  @impl true
+  def sit_out_timeout_ms(%RoomState{setting: setting}), do: setting.sit_out_timeout_ms
+
+  @impl true
+  def rebuy_prompt_ms(%RoomState{setting: setting}), do: setting.rebuy_prompt_ms
+
   @impl true
   def run_it_twice?(%RoomState{setting: setting}), do: setting.allowed_run_it_twice
 

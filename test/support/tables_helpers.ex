@@ -68,6 +68,34 @@ defmodule BlockPoker.TablesHelpers do
   end
 
   @doc """
+  Турнирный стол: тот же `TableServer`, но с режимом Sit & Go и шаблоном
+  турнира. Шаблон собирается в памяти вместе с уровнями и тирами — БД
+  тестам уровня 2 не нужна.
+  """
+  def start_tournament_room!(overrides \\ %{}, opts \\ []) do
+    setting = BlockPoker.SitAndGoFixtures.build_setting(overrides)
+    room_id = Ecto.UUID.generate()
+
+    {:ok, pid} =
+      start_supervised(
+        {TableServer,
+         Keyword.merge(
+           [
+             room_id: room_id,
+             setting: setting,
+             game_mode: BlockPoker.GameMode.Tournament,
+             timers: :manual,
+             rng: Rng.seeded(Keyword.get(opts, :seed, "test"))
+           ],
+           Keyword.drop(opts, [:seed])
+         )},
+        id: room_id
+      )
+
+    %{pid: pid, room_id: room_id, setting: setting}
+  end
+
+  @doc """
   Посадка без похода в кошелёк: тесты уровня 2 проверяют комнату, а не
   деньги. Деньги проверяются на уровне 3, где есть настоящая БД.
   """
