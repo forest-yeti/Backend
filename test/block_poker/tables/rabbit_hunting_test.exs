@@ -100,7 +100,8 @@ defmodule BlockPoker.Tables.RabbitHuntingTest do
       %{pid: pid, advance: advance} = table()
       fold_hand(pid)
 
-      advance.(2_500)
+      # Ровно @next_hand_ms из TableServer.
+      advance.(5_000)
 
       assert {:error, :rabbit_unavailable} = TableServer.rabbit_hunt(pid, "user-1")
     end
