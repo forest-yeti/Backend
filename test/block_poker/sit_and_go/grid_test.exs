@@ -79,6 +79,94 @@ defmodule BlockPoker.SitAndGo.GridTest do
     end
   end
 
+  describe "потолок выплаты" do
+    test "ни один стол сетки не может выплатить больше потолка" do
+      for row <- Grid.expand(), tier <- row.tiers do
+        prize = PrizePool.prize_pool(row.attrs.buy_in, tier.multiplier)
+
+        assert prize <= Grid.max_prize(),
+               "#{row.attrs.name}: #{PrizePool.multiplier_label(tier.multiplier)} даёт #{prize}"
+      end
+    end
+
+    test "обрезка сохраняет возврат ровно, а не примерно" do
+      # Главное свойство: RTP сходится по построению для каждой пары
+      # «рассадка × взнос», а не подобран для одной таблицы.
+      for row <- Grid.expand() do
+        assert PrizePool.valid_chances?(row.tiers)
+
+        assert PrizePool.expected_return_ppm(row.tiers, row.attrs.max_players) ==
+                 Grid.target_return_ppm(),
+               "экономика разъехалась: #{row.attrs.name}"
+      end
+    end
+
+    test "микролимиты не задеты: там джекпот и так мал" do
+      # x10000 при взносе $0.25 — это $2500, обрезать нечего.
+      assert Grid.prize_tiers(3, 25) == Grid.prize_tiers(3)
+      assert Grid.prize_tiers(3, 100) == Grid.prize_tiers(3)
+    end
+
+    test "на высоких лимитах хвост отрезан" do
+      top = fn buy_in -> 3 |> Grid.prize_tiers(buy_in) |> Enum.max_by(& &1.multiplier) end
+
+      assert top.(1_000).multiplier == 100_000
+      assert top.(10_000).multiplier == 10_000
+    end
+
+    test "шансы отрезанных тиров переезжают в верхний выживший" do
+      base = Grid.prize_tiers(3)
+      capped = Grid.prize_tiers(3, 10_000)
+
+      dropped =
+        base
+        |> Enum.filter(&(&1.multiplier > 10_000))
+        |> Enum.reduce(0, &(&1.chance_ppm + &2))
+
+      был = Enum.find(base, &(&1.multiplier == 10_000)).chance_ppm
+      стал = Enum.find(capped, &(&1.multiplier == 10_000)).chance_ppm
+
+      # Редкое событие остаётся таким же редким, меняется только его размер.
+      assert стал == был + dropped
+    end
+
+    test "предельный множитель выводится из потолка, а не задан списком" do
+      assert Grid.max_multiplier(10_000) == 10_000
+      assert Grid.max_multiplier(1_000) == 100_000
+      assert Grid.max_multiplier(100) == 1_000_000
+    end
+  end
+
+  describe "тестовый стол" do
+    test "живёт только на игровых фишках" do
+      # Возврат здесь в сотни раз выше собранного: на реальных деньгах
+      # это была бы раздача денег.
+      assert Grid.test_row().attrs.currency == :play_money
+    end
+
+    test "джекпот выпадает часто — иначе путь не проверить" do
+      tiers = Grid.test_row().tiers
+      jackpot = Enum.max_by(tiers, & &1.multiplier)
+
+      assert jackpot.multiplier == 1_000_000
+      assert jackpot.chance_ppm >= 100_000
+    end
+
+    test "шансы сходятся: сломан возврат, а не таблица" do
+      assert PrizePool.valid_chances?(Grid.test_row().tiers)
+    end
+
+    test "в боевую сетку не входит и под проверку экономики не попадает" do
+      names = Grid.expand() |> Enum.map(& &1.attrs.name)
+
+      refute Grid.test_row().attrs.name in names
+    end
+
+    test "имя помечено как тестовое" do
+      assert String.starts_with?(Grid.test_row().attrs.name, "ТЕСТ")
+    end
+  end
+
   describe "структуры уровней" do
     test "холдем играется на блайндах" do
       levels = Grid.blind_levels(:texas_holdem)
@@ -136,7 +224,10 @@ defmodule BlockPoker.SitAndGo.GridTest do
       for row <- Grid.expand() do
         assert row.levels != []
         assert PrizePool.valid_chances?(row.tiers)
-        assert length(row.tiers) == 8
+
+        # Тиров восемь у нетронутых таблиц и меньше у обрезанных: на $100
+        # верхних двух не существует.
+        assert length(row.tiers) in 6..8
       end
     end
 

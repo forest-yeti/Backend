@@ -5,16 +5,24 @@ defmodule Mix.Tasks.SitNGo.Seed do
   Первичное наполнение `sit_n_go_settings` вместе со структурами уровней
   и таблицами призов из `BlockPoker.SitAndGo.Grid`.
 
-      mix sit_n_go.seed                        # вся сетка: 32 шаблона
+      mix sit_n_go.seed                        # вся сетка плюс тестовый стол
       mix sit_n_go.seed --currency play_money
       mix sit_n_go.seed --game-type short_deck
       mix sit_n_go.seed --max-players 3
+      mix sit_n_go.seed --no-test              # без тестового стола
       mix sit_n_go.seed --dry-run              # показать, что будет создано
+      mix sit_n_go.seed --retier               # перезалить таблицы призов
 
   Задача идемпотентна: шаблон с тем же естественным ключом
   (`game_type + currency + buy_in + max_players`) пропускается. Перезаписи
   нет намеренно — в отличие от кэша, правка шаблона тянет за собой уровни
   и тиры, и молча заменять их набор опаснее, чем ничего не делать.
+
+  `--retier` — единственное исключение, и оно узкое: перезаливаются
+  **только таблицы призов** уже заведённых шаблонов. Нужен, когда
+  поменялось правило их расчёта (например, появился потолок выплаты):
+  обычный прогон такие строки пропустит, потому что шаблоны уже есть.
+  Уровни, тайминги и косметику `--retier` не трогает.
 
   Приложение о правке строк не узнаёт само: после сида на живой ноде нужен
   перечит пула турниров.
@@ -30,7 +38,9 @@ defmodule Mix.Tasks.SitNGo.Seed do
     currency: :string,
     game_type: :string,
     max_players: :integer,
-    dry_run: :boolean
+    dry_run: :boolean,
+    retier: :boolean,
+    test: :boolean
   ]
 
   @impl Mix.Task
@@ -42,9 +52,20 @@ defmodule Mix.Tasks.SitNGo.Seed do
         currency: currency(opts[:currency]),
         game_type: game_type(opts[:game_type]),
         max_players: opts[:max_players]
-      )
+      ) ++ test_rows(opts)
 
-    if opts[:dry_run], do: report_dry_run(rows), else: rows |> Grid.seed() |> report()
+    cond do
+      opts[:dry_run] -> report_dry_run(rows)
+      opts[:retier] -> rows |> Grid.retier() |> report_retier()
+      true -> rows |> Grid.seed() |> report()
+    end
+  end
+
+  # Тестовый стол идёт в сид по умолчанию: без него джекпотный путь
+  # проверить нечем. `--no-test` убирает его там, где витрина должна
+  # содержать только боевые лимиты.
+  defp test_rows(opts) do
+    if Keyword.get(opts, :test, true), do: [Grid.test_row()], else: []
   end
 
   defp currency(nil), do: nil
@@ -72,6 +93,20 @@ defmodule Mix.Tasks.SitNGo.Seed do
     end)
 
     Mix.shell().info("\nвсего шаблонов: #{length(rows)}")
+  end
+
+  defp report_retier(%{updated: updated, missing: missing, failed: failed}) do
+    Enum.each(updated, &Mix.shell().info("таблица призов обновлена: #{&1}"))
+    Enum.each(missing, &Mix.shell().info("шаблона нет, пропущен: #{&1}"))
+
+    Enum.each(failed, fn {name, reason} ->
+      Mix.shell().error("не обновлён: #{name} — #{inspect(reason)}")
+    end)
+
+    Mix.shell().info("
+обновлено #{length(updated)}, пропущено #{length(missing)}, ошибок #{length(failed)}")
+
+    if failed != [], do: exit({:shutdown, 1})
   end
 
   defp report(%{created: created, skipped: skipped, failed: failed}) do

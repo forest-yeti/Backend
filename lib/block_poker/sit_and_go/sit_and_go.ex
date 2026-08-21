@@ -98,6 +98,35 @@ defmodule BlockPoker.SitAndGo do
   end
 
   @doc """
+  Заменяет таблицу призов шаблона целиком.
+
+  Нужна тогда, когда правило расчёта таблицы поменялось, а шаблоны уже
+  заведены: правка весов по одному оставила бы промежуточные состояния,
+  в которых шансы не сходятся в полную шкалу.
+
+  Замена идёт одной транзакцией и **проверяется до коммита**: набор,
+  не прошедший `audit_tiers/2`, откатывается целиком. Испорченная таблица
+  призов — это турнир, который нечем закончить.
+  """
+  @spec replace_prize_tiers(SitAndGoSetting.t(), [map()]) ::
+          {:ok, SitAndGoSetting.t()} | {:error, atom() | Ecto.Changeset.t()}
+  def replace_prize_tiers(%SitAndGoSetting{} = setting, tiers) do
+    Multi.new()
+    |> Multi.delete_all(:cleared, where(PrizeTier, sit_n_go_setting_id: ^setting.id))
+    |> Multi.run(:tiers, fn repo, _changes ->
+      insert_all(repo, setting, tiers, &PrizeTier.changeset(%PrizeTier{}, &1))
+    end)
+    |> Multi.run(:audit, fn _repo, %{tiers: inserted} ->
+      audit_tiers(setting, Enum.map(inserted, &PrizeTier.to_tier/1))
+    end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, _changes} -> get_setting(setting.id)
+      {:error, _step, reason, _changes} -> {:error, reason}
+    end
+  end
+
+  @doc """
   Проверка шаблона целиком — то, что нельзя выразить ни одной строкой.
 
   Три свойства:
