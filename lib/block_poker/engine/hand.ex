@@ -1115,7 +1115,11 @@ defmodule BlockPoker.Engine.Hand do
       %{
         seat: player.seat,
         cards: Enum.map(player.hole, &Card.to_map/1),
-        category: rank && rank.category
+        category: rank && rank.category,
+        # Те пять карт, из которых комбинация и собралась. Клиент по ним
+        # подсвечивает борд: «выиграл вот этим», а не «выиграл почему-то».
+        # Считаются по сыгранному борду — при двух прогонах по первому.
+        combo: rank && Enum.map(rank.cards, &Card.to_map/1)
       }
     end)
   end

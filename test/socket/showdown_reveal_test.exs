@@ -112,6 +112,10 @@ defmodule Socket.Channels.ShowdownRevealTest do
     assert Enum.all?(finished.shown, &(length(&1.cards) == 2))
     assert Enum.all?(finished.shown, &(&1.category != nil))
 
+    # Карты самой комбинации: по ним клиент подсвечивает борд, поэтому их
+    # ровно пять и они настоящие карты, а не структуры `HandRank`.
+    assert Enum.all?(finished.shown, &(length(&1.combo) == 5))
+
     # Забравший банк — всегда среди открывшихся: выиграть, не показав руку,
     # на вскрытии нельзя.
     winners = finished.runs |> Enum.flat_map(& &1.pots) |> Enum.flat_map(& &1.winners)
