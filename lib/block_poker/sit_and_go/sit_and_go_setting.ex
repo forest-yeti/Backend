@@ -74,8 +74,11 @@ defmodule BlockPoker.SitAndGo.SitAndGoSetting do
     field :button_draw_animation_ms, :integer, default: 3_000
     field :prize_reveal_ms, :integer, default: 5_000
 
-    field :felt_color, :string, default: "#1F6F4A"
-    field :background_color, :string, default: "#10241C"
+    # Золотой антураж — признак режима, а не украшение строки: кэш зелёный,
+    # Sit & Go золотой, и стол опознаётся с одного взгляда. Золото
+    # приглушённое: на ярком фоне белые карты и светлые фишки теряются.
+    field :felt_color, :string, default: "#9A7A2E"
+    field :background_color, :string, default: "#151006"
 
     field :enabled, :boolean, default: true
     field :sort_order, :integer, default: 0

@@ -85,10 +85,10 @@ defmodule Socket.Channels.SitAndGoChannelTest do
       assert hd(row.blind_levels).big_blind == 0
     end
 
-    test "витрина отдаёт цвета стола" do
+    test "витрина отдаёт золотые цвета стола: по ним режим опознаётся" do
       %{snapshot: snapshot} = join_channel()
 
-      assert %{felt_color: "#1F6F4A", background_color: "#10241C"} =
+      assert %{felt_color: "#9A7A2E", background_color: "#151006"} =
                hd(snapshot.tournaments).visuals
     end
 
