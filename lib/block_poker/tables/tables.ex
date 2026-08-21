@@ -117,6 +117,18 @@ defmodule BlockPoker.Tables do
   end
 
   @doc """
+  Разбор руки игрока для окна-калькулятора: что играет и какие есть доезды.
+
+  Отдельный вызов, а не только поле снапшота: окно открывается по кнопке
+  и обновляется по улицам, и тянуть ради него весь стол незачем.
+  """
+  @spec hand_insight(Ecto.UUID.t(), Ecto.UUID.t()) ::
+          {:ok, BlockPoker.Engine.HandInsight.t() | nil} | {:error, :not_found}
+  def hand_insight(room_id, user_id) do
+    with {:ok, room} <- room_state(room_id), do: {:ok, RoomState.insight(room, user_id)}
+  end
+
+  @doc """
   Посадка на конкретное место конкретной комнаты — путь «игрок открыл стол
   из лобби и выбрал место мышью».
 

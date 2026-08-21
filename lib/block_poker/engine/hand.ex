@@ -18,6 +18,7 @@ defmodule BlockPoker.Engine.Hand do
     BombPot,
     Card,
     Deck,
+    HandInsight,
     Equity,
     HandRank,
     HandSetup,
@@ -283,6 +284,21 @@ defmodule BlockPoker.Engine.Hand do
   def combination(%__MODULE__{} = hand, seat) do
     case Map.get(hand.players, seat) do
       %{hole: hole} when hole != [] -> Showdown.evaluate(hole, hand.board, hand.context)
+      _other -> nil
+    end
+  end
+
+  @doc """
+  Разбор своей руки для окна-калькулятора: что играет и какие есть доезды.
+
+  Отдельно от `combination/2` сознательно: подпись под столом и окно
+  подсказок живут разными жизнями, и первое не должно меняться каждый раз,
+  когда во втором добавилась строчка.
+  """
+  @spec insight(t(), pos_integer()) :: HandInsight.t() | nil
+  def insight(%__MODULE__{} = hand, seat) do
+    case Map.get(hand.players, seat) do
+      %{hole: hole} when hole != [] -> HandInsight.analyze(hole, hand.board, hand.context)
       _other -> nil
     end
   end

@@ -16,6 +16,7 @@ defmodule Socket.Views.TableView do
   alias BlockPoker.CashGames.CashGameSetting
   alias BlockPoker.Engine.Card
   alias BlockPoker.Engine.Hand
+  alias BlockPoker.Engine.HandInsight
   alias BlockPoker.Engine.Stats
   alias BlockPoker.Engine.Straddle
   alias BlockPoker.Tables.{RoomState, Seat}
@@ -246,10 +247,32 @@ defmodule Socket.Views.TableView do
         %{
           hole_cards: Enum.map(player.hole, &Card.to_map/1),
           combination: combination(hand, seat),
+          # Окно-калькулятор: что играет и какие есть доезды. Приходит и
+          # снапшотом, чтобы открытое окно не ждало отдельного запроса.
+          insight: insight(Hand.insight(hand, seat)),
           in_hand: player.status != :folded,
           legal_actions: Hand.legal_actions(hand, seat)
         }
     end
+  end
+
+  @doc """
+  Разбор руки в JSON. Ничего не вычисляет: категория, играющие карты и
+  число аутов приходят из `Engine.HandInsight` уже посчитанными.
+  """
+  @spec insight(HandInsight.t() | nil) :: map() | nil
+  def insight(nil), do: nil
+
+  def insight(%HandInsight{} = insight) do
+    %{
+      category: insight.category,
+      complete: insight.complete,
+      cards: Enum.map(insight.cards, &Card.to_map/1),
+      draws:
+        Enum.map(insight.draws, fn draw ->
+          %{type: draw.type, outs: draw.outs, cards: Enum.map(draw.cards, &Card.to_map/1)}
+        end)
+    }
   end
 
   # Комбинация появляется с флопа: раньше пяти карт просто не набирается.

@@ -120,6 +120,15 @@ defmodule Socket.Channels.TableChannel do
     |> Message.reply(socket)
   end
 
+  # Окно-калькулятор: разбор своей руки по запросу. Канал ничего не считает —
+  # берёт готовый разбор у контекста и сериализует.
+  def handle_in("hand_insight", _payload, socket) do
+    case Tables.hand_insight(socket.assigns.room_id, socket.assigns.user_id) do
+      {:ok, insight} -> {:reply, {:ok, %{insight: TableView.insight(insight)}}, socket}
+      {:error, code} -> Message.error_reply(code, socket)
+    end
+  end
+
   def handle_in("rabbit_hunt", _payload, socket) do
     socket.assigns.room_id
     |> Tables.rabbit_hunt(socket.assigns.user_id)

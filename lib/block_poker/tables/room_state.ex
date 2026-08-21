@@ -13,7 +13,19 @@ defmodule BlockPoker.Tables.RoomState do
 
   alias BlockPoker.CashGames.CashGameSetting
   alias BlockPoker.Chat
-  alias BlockPoker.Engine.{BombPot, Card, EntryRules, Hand, Preselect, Straddle, Stats, TimeBank}
+
+  alias BlockPoker.Engine.{
+    BombPot,
+    Card,
+    EntryRules,
+    Hand,
+    HandInsight,
+    Preselect,
+    Straddle,
+    Stats,
+    TimeBank
+  }
+
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.Reactions
   alias BlockPoker.Tables.Seat
@@ -636,6 +648,23 @@ defmodule BlockPoker.Tables.RoomState do
 
       {:error, _reason} ->
         []
+    end
+  end
+
+  @doc """
+  Разбор своей руки для окна-калькулятора. `nil` — раздачи нет, игрок не
+  сидит за столом или карт у него в этой раздаче не было.
+
+  Считается по картам самого игрока: наблюдателю и чужому месту здесь
+  взяться неоткуда, как и в `hole_cards`.
+  """
+  @spec insight(t(), Ecto.UUID.t()) :: HandInsight.t() | nil
+  def insight(%__MODULE__{hand: nil}, _user_id), do: nil
+
+  def insight(%__MODULE__{hand: hand} = state, user_id) do
+    case find_seat(state, user_id) do
+      nil -> nil
+      seat -> Hand.insight(hand, seat.number)
     end
   end
 
