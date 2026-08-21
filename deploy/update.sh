@@ -181,32 +181,46 @@ PHX_HOST="$(sed -n 's/^PHX_HOST=//p' "$ENV_FILE")"
 
 [[ -n "$DB_URL" ]] || die "в $ENV_FILE нет DATABASE_URL"
 
-# Переменные перечисляются поимённо, а не подставляются файлом целиком:
-# в нём лежит PHX_SERVER=true, а `eval` не должен поднимать эндпоинт —
-# иначе миграция открыла бы порт и подралась бы за него с сервисом.
-release_eval() {
+# Миграции и сид идут через `mix`, а не через `bin/block_poker eval`.
+#
+# `eval` — штатный путь для «тонкого» релиза, приехавшего на машину без
+# исходников. Здесь не тот случай: релиз собирается тут же из исходников,
+# значит Elixir и `_build/prod` никуда не делись, и звать их напрямую
+# не хуже.
+#
+# А главное — `eval` на этой конфигурации падает при завершении ноды:
+# `Kernel pid terminated (logger)` с уже мёртвым `code_server`. Падает и
+# тогда, когда делать нечего и миграций нет. Настоящая ошибка при этом
+# не печатается: нода уже гасла, и логгер умирал, пытаясь о ней сообщить.
+# Держать в деплое путь, который молча съедает диагностику, нельзя.
+#
+# PHX_SERVER не передаётся намеренно: `mix ecto.migrate` эндпоинт не
+# поднимает, и открывать порт посреди деплоя ему незачем.
+run_mix() {
   sudo -u "$APP_USER" env \
+    MIX_ENV=prod \
     HOME="$BASE_DIR" \
     LANG=C.UTF-8 \
+    PATH="/opt/elixir/bin:/usr/local/bin:/usr/bin:/bin" \
     DATABASE_URL="$DB_URL" \
     SECRET_KEY_BASE="$SECRET_KEY_BASE" \
     PHX_HOST="$PHX_HOST" \
     POOL_SIZE=2 \
-    "$REL_DIR/bin/block_poker" eval "$1"
+    bash -c "cd '$SRC_DIR' && mix $1"
 }
 
 log "Накатываю миграции"
-release_eval "BlockPoker.Release.migrate()"
+run_mix "ecto.migrate"
 
 if [[ "$DO_SEED" -eq 1 ]]; then
   log "Сею сетки (идемпотентно: существующие шаблоны не трогаются)"
-  release_eval "BlockPoker.Release.seed_cash_games()"
-  release_eval "BlockPoker.Release.seed_sit_n_go()"
+  run_mix "cash_game.seed"
+  run_mix "sit_n_go.seed"
 fi
 
 if [[ "$DO_RETIER" -eq 1 ]]; then
   log "Перезаливаю таблицы призов Sit & Go"
-  release_eval "BlockPoker.Release.retier_sit_n_go()"
+  run_mix "sit_n_go.seed --retier"
 fi
 
 log "Запускаю $SERVICE"

@@ -407,26 +407,34 @@ sudo -u "$APP_USER" env \
 # 9. Миграции и сид
 # --------------------------------------------------------------------------
 
-# PHX_SERVER намеренно не передаётся: `eval` не должен поднимать эндпоинт.
-release_eval() {
+# Через `mix`, а не `bin/block_poker eval`: релиз собирается тут же из
+# исходников, поэтому Elixir и `_build/prod` на машине есть, а `eval` на
+# этой конфигурации падает при завершении ноды, съедая настоящую ошибку
+# (подробности — в шапке `deploy/update.sh`).
+#
+# PHX_SERVER не передаётся намеренно: поднимать эндпоинт посреди деплоя
+# незачем.
+run_mix() {
   sudo -u "$APP_USER" env \
+    MIX_ENV=prod \
     HOME="$BASE_DIR" \
     LANG=C.UTF-8 \
+    PATH="/opt/elixir/bin:/usr/local/bin:/usr/bin:/bin" \
     DATABASE_URL="ecto://${DB_USER}:${DB_PASS}@127.0.0.1/${DB_NAME}" \
     SECRET_KEY_BASE="$SECRET_KEY_BASE" \
     PHX_HOST="$DOMAIN" \
     POOL_SIZE=2 \
-    "$REL_DIR/bin/block_poker" eval "$1"
+    bash -c "cd '$SRC_DIR' && mix $1"
 }
 
 log "Накатываю миграции"
-release_eval "BlockPoker.Release.migrate()"
+run_mix "ecto.migrate"
 
 log "Засеваю сетку лимитов кэш-игры (идемпотентно)"
-release_eval "BlockPoker.Release.seed_cash_games()"
+run_mix "cash_game.seed"
 
 log "Засеваю сетку гипер-турниров Sit & Go (идемпотентно)"
-release_eval "BlockPoker.Release.seed_sit_n_go()"
+run_mix "sit_n_go.seed"
 
 # --------------------------------------------------------------------------
 # 10. systemd

@@ -162,8 +162,8 @@ sudo -E env ALLOW_PLAIN_HTTP=1 bash deploy/ubuntu.sh
    `PHX_HOST`, `PORT`. Ровно те переменные, которые читает `config/runtime.exs`.
 8. **Сборка релиза** под пользователем `blockpoker` в `/opt/block_poker/current`.
 9. **Миграции** — `BlockPoker.Release.migrate()`.
-10. **Сид сеток** — `seed_cash_games()` и `seed_sit_n_go()`. Без них таблицы
-    шаблонов пустые, а значит пустые и обе витрины: лимиты кэша и турниры.
+10. **Сид сеток** — `mix cash_game.seed` и `mix sit_n_go.seed`. Без них
+    таблицы шаблонов пустые, а значит пустые и обе витрины.
 11. **systemd-юнит `block-poker`** с `LimitNOFILE=65536` и `TimeoutStopSec=30`.
 12. **nginx** — `map $http_upgrade`, `proxy_read_timeout 3600s` на `/socket/`,
     `X-Forwarded-Proto` везде.
@@ -272,8 +272,8 @@ BlockPoker.Tables.SitAndGoLobby.reload()
 PM 200» и то же на троих. Они только на игровых фишках и стоят в конце
 витрины, но на боевой ноде их обычно убирают:
 
-```elixir
-BlockPoker.Release.seed_sit_n_go(test: false)   # не создавать при сиде
+```bash
+mix sit_n_go.seed --no-test    # не создавать при сиде
 ```
 
 Уже созданные удаляются из БД: `DELETE FROM sit_n_go_settings WHERE name LIKE
@@ -365,6 +365,35 @@ sudo bash ~/block-poker-src/deploy/update.sh
 зависимости и NIF уже собраны под эту машину. `git` в этом режиме не
 участвует вовсе.
 
+### Про миграции и сид
+
+Оба скрипта делают их через **`mix`**, а не через `bin/block_poker eval`.
+
+`eval` — штатный путь для «тонкого» релиза, приехавшего на машину без
+исходников. Здесь не тот случай: релиз собирается на этом же сервере, значит
+Elixir и `_build/prod` никуда не делись.
+
+А главное — `eval` на этой конфигурации **падает при завершении ноды**:
+
+```
+Kernel pid terminated (logger) ({badarg,[{persistent_term,get,[code_server],...
+```
+
+Падает и тогда, когда делать нечего и миграций нет. Настоящая ошибка при этом
+не печатается: нода уже гасла, и логгер умирал, пытаясь о ней сообщить, —
+видно только вторичную панику. Путь, который молча съедает диагностику,
+в деплое держать нельзя.
+
+Функции `BlockPoker.Release.*` из кода не убраны: они пригодятся, если релиз
+когда-нибудь поедет на машину без исходников. Но скрипты их не зовут.
+
+Если понадобится руками:
+
+```bash
+cd /opt/block_poker/src
+sudo -u blockpoker env MIX_ENV=prod HOME=/opt/block_poker   PATH=/opt/elixir/bin:/usr/local/bin:/usr/bin:/bin   $(grep -E '^(DATABASE_URL|SECRET_KEY_BASE|PHX_HOST)=' /etc/block_poker.env | xargs)   mix ecto.migrate
+```
+
 ### Когда всё-таки нужен `ubuntu.sh`
 
 `update.sh` намеренно отказывается работать на машине, где ноды ещё нет, и не
@@ -393,8 +422,9 @@ sudo -E env REPO_URL=<адрес> REPO_REF=master bash deploy/ubuntu.sh
 | `Не скачался ... elixir-otp-24.zip` | встал OTP 24 из репозитория Ubuntu 22.04 | Обновите скрипт: он теперь проверяет версию и при необходимости собирает OTP 27 из исходников |
 | `Сборка OTP не удалась` | не хватило памяти на компиляции Erlang | Добавить swap (см. строку ниже) и запустить заново |
 | Сокет рвётся примерно раз в минуту | правился конфиг nginx и потерялись таймауты | Вернуть `proxy_read_timeout 3600s` в `location /socket/` |
-| Лобби кэша пустое | не прошёл сид | `sudo -u blockpoker /opt/block_poker/current/bin/block_poker eval "BlockPoker.Release.seed_cash_games()"` |
-| Витрина Sit & Go пустая | не прошёл сид турниров | тот же вызов с `BlockPoker.Release.seed_sit_n_go()` |
+| Лобби кэша пустое | не прошёл сид | `sudo bash deploy/update.sh --no-pull` (он и мигрирует, и сеет) |
+| Витрина Sit & Go пустая | не прошёл сид турниров | то же самое |
+| `Kernel pid terminated (logger)` при `bin/block_poker eval` | известное поведение `eval` на этой конфигурации | не пользуйтесь `eval`, см. «Про миграции и сид» ниже |
 | Множители призов не те, что в коде | правило расчёта поменялось, а шаблоны уже были | `sudo bash deploy/update.sh --retier` |
 | `update.sh` ругается «сначала разверните ноду» | ноды на машине нет | это первая установка: `bash deploy/ubuntu.sh` |
 | Клиент не подключается, в логе отказ на handshake | несовпадение версии протокола или просроченный токен | Сверить `vsn`, получить свежий токен через `/api/auth/login` |
