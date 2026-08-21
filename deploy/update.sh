@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+#
+# Block Poker — обновление уже развёрнутой ноды.
+#
+# Отличие от `ubuntu.sh` не в том, что здесь «меньше шагов», а в том, что
+# здесь нет ни одного шага, меняющего окружение. Erlang, Elixir, MySQL,
+# systemd, nginx, файрвол и сертификат не трогаются вовсе: обновление —
+# это новый код поверх той же машины, и всё, что к коду не относится,
+# трогать незачем. Отсюда и время: минуты вместо десятков минут.
+#
+# Порядок выбран так, чтобы простой был как можно короче. Компиляция —
+# самая долгая часть — идёт **на живом сервисе**: она пишет в `_build`,
+# которого работающий релиз не касается. Останавливаемся только на сборку
+# самого релиза, миграции и старт.
+#
+# Запуск (от root, из каталога исходников):
+#
+#     sudo bash deploy/update.sh                 # код + миграции + сид
+#     sudo bash deploy/update.sh --no-seed       # только код и миграции
+#     sudo bash deploy/update.sh --retier        # плюс перезалив таблиц призов
+#     sudo bash deploy/update.sh --pull          # сначала git pull
+#
+# Переменные окружения:
+#   APP_USER    системный пользователь (по умолчанию blockpoker)
+#   BASE_DIR    корень установки (по умолчанию /opt/block_poker)
+#   REPO_REF    ветка для --pull (по умолчанию текущая)
+
+set -Eeuo pipefail
+
+APP_USER="${APP_USER:-blockpoker}"
+BASE_DIR="${BASE_DIR:-/opt/block_poker}"
+SRC_DIR="$BASE_DIR/src"
+REL_DIR="$BASE_DIR/current"
+ENV_FILE="/etc/block_poker.env"
+SERVICE="block-poker"
+
+DO_SEED=1
+DO_RETIER=0
+DO_PULL=0
+
+log()  { printf '\n\033[1;32m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
+
+trap 'die "Прервано на строке $LINENO. Сервис мог остаться остановленным: systemctl status '"$SERVICE"'"' ERR
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-seed) DO_SEED=0 ;;
+    --retier)  DO_RETIER=1 ;;
+    --pull)    DO_PULL=1 ;;
+    -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)         die "неизвестный аргумент: $1" ;;
+  esac
+  shift
+done
+
+[[ "$(id -u)" -eq 0 ]] || die "нужен root: sudo bash deploy/update.sh"
+
+# --------------------------------------------------------------------------
+# 1. Это точно обновление, а не первая установка
+# --------------------------------------------------------------------------
+#
+# Проверяется явно, потому что update.sh молча не создаст ни базы, ни
+# сервиса: попытка «обновить» пустую машину дала бы набор невнятных ошибок
+# вместо одной внятной.
+
+[[ -f "$ENV_FILE" ]] || die "нет $ENV_FILE — сначала разверните ноду: bash deploy/ubuntu.sh"
+[[ -d "$SRC_DIR" ]]  || die "нет $SRC_DIR — сначала разверните ноду: bash deploy/ubuntu.sh"
+systemctl list-unit-files "${SERVICE}.service" --no-legend | grep -q . \
+  || die "нет юнита ${SERVICE} — сначала разверните ноду: bash deploy/ubuntu.sh"
+
+# --------------------------------------------------------------------------
+# 2. Исходники
+# --------------------------------------------------------------------------
+
+LOCAL_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ "$DO_PULL" -eq 1 ]]; then
+  [[ -d "$SRC_DIR/.git" ]] || die "$SRC_DIR не git-репозиторий: --pull неприменим"
+
+  REF="${REPO_REF:-$(sudo -u "$APP_USER" git -C "$SRC_DIR" rev-parse --abbrev-ref HEAD)}"
+  log "Тяну $REF"
+  sudo -u "$APP_USER" git -C "$SRC_DIR" fetch --all --prune
+  sudo -u "$APP_USER" git -C "$SRC_DIR" reset --hard "origin/$REF"
+elif [[ "$(readlink -f "$LOCAL_SRC")" != "$(readlink -f "$SRC_DIR")" ]]; then
+  log "Копирую исходники из $LOCAL_SRC"
+  # `_build` и `deps` остаются на месте — в них весь смысл быстрого
+  # обновления: зависимости и NIF уже собраны под эту машину.
+  tar -C "$LOCAL_SRC" \
+      --exclude=.git --exclude=_build --exclude=deps --exclude=priv/plts \
+      -cf - . | tar -C "$SRC_DIR" -xf -
+  chown -R "$APP_USER:$APP_USER" "$SRC_DIR"
+else
+  log "Скрипт запущен из $SRC_DIR — исходники уже на месте"
+fi
+
+if [[ -d "$SRC_DIR/.git" ]]; then
+  log "Разворачивается: $(sudo -u "$APP_USER" git -C "$SRC_DIR" log -1 --format='%h %s')"
+fi
+
+# --------------------------------------------------------------------------
+# 3. Компиляция на живом сервисе
+# --------------------------------------------------------------------------
+#
+# Самый долгий шаг, и он не требует простоя: `mix compile` пишет в
+# `_build`, а работающий релиз живёт в `current` и туда не заглядывает.
+# Если компиляция упадёт — сервис так и останется работать на старом коде,
+# а это ровно то поведение, которое нужно от неудачного обновления.
+
+log "Компилирую (сервис продолжает работать)"
+sudo -u "$APP_USER" env \
+  MIX_ENV=prod \
+  HOME="$BASE_DIR" \
+  PATH="/opt/elixir/bin:/usr/local/bin:/usr/bin:/bin" \
+  bash -c "
+    set -e
+    cd '$SRC_DIR'
+    mix local.hex --force --if-missing
+    mix local.rebar --force --if-missing
+    mix deps.get --only prod
+    mix deps.compile
+    mix compile
+  "
+
+# --------------------------------------------------------------------------
+# 4. Сборка релиза, миграции, старт
+# --------------------------------------------------------------------------
+#
+# Отсюда начинается простой. Сервис останавливается, потому что
+# `mix release --overwrite` переписывает файлы, которые работающая нода
+# держит открытыми.
+#
+# По §8 CLAUDE.md рестарт гасит все `TableServer`: незавершённые раздачи
+# аннулируются, ставки возвращаются из снапшота стеков. Обновляйтесь
+# в окно низкой активности.
+
+DOWNTIME_START="$(date +%s)"
+
+log "Останавливаю $SERVICE"
+systemctl stop "$SERVICE"
+
+log "Собираю релиз"
+sudo -u "$APP_USER" env \
+  MIX_ENV=prod \
+  HOME="$BASE_DIR" \
+  PATH="/opt/elixir/bin:/usr/local/bin:/usr/bin:/bin" \
+  bash -c "cd '$SRC_DIR' && mix release --overwrite --path '$REL_DIR'"
+
+# Секреты читаются из того же файла, что видит systemd, — второй копии
+# паролей на машине не заводится.
+DB_URL="$(sed -n 's/^DATABASE_URL=//p' "$ENV_FILE")"
+SECRET_KEY_BASE="$(sed -n 's/^SECRET_KEY_BASE=//p' "$ENV_FILE")"
+PHX_HOST="$(sed -n 's/^PHX_HOST=//p' "$ENV_FILE")"
+
+[[ -n "$DB_URL" ]] || die "в $ENV_FILE нет DATABASE_URL"
+
+# Переменные перечисляются поимённо, а не подставляются файлом целиком:
+# в нём лежит PHX_SERVER=true, а `eval` не должен поднимать эндпоинт —
+# иначе миграция открыла бы порт и подралась бы за него с сервисом.
+release_eval() {
+  sudo -u "$APP_USER" env \
+    HOME="$BASE_DIR" \
+    LANG=C.UTF-8 \
+    DATABASE_URL="$DB_URL" \
+    SECRET_KEY_BASE="$SECRET_KEY_BASE" \
+    PHX_HOST="$PHX_HOST" \
+    POOL_SIZE=2 \
+    "$REL_DIR/bin/block_poker" eval "$1"
+}
+
+log "Накатываю миграции"
+release_eval "BlockPoker.Release.migrate()"
+
+if [[ "$DO_SEED" -eq 1 ]]; then
+  log "Сею сетки (идемпотентно: существующие шаблоны не трогаются)"
+  release_eval "BlockPoker.Release.seed_cash_games()"
+  release_eval "BlockPoker.Release.seed_sit_n_go()"
+fi
+
+if [[ "$DO_RETIER" -eq 1 ]]; then
+  log "Перезаливаю таблицы призов Sit & Go"
+  release_eval "BlockPoker.Release.retier_sit_n_go()"
+fi
+
+log "Запускаю $SERVICE"
+systemctl start "$SERVICE"
+
+DOWNTIME=$(( $(date +%s) - DOWNTIME_START ))
+
+# --------------------------------------------------------------------------
+# 5. Проверка
+# --------------------------------------------------------------------------
+#
+# Без неё скрипт сообщал бы об успехе всякий раз, когда сумел запустить
+# systemd, — а «запустился» и «работает» это разные события.
+
+log "Проверяю"
+
+for _ in $(seq 1 20); do
+  if systemctl is-active --quiet "$SERVICE"; then break; fi
+  sleep 1
+done
+
+systemctl is-active --quiet "$SERVICE" \
+  || die "сервис не поднялся: journalctl -u $SERVICE -n 100"
+
+PORT="$(sed -n 's/^PORT=//p' "$ENV_FILE")"
+PORT="${PORT:-4000}"
+
+HEALTH=""
+for _ in $(seq 1 20); do
+  HEALTH="$(curl -fsS "http://127.0.0.1:${PORT}/health" 2>/dev/null || true)"
+  [[ -n "$HEALTH" ]] && break
+  sleep 1
+done
+
+if [[ -z "$HEALTH" ]]; then
+  warn "сервис активен, но /health не отвечает — смотрите journalctl -u $SERVICE -n 100"
+else
+  log "Готово. Простой: ${DOWNTIME} с. /health отвечает."
+fi
+
+printf '\n  журнал:  journalctl -u %s -f\n' "$SERVICE"
+printf '  консоль: sudo -u %s HOME=%s %s/bin/block_poker remote\n\n' \
+  "$APP_USER" "$BASE_DIR" "$REL_DIR"

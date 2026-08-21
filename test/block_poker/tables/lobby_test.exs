@@ -127,8 +127,19 @@ defmodule BlockPoker.Tables.LobbyTest do
     lobby = start_lobby!()
     [%{room_id: room_id}] = rooms(lobby, setting)
 
-    TableRegistry.whereis(room_id) |> Process.exit(:kill)
-    # Ждём, пока лобби обработает :DOWN, не прибегая к sleep.
+    pid = TableRegistry.whereis(room_id)
+    ref = Process.monitor(pid)
+    Process.exit(pid, :kill)
+
+    # Синхронизация без sleep, и порядок здесь важен. `Process.exit/2`
+    # асинхронен: сразу за ним лобби могло ещё не получить `:DOWN`, и
+    # снапшот показывал бы умершую комнату живой — отсюда флак.
+    #
+    # Свой `:DOWN` приходит тогда же, когда рассылаются все остальные:
+    # мониторы уведомляются в момент смерти процесса. Дождавшись его, мы
+    # знаем, что `:DOWN` лобби уже лежит в его почтовом ящике, и следующий
+    # `call` встанет в очередь за ним, а не перед.
+    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
     _sync = Lobby.snapshot(lobby)
 
     assert [room] = rooms(lobby, setting)

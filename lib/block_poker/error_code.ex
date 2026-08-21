@@ -105,6 +105,32 @@ defmodule BlockPoker.ErrorCode do
   @spec valid?(atom()) :: boolean()
   def valid?(code), do: Map.has_key?(@codes, code)
 
+  @doc """
+  Код по строке, пришедшей с провода.
+
+  Существует ради того, чтобы разбор не делался через
+  `String.to_existing_atom/1`: тот падает, если атом ещё не создан, а создан
+  он ровно тогда, когда этот модуль успел загрузиться. Получается ошибка
+  разбора ошибки — обработчик отказа роняет сам себя, и происходит это
+  тем вероятнее, чем реже путь используется.
+
+  Сравнение идёт со списком известных кодов: неизвестная строка получает
+  `:error`, а не исключение.
+  """
+  @spec fetch(term()) :: {:ok, t()} | :error
+  def fetch(code) when is_binary(code) do
+    case Enum.find(@codes, fn {known, _value} -> Atom.to_string(known) == code end) do
+      {known, _value} -> {:ok, known}
+      nil -> :error
+    end
+  end
+
+  def fetch(code) when is_atom(code) do
+    if valid?(code), do: {:ok, code}, else: :error
+  end
+
+  def fetch(_code), do: :error
+
   @doc "HTTP-статус, соответствующий коду."
   @spec http_status(t()) :: pos_integer()
   def http_status(code), do: @codes |> fetch!(code) |> elem(0)

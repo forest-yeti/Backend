@@ -37,9 +37,17 @@ defmodule Socket.UserSocket do
   в первом случае надо обновить токен, во втором — само приложение.
   """
   def handle_error(conn, %{code: code}) when is_binary(code) do
-    error = String.to_existing_atom(code)
-    true = ErrorCode.valid?(error)
+    case ErrorCode.fetch(code) do
+      {:ok, error} -> send_error(conn, error, code)
+      # Неизвестный код — не повод падать в обработчике отказа: клиент
+      # получит штатный 403, как если бы обработчика не было вовсе.
+      :error -> Plug.Conn.send_resp(conn, 403, "")
+    end
+  end
 
+  def handle_error(conn, _reason), do: Plug.Conn.send_resp(conn, 403, "")
+
+  defp send_error(conn, error, code) do
     conn
     |> Plug.Conn.put_resp_content_type("application/json")
     |> Plug.Conn.send_resp(
@@ -47,8 +55,6 @@ defmodule Socket.UserSocket do
       Jason.encode!(%{code: code, message: ErrorCode.message(error)})
     )
   end
-
-  def handle_error(conn, _reason), do: Plug.Conn.send_resp(conn, 403, "")
 
   @impl true
   def id(%{assigns: %{user_id: user_id}}), do: "user_socket:#{user_id}"

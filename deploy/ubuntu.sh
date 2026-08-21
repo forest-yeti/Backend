@@ -425,6 +425,9 @@ release_eval "BlockPoker.Release.migrate()"
 log "Засеваю сетку лимитов кэш-игры (идемпотентно)"
 release_eval "BlockPoker.Release.seed_cash_games()"
 
+log "Засеваю сетку гипер-турниров Sit & Go (идемпотентно)"
+release_eval "BlockPoker.Release.seed_sit_n_go()"
+
 # --------------------------------------------------------------------------
 # 10. systemd
 # --------------------------------------------------------------------------
