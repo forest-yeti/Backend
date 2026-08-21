@@ -209,6 +209,64 @@ defmodule BlockPoker.Tables.TournamentTest do
     end
   end
 
+  describe "хедз-ап" do
+    test "турнир на двоих стартует вдвоём и раздаёт карты" do
+      %{pid: pid} = start_tournament_room!(%{max_players: 2})
+
+      for number <- 1..2, do: seat!(pid, "user-#{number}", number, @stack)
+      TableServer.fire_timer(pid, :button_draw)
+
+      room = TableServer.state(pid)
+
+      assert room.game_started?
+      assert room.hand != nil
+      assert map_size(room.hand.players) == 2
+    end
+
+    test "кнопка ставит малый блайнд и ходит первой до флопа" do
+      # Правило хедз-апа, которое ломается чаще всего: за двухместным
+      # столом кнопка и есть малый блайнд.
+      %{pid: pid} = start_tournament_room!(%{max_players: 2})
+
+      for number <- 1..2, do: seat!(pid, "user-#{number}", number, @stack)
+      TableServer.fire_timer(pid, :button_draw)
+
+      room = TableServer.state(pid)
+      button = room.button_seat
+
+      assert room.hand.to_act == button
+      assert Map.fetch!(room.hand.players, button).committed == 10
+    end
+
+    test "приз тянется из таблицы 2-max: множитель ниже x2" do
+      %{pid: pid} =
+        start_tournament_room!(%{
+          max_players: 2,
+          prize_tiers:
+            SitAndGoFixtures.prize_tiers([
+              %{multiplier: 150, chance_ppm: 1_000_000, payouts: [100]}
+            ])
+        })
+
+      for number <- 1..2, do: seat!(pid, "user-#{number}", number, @stack)
+      TableServer.fire_timer(pid, :button_draw)
+
+      prize = TableServer.state(pid).tournament.prize
+
+      assert prize.label == "x1.5"
+      # Взнос фикстуры — 100, фонд полтора взноса.
+      assert prize.pool == 150
+    end
+
+    test "один игрок турнир не начинает" do
+      %{pid: pid} = start_tournament_room!(%{max_players: 2})
+
+      seat!(pid, "user-1", 1, @stack)
+
+      refute TableServer.state(pid).game_started?
+    end
+  end
+
   describe "Short Deck" do
     test "уровни без блайндов задают анте кнопки" do
       %{pid: pid} =

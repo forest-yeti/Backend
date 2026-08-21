@@ -16,32 +16,49 @@ defmodule BlockPoker.SitAndGo.GridTest do
 
   describe "таблицы призов" do
     test "шансы каждой таблицы складываются в полную шкалу" do
-      for seats <- [3, 6] do
+      for seats <- [2, 3, 6] do
         assert PrizePool.valid_chances?(Grid.prize_tiers(seats)),
                "таблица #{seats}-max не суммируется в #{PrizePool.chance_scale()}"
       end
     end
 
     test "возврат игроку равен целевым 93% для обеих рассадок" do
-      for seats <- [3, 6] do
+      for seats <- [2, 3, 6] do
         assert PrizePool.expected_return_ppm(Grid.prize_tiers(seats), seats) ==
                  Grid.target_return_ppm()
       end
     end
 
     test "матожидание множителя — это число мест, умноженное на возврат" do
+      assert PrizePool.expected_multiplier_ppm(Grid.prize_tiers(2)) == 1_860_000
       assert PrizePool.expected_multiplier_ppm(Grid.prize_tiers(3)) == 2_790_000
       assert PrizePool.expected_multiplier_ppm(Grid.prize_tiers(6)) == 5_580_000
     end
 
+    test "таблица чужой рассадки ломает экономику — потому у каждой своя" do
+      # Таблица 3-max за столом на двоих раздаёт 2.79 взноса при двух
+      # собранных. Проверка существует, чтобы «переиспользовать таблицу»
+      # не выглядело безобидной экономией.
+      assert PrizePool.expected_return_ppm(Grid.prize_tiers(3), 2) == 1_395_000
+      assert PrizePool.expected_return_ppm(Grid.prize_tiers(6), 3) == 1_860_000
+    end
+
+    test "у 2-max основной множитель ниже x2 — этого требует матожидание" do
+      # E[множитель] обязано равняться 1.86, поэтому модальный тир не может
+      # быть x2 или выше: иначе возврат превысил бы договорённый.
+      modal = Enum.max_by(Grid.prize_tiers(2), & &1.chance_ppm)
+
+      assert modal.multiplier < 200
+    end
+
     test "ни один тир не оплачивает мест больше, чем игроков за столом" do
-      for seats <- [3, 6], tier <- Grid.prize_tiers(seats) do
+      for seats <- [2, 3, 6], tier <- Grid.prize_tiers(seats) do
         assert length(tier.payouts) <= seats
       end
     end
 
     test "доли мест складываются в сотню и идут по убыванию" do
-      for seats <- [3, 6], tier <- Grid.prize_tiers(seats) do
+      for seats <- [2, 3, 6], tier <- Grid.prize_tiers(seats) do
         assert Enum.sum(tier.payouts) == 100
         assert tier.payouts == Enum.sort(tier.payouts, :desc)
         assert Enum.all?(tier.payouts, &(&1 > 0))
@@ -99,8 +116,20 @@ defmodule BlockPoker.SitAndGo.GridTest do
   end
 
   describe "expand/1" do
-    test "полная сетка — четыре взноса на две дисциплины, рассадки и валюты" do
-      assert length(Grid.expand()) == 32
+    test "полная сетка — четыре взноса на две дисциплины, три рассадки и две валюты" do
+      assert length(Grid.expand()) == 48
+    end
+
+    test "каждая рассадка представлена в обеих дисциплинах и обеих валютах" do
+      by_seats = Grid.expand() |> Enum.group_by(& &1.attrs.max_players)
+
+      assert Map.keys(by_seats) |> Enum.sort() == [2, 3, 6]
+
+      for {_seats, rows} <- by_seats do
+        assert length(rows) == 16
+        assert rows |> Enum.map(& &1.attrs.game_type) |> Enum.uniq() |> length() == 2
+        assert rows |> Enum.map(& &1.attrs.currency) |> Enum.uniq() |> length() == 2
+      end
     end
 
     test "каждый шаблон приходит со своей структурой и таблицей" do
@@ -122,11 +151,11 @@ defmodule BlockPoker.SitAndGo.GridTest do
     end
 
     test "опции сужают выборку, не меняя её формы" do
-      rows = Grid.expand(currency: :main, game_type: :short_deck, max_players: 3)
+      rows = Grid.expand(currency: :main, game_type: :short_deck, max_players: 2)
 
       assert length(rows) == 4
       assert Enum.all?(rows, &(&1.attrs.currency == :main))
-      assert Enum.all?(rows, &(&1.attrs.max_players == 3))
+      assert Enum.all?(rows, &(&1.attrs.max_players == 2))
     end
 
     test "взносы заданы в минимальных единицах" do

@@ -187,6 +187,46 @@ defmodule BlockPoker.Tables.TournamentPayoutTest do
     end
   end
 
+  describe "хедз-ап доигрывается до победителя" do
+    test "на двоих победитель забирает фонд, проигравший получает прочерк" do
+      test_pid = self()
+      {clock, advance} = manual_clock()
+
+      %{pid: pid, room_id: room_id} =
+        start_tournament_room!(
+          %{
+            max_players: 2,
+            starting_stack: 40,
+            blind_levels: SitAndGoFixtures.blind_levels(duration_seconds: 60),
+            # Таблица 2-max: основной множитель ниже x2 — этого требует
+            # матожидание при двух участниках.
+            prize_tiers:
+              SitAndGoFixtures.prize_tiers([
+                %{multiplier: 150, chance_ppm: 1_000_000, payouts: [100]}
+              ])
+          },
+          clock: clock,
+          payout: fn _room, results -> send(test_pid, {:paid, results}) end
+        )
+
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, TableServer.topic(room_id))
+
+      for number <- 1..2, do: seat!(pid, "user-#{number}", number, 40)
+      TableServer.fire_timer(pid, :button_draw)
+
+      play_until_finished(pid, 400, advance)
+
+      assert_received {:table_event, "tournament_finished", payload}
+      assert_received {:paid, results}
+
+      assert [first, second] = results
+      assert first.place == 1
+      assert first.amount == payload.prize.pool
+      assert second.place == 2
+      assert second.amount == 0
+    end
+  end
+
   defp eliminate(state, user_id, place) do
     seat = Enum.find(Map.values(state.seats), &(&1.user_id == user_id))
 
