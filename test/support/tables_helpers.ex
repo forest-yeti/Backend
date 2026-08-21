@@ -84,16 +84,22 @@ defmodule BlockPoker.TablesHelpers do
              room_id: room_id,
              setting: setting,
              game_mode: BlockPoker.GameMode.Tournament,
+             # Деньги проверяются на уровне 3, где есть настоящая БД.
+             # Здесь выплата только записывается, чтобы тест увидел, кому
+             # и сколько стол насчитал.
+             payout: Keyword.get(opts, :payout, &noop_payout/2),
              timers: :manual,
              rng: Rng.seeded(Keyword.get(opts, :seed, "test"))
            ],
-           Keyword.drop(opts, [:seed])
+           Keyword.drop(opts, [:seed, :payout])
          )},
         id: room_id
       )
 
     %{pid: pid, room_id: room_id, setting: setting}
   end
+
+  defp noop_payout(_room, _results), do: :ok
 
   @doc """
   Посадка без похода в кошелёк: тесты уровня 2 проверяют комнату, а не

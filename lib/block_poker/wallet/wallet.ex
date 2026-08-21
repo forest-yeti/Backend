@@ -117,6 +117,24 @@ defmodule BlockPoker.Wallet do
     move(user_id, currency, amount, :cash_out, idempotency_key, opts)
   end
 
+  @doc """
+  Выплата приза за место в турнире.
+
+  Отдельно от `cash_out/5` намеренно: cash-out возвращает игроку фишки,
+  которые он сам принёс на стол, а приз приходит из призового фонда и с
+  его стеком не связан. Нулевая выплата записи не порождает — место вне
+  призовой зоны это не операция.
+  """
+  @spec award_prize(Ecto.UUID.t(), :main | :play_money, non_neg_integer(), String.t(), keyword()) ::
+          {:ok, WalletEntry.t() | :noop} | {:error, term()}
+  def award_prize(user_id, currency, amount, idempotency_key, opts \\ [])
+
+  def award_prize(_user_id, _currency, 0, _idempotency_key, _opts), do: {:ok, :noop}
+
+  def award_prize(user_id, currency, amount, idempotency_key, opts) when amount > 0 do
+    move(user_id, currency, amount, :prize, idempotency_key, opts)
+  end
+
   defp move(user_id, currency, amount, type, idempotency_key, opts) do
     with {:ok, wallet} <- get_wallet(user_id, currency) do
       Multi.new()

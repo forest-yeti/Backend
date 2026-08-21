@@ -15,7 +15,11 @@ defmodule BlockPoker.Wallet.WalletEntry do
 
   @type t :: %__MODULE__{}
 
-  @types [:deposit, :buy_in, :cash_out, :rake, :adjustment]
+  # `:prize` — выплата за место в турнире. Отдельный тип, а не `cash_out`:
+  # cash-out возвращает игроку его же фишки со стола, а приз приходит из
+  # призового фонда и с его стеком не связан вовсе. В выписке это разные
+  # события, и путать их нельзя.
+  @types [:deposit, :buy_in, :cash_out, :rake, :prize, :adjustment]
 
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id

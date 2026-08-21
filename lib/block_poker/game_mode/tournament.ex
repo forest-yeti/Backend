@@ -28,10 +28,12 @@ defmodule BlockPoker.GameMode.Tournament do
 
   alias BlockPoker.Engine.BlindSchedule
   alias BlockPoker.Engine.HandSetup
+  alias BlockPoker.Engine.PrizePool
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.SitAndGo
   alias BlockPoker.SitAndGo.SitAndGoSetting
   alias BlockPoker.Tables.{RoomState, Seat}
+  alias BlockPoker.Wallet
 
   @doc """
   Заводит расписание уровней, скопировав его из шаблона.
@@ -80,15 +82,75 @@ defmodule BlockPoker.GameMode.Tournament do
   end
 
   @doc """
-  Встать из-за стола нельзя никогда.
+  Уйти можно только до старта — это отмена регистрации, а не выход из-за
+  стола.
 
-  Это не строгость ради строгости: взнос уплачен за место в структуре,
-  и уход с фишками означал бы, что оставшиеся играют за приз, часть
-  которого унесли. Отключившийся игрок продолжает участвовать —
-  вынужденные ставки съедают его стек, и он вылетает по правилам.
+  После первой карты встать нельзя, и это не строгость ради строгости:
+  взнос уплачен за место в структуре, и уход означал бы, что оставшиеся
+  играют за приз, часть которого унесли. Отключившийся продолжает
+  участвовать — вынужденные ставки съедают его стек, и он вылетает
+  по правилам.
   """
   @impl true
-  def can_leave?(%RoomState{}, %Seat{}), do: false
+  def can_leave?(%RoomState{game_started?: started?}, %Seat{}), do: not started?
+
+  @doc """
+  Требует ли турнир расчёта: живой остался один, а призы ещё не выплачены.
+
+  Живых считаем по стекам, а не по занятым местам: вылетевшие остаются за
+  столом зрителями, и «мест занято» до самого конца равно размеру пула.
+
+  Флаг расчёта входит в условие намеренно. «Остался один» — состояние,
+  а не событие: без него проверка срабатывала бы снова и снова, выплачивая
+  приз повторно.
+  """
+  @impl true
+  def finished?(%RoomState{tournament: nil}), do: false
+
+  def finished?(%RoomState{game_started?: false}), do: false
+
+  def finished?(%RoomState{tournament: %{settled?: true}}), do: false
+
+  def finished?(%RoomState{} = state), do: RoomState.alive_count(state) <= 1
+
+  @doc """
+  Итоговая таблица: вылетевшие в порядке вылета плюс победитель первым.
+
+  Победитель дописывается здесь, а не фиксируется по ходу игры: пока
+  живых больше одного, победителя не существует, и запоминать его
+  «заранее» было бы записью несуществующего факта.
+  """
+  @impl true
+  def results(%RoomState{tournament: nil}), do: []
+
+  def results(%RoomState{tournament: tournament} = state) do
+    prize = tournament.prize
+    shares = payout_shares(prize)
+
+    # Победитель добавляется, только когда живой действительно один.
+    # Пока их больше, «первый со стеком» — не победитель, а просто первый
+    # в обходе мест, и назвать его первым местом значит соврать.
+    entries =
+      case RoomState.alive_count(state) do
+        1 ->
+          winner = Enum.find(RoomState.players(state), &(&1.stack > 0))
+
+          [%{seat: winner.number, user_id: winner.user_id, place: 1} | tournament.standings]
+
+        _more ->
+          tournament.standings
+      end
+
+    entries
+    |> Enum.sort_by(& &1.place)
+    |> Enum.map(fn entry ->
+      Map.put(entry, :amount, Enum.at(shares, entry.place - 1, 0))
+    end)
+  end
+
+  defp payout_shares(nil), do: []
+
+  defp payout_shares(%{pool: pool, payouts: payouts}), do: PrizePool.split(pool, payouts)
 
   @doc """
   Стек в турнире один и тот же для всех: стартовый и ровно он.
@@ -136,6 +198,17 @@ defmodule BlockPoker.GameMode.Tournament do
   @impl true
   def auto_start?(%RoomState{}), do: true
 
+  @doc """
+  Турнир начинается только полным составом.
+
+  Это то же самое требование, что и «пул обязан собраться»: 3-max
+  стартует тройкой, 6-max шестёркой. Начать вчетвером за столом на шесть
+  нельзя — призовой фонд и структура мест посчитаны от числа участников,
+  и играть их меньшим составом значит раздать не то, за что заплатили.
+  """
+  @impl true
+  def start_threshold(%RoomState{setting: setting}), do: setting.max_players
+
   @impl true
   def sit_out_timeout_ms(%RoomState{}), do: nil
 
@@ -152,15 +225,53 @@ defmodule BlockPoker.GameMode.Tournament do
   def bomb_pot(%RoomState{}), do: nil
 
   @doc """
-  Бай-ин за столом не берётся: деньги списаны на регистрации, а стартовый
-  стек — это фишки, которые турнир выдаёт сам.
+  Посадка за турнирный стол **и есть** регистрация: с кошелька списывается
+  взнос шаблона, а не сумма фишек.
+
+  Взнос и стек здесь — разные величины и разные шкалы: игрок платит
+  деньгами, а получает турнирные фишки, которые деньгами не являются.
+  Поэтому `amount` (стек) в списании не участвует вовсе.
   """
   @impl true
-  def take_buy_in(%RoomState{}, _user_id, _amount, _reservation_id), do: :ok
+  def take_buy_in(%RoomState{} = state, user_id, _amount, reservation_id) do
+    case Wallet.buy_in(
+           user_id,
+           state.setting.currency,
+           state.setting.buy_in,
+           "sng_buyin:#{reservation_id}",
+           ref_id: state.room_id
+         ) do
+      {:ok, _entry} -> :ok
+      {:error, reason} -> {:error, wallet_error(reason)}
+    end
+  end
 
-  @doc "Возвращать в кошелёк нечего: турнирная фишка деньгами не является."
+  @doc """
+  Отмена регистрации до старта возвращает **взнос**, а не стек.
+
+  После старта возвращать нечего: фишки в игре, а причитающееся за место
+  придёт выплатой приза. Развилка идёт по `game_started?`, потому что
+  ровно он отделяет «ещё не начали» от «уже играем».
+  """
   @impl true
-  def return_chips(%RoomState{}, _user_id, _amount, _ref), do: :ok
+  def return_chips(%RoomState{game_started?: true}, _user_id, _amount, _ref), do: :ok
+
+  def return_chips(%RoomState{} = state, user_id, _amount, ref) do
+    case Wallet.cash_out(
+           user_id,
+           state.setting.currency,
+           state.setting.buy_in,
+           "sng_refund:#{ref}",
+           ref_id: state.room_id
+         ) do
+      {:ok, _entry} -> :ok
+      {:error, reason} -> {:error, wallet_error(reason)}
+    end
+  end
+
+  defp wallet_error(:insufficient_funds), do: :insufficient_funds
+  defp wallet_error(:not_found), do: :wallet_not_found
+  defp wallet_error(_other), do: :internal_error
 
   @doc "Рейка с банка в турнире нет и быть не может — банк в фишках."
   @impl true

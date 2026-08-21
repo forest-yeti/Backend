@@ -87,6 +87,10 @@ defmodule BlockPoker.GameMode.Cash do
   @impl true
   def auto_start?(%RoomState{setting: setting}), do: setting.auto_start != false
 
+  @doc "Двое — минимум, при котором покер возможен; дальше стол играет любым составом."
+  @impl true
+  def start_threshold(%RoomState{}), do: 2
+
   @impl true
   def sit_out_timeout_ms(%RoomState{setting: setting}), do: setting.sit_out_timeout_ms
 
@@ -101,6 +105,14 @@ defmodule BlockPoker.GameMode.Cash do
 
   @impl true
   def bomb_pot(%RoomState{setting: setting}), do: CashGameSetting.bomb_pot(setting)
+
+  @doc "Кэш-стол не заканчивается: он пустеет и ждёт новых игроков."
+  @impl true
+  def finished?(%RoomState{}), do: false
+
+  @doc "Мест и призов в кэше нет: игрок забирает выигранное со стола cash-out'ом."
+  @impl true
+  def results(%RoomState{}), do: []
 
   @impl true
   def take_buy_in(%RoomState{} = state, user_id, amount, reservation_id) do

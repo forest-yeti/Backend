@@ -58,8 +58,8 @@ defmodule BlockPoker.Tables.TableServer do
 
   defmodule State do
     @moduledoc false
-    @enforce_keys [:room, :timer_mode, :rng, :clock, :evict]
-    defstruct [:room, :timer_mode, :rng, :clock, :evict, timers: %{}]
+    @enforce_keys [:room, :timer_mode, :rng, :clock, :evict, :payout]
+    defstruct [:room, :timer_mode, :rng, :clock, :evict, :payout, timers: %{}]
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -253,7 +253,11 @@ defmodule BlockPoker.Tables.TableServer do
       # а комната в кошелёк не ходит (см. moduledoc). Поэтому наружу уходит
       # функция, и выполняется она в отдельном процессе: стол не вправе
       # стоять, пока идёт транзакция.
-      evict: Keyword.get(opts, :evict, &default_evict/2)
+      evict: Keyword.get(opts, :evict, &default_evict/2),
+      # Выплата призов — поход в кошелёк, и стол не вправе стоять, пока
+      # идёт транзакция. Функция инжектируется по той же причине, что и
+      # выселение: комната в кошелёк не ходит.
+      payout: Keyword.get(opts, :payout, &default_payout/2)
     }
 
     # Режим заводит своё состояние сам: стол не спрашивает, турнир это или
@@ -1233,6 +1237,31 @@ defmodule BlockPoker.Tables.TableServer do
     {:reply, :ok, maybe_start_game(state)}
   end
 
+  # Турнир, доигранный до одного живого, рассчитывается ровно один раз:
+  # режим сам следит за этим флагом, стол только спрашивает.
+  defp maybe_settle(state) do
+    if state.room.mode.finished?(state.room) do
+      results = state.room.mode.results(state.room)
+      room = RoomState.settle_tournament(state.room)
+      state = put_room(state, room)
+
+      broadcast(state, "tournament_finished", %{
+        prize: room.tournament && room.tournament.prize,
+        results: results
+      })
+
+      state.payout.(room, results)
+      state
+    else
+      state
+    end
+  end
+
+  defp default_payout(%RoomState{} = room, results) do
+    Task.start(fn -> BlockPoker.Tables.pay_out(room, results) end)
+    :ok
+  end
+
   defp default_evict(room_id, user_id) do
     Task.start(fn -> BlockPoker.Tables.leave_seat(room_id, user_id) end)
     :ok
@@ -1272,6 +1301,7 @@ defmodule BlockPoker.Tables.TableServer do
       |> handle_broke_players(hand)
       |> apply_pending_sit_outs()
       |> maybe_stop_game()
+      |> maybe_settle()
 
     announce(state)
 
@@ -1329,8 +1359,14 @@ defmodule BlockPoker.Tables.TableServer do
   end
 
   # Проигравший всё не встаёт молча: кэш даёт ему время докупиться.
+  # Вылетевшие обрабатываются в порядке стартового стека — от меньшего
+  # к большему. Порядок важен там, где в одной раздаче вылетают двое:
+  # места между ними делятся по стеку на её начало, а не по тому, в каком
+  # порядке карта мест отдала свои ключи.
   defp handle_broke_players(state, hand) do
-    Enum.reduce(hand.players, state, fn {number, _player}, acc ->
+    hand.players
+    |> Enum.sort_by(fn {_number, player} -> player.stack + player.total end)
+    |> Enum.reduce(state, fn {number, _player}, acc ->
       seat = Map.get(acc.room.seats, number)
 
       if seat != nil and seat.stack == 0 and Seat.occupied?(seat) do
@@ -1523,7 +1559,7 @@ defmodule BlockPoker.Tables.TableServer do
   defp maybe_start_game(%State{room: room} = state) do
     seats = playable_seats(room)
 
-    if RoomState.auto_start?(room) and length(seats) >= 2 do
+    if RoomState.auto_start?(room) and length(seats) >= room.mode.start_threshold(room) do
       start_button_draw(state, seats)
     else
       state

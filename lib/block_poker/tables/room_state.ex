@@ -137,6 +137,7 @@ defmodule BlockPoker.Tables.RoomState do
           levels: [BlindSchedule.level()],
           level_deadline_at: integer() | nil,
           prize: prize() | nil,
+          settled?: boolean(),
           standings: [%{seat: pos_integer(), user_id: Ecto.UUID.t(), place: pos_integer()}]
         }
 
@@ -254,10 +255,24 @@ defmodule BlockPoker.Tables.RoomState do
           levels: levels,
           level_deadline_at: nil,
           prize: nil,
+          settled?: false,
           standings: []
         }
     }
   end
+
+  @doc """
+  Отмечает турнир рассчитанным.
+
+  Флаг существует ради денег: «живой остался один» — состояние, а не
+  событие, и без отметки оно выполнялось бы на каждой следующей проверке,
+  выплачивая приз повторно.
+  """
+  @spec settle_tournament(t()) :: t()
+  def settle_tournament(%__MODULE__{tournament: nil} = state), do: state
+
+  def settle_tournament(%__MODULE__{tournament: tournament} = state),
+    do: %{state | tournament: %{tournament | settled?: true}}
 
   @doc "Номиналы текущего уровня. У не-турнира их нет."
   @spec current_level(t()) :: BlindSchedule.level() | nil

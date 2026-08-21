@@ -25,9 +25,9 @@ defmodule BlockPoker.Tables do
   alias BlockPoker.CashGames.CashGameSetting
   alias BlockPoker.Engine.Preselect
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
-  alias BlockPoker.GameMode
   alias BlockPoker.Reactions
   alias BlockPoker.Tables.{Lobby, LobbyQuery, RoomState, TableRegistry, TableServer}
+  alias BlockPoker.Wallet
 
   @type entry :: :wait_bb | :post
   @type error :: atom()
@@ -189,6 +189,29 @@ defmodule BlockPoker.Tables do
   end
 
   @doc """
+  Выплата призов турнира: единственное место, где приз доходит до кошелька.
+
+  Идёт после расчёта, вне процесса стола: транзакция в кошелёк не должна
+  задерживать комнату. Ключ идемпотентности собирается из комнаты и места,
+  поэтому повтор — ретрай после обрыва, падение процесса — не выплатит
+  приз дважды: UNIQUE журнала это отвергнет.
+
+  Место вне призовой зоны записи не порождает (`Wallet.award_prize/5`).
+  """
+  @spec pay_out(RoomState.t(), [map()]) :: :ok
+  def pay_out(%RoomState{} = room, results) do
+    Enum.each(results, fn result ->
+      Wallet.award_prize(
+        result.user_id,
+        room.setting.currency,
+        result.amount,
+        "sng_prize:#{room.room_id}:#{result.place}",
+        ref_id: room.room_id
+      )
+    end)
+  end
+
+  @doc """
   Уход из-за стола: стек возвращается в кошелёк записью `cash_out`.
 
   Место освобождается **после** подтверждения перевода — до тех пор оно
@@ -203,7 +226,9 @@ defmodule BlockPoker.Tables do
     # со своим правом на банк.
     with {:ok, pid} <- fetch_room(room_id),
          {:ok, %{ref: ref, stack: stack}} <- TableServer.begin_leave(pid, user_id) do
-      case GameMode.Cash.return_chips(TableServer.state(pid), user_id, stack, ref) do
+      room = TableServer.state(pid)
+
+      case room.mode.return_chips(room, user_id, stack, ref) do
         :ok ->
           TableServer.finish_leave(pid, ref)
           {:ok, %{room_id: room_id, cashed_out: stack}}
@@ -247,7 +272,7 @@ defmodule BlockPoker.Tables do
   # Списание не прошло: ключ надо снять с места, иначе следующая попытка
   # упрётся в «предыдущая докупка ещё не завершена» при пустом кошельке.
   defp take_buy_in(pid, room, user_id, amount, ref) do
-    case GameMode.Cash.take_buy_in(room, user_id, amount, ref) do
+    case room.mode.take_buy_in(room, user_id, amount, ref) do
       :ok ->
         :ok
 
@@ -289,7 +314,7 @@ defmodule BlockPoker.Tables do
   # это единственная точка, где фишки могут пропасть, и она обязана быть
   # видна в логе — деньги доводятся руками по `ref`.
   defp return_lost_chips(room, user_id, amount, ref) do
-    case GameMode.Cash.return_chips(room, user_id, amount, ref) do
+    case room.mode.return_chips(room, user_id, amount, ref) do
       :ok ->
         :ok
 
@@ -475,7 +500,7 @@ defmodule BlockPoker.Tables do
            TableServer.reserve_seat(pid, user_id, seat, buy_in, profile(user_id)) do
       room = TableServer.state(pid)
 
-      case GameMode.Cash.take_buy_in(room, user_id, buy_in, reservation_id) do
+      case room.mode.take_buy_in(room, user_id, buy_in, reservation_id) do
         :ok ->
           confirm(pid, room_id, user_id, reservation_id, buy_in, entry)
 
@@ -502,7 +527,7 @@ defmodule BlockPoker.Tables do
         # Резерв потерян (комната перезапустилась) — деньги надо вернуть,
         # иначе бай-ин остался бы списанным без места за столом.
         room = TableServer.state(pid)
-        GameMode.Cash.return_chips(room, user_id, buy_in, reservation_id)
+        room.mode.return_chips(room, user_id, buy_in, reservation_id)
         {:error, reason}
     end
   end
