@@ -137,33 +137,71 @@ defmodule BlockPoker.SitAndGo.GridTest do
     end
   end
 
-  describe "тестовый стол" do
-    test "живёт только на игровых фишках" do
+  describe "тестовые столы" do
+    test "их два: на двоих и на троих" do
+      seats = Grid.test_rows() |> Enum.map(& &1.attrs.max_players) |> Enum.sort()
+
+      assert seats == [2, 3]
+    end
+
+    test "живут только на игровых фишках" do
       # Возврат здесь в сотни раз выше собранного: на реальных деньгах
       # это была бы раздача денег.
-      assert Grid.test_row().attrs.currency == :play_money
+      for row <- Grid.test_rows() do
+        assert row.attrs.currency == :play_money
+      end
     end
 
     test "джекпот выпадает часто — иначе путь не проверить" do
-      tiers = Grid.test_row().tiers
-      jackpot = Enum.max_by(tiers, & &1.multiplier)
+      for row <- Grid.test_rows() do
+        jackpot = Enum.max_by(row.tiers, & &1.multiplier)
 
-      assert jackpot.multiplier == 1_000_000
-      assert jackpot.chance_ppm >= 100_000
+        assert jackpot.multiplier == 1_000_000
+        assert jackpot.chance_ppm >= 100_000
+      end
     end
 
     test "шансы сходятся: сломан возврат, а не таблица" do
-      assert PrizePool.valid_chances?(Grid.test_row().tiers)
+      for row <- Grid.test_rows() do
+        assert PrizePool.valid_chances?(row.tiers)
+      end
     end
 
-    test "в боевую сетку не входит и под проверку экономики не попадает" do
+    test "оплачиваемых мест не больше, чем игроков за столом" do
+      # На двоих третьего места не существует, и `audit/1` таблицу
+      # с тремя долями не пропустит.
+      for row <- Grid.test_rows(), tier <- row.tiers do
+        assert length(tier.payouts) <= row.attrs.max_players
+      end
+    end
+
+    test "на троих фонд делится между тремя местами" do
+      jackpot = Grid.test_row(3).tiers |> Enum.max_by(& &1.multiplier)
+
+      assert length(jackpot.payouts) == 3
+    end
+
+    test "в боевую сетку не входят и под проверку экономики не попадают" do
       names = Grid.expand() |> Enum.map(& &1.attrs.name)
 
-      refute Grid.test_row().attrs.name in names
+      for row <- Grid.test_rows() do
+        refute row.attrs.name in names
+      end
     end
 
-    test "имя помечено как тестовое" do
-      assert String.starts_with?(Grid.test_row().attrs.name, "ТЕСТ")
+    test "имена помечены как тестовые и различимы между собой" do
+      names = Grid.test_rows() |> Enum.map(& &1.attrs.name)
+
+      assert Enum.all?(names, &String.starts_with?(&1, "ТЕСТ"))
+      assert length(Enum.uniq(names)) == length(names)
+    end
+
+    test "уезжают в конец витрины, за боевые лимиты" do
+      live_max = Grid.expand() |> Enum.map(& &1.attrs.sort_order) |> Enum.max()
+
+      for row <- Grid.test_rows() do
+        assert row.attrs.sort_order > live_max
+      end
     end
   end
 

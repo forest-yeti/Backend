@@ -88,6 +88,10 @@ defmodule BlockPoker.SitAndGo.Grid do
   @buy_ins [25, 100, 1_000, 10_000]
 
   @seatings [2, 3, 6]
+
+  # Рассадки тестовых столов: на двоих доходить до джекпота проще, на троих
+  # разыгрывается дележ фонда между тремя местами.
+  @test_seatings [2, 3]
   @game_types [:texas_holdem, :short_deck]
   @currencies [:main, :play_money]
 
@@ -272,8 +276,12 @@ defmodule BlockPoker.SitAndGo.Grid do
   end
 
   @doc """
-  Тестовый турнир: шанс джекпота задран так, чтобы редкие тиры выпадали
+  Тестовые турниры: шанс джекпота задран так, чтобы редкие тиры выпадали
   за несколько попыток, а не за миллион.
+
+  Их два — на двоих и на троих. Хедз-ап нужен, чтобы дойти до джекпота
+  вдвоём, когда третьего аккаунта под рукой нет; 3-max — чтобы проверить
+  дележ фонда на три места, которого за столом на двоих не бывает.
 
   Существует ради одного: проверить путь джекпота целиком — розыгрыш,
   анимацию множителя, дележ фонда на три места и выплату — не дожидаясь
@@ -290,31 +298,47 @@ defmodule BlockPoker.SitAndGo.Grid do
 
   Копировать его веса в боевую таблицу нельзя ни при каких обстоятельствах.
   """
-  @spec test_row() :: %{attrs: map(), levels: [map()], tiers: [map()]}
-  def test_row do
+  @spec test_rows() :: [%{attrs: map(), levels: [map()], tiers: [map()]}]
+  def test_rows, do: Enum.map(@test_seatings, &test_row/1)
+
+  @doc "Тестовый стол одной рассадки — см. `test_rows/0`."
+  @spec test_row(pos_integer()) :: %{attrs: map(), levels: [map()], tiers: [map()]}
+  def test_row(seats) when seats in @test_seatings do
     %{
       attrs: %{
-        name: "ТЕСТ Short Deck 3-Max PM 200",
+        name: "ТЕСТ Short Deck #{seats}-Max PM 200",
         game_type: :short_deck,
         currency: :play_money,
-        max_players: 3,
+        max_players: seats,
         buy_in: 200,
         starting_stack: @starting_stack,
         # В конец витрины: тестовый стол не должен попадаться игроку раньше
         # боевых.
-        sort_order: 9_000
+        sort_order: 9_000 + seats
       },
       levels: blind_levels(:short_deck),
-      tiers: [
-        %{multiplier: 200, chance_ppm: 300_000, payouts: [100]},
-        %{multiplier: 1_000, chance_ppm: 200_000, payouts: [100]},
-        %{multiplier: 2_500, chance_ppm: 200_000, payouts: [80, 20]},
-        %{multiplier: 10_000, chance_ppm: 100_000, payouts: [75, 20, 5]},
-        %{multiplier: 100_000, chance_ppm: 100_000, payouts: [75, 20, 5]},
-        %{multiplier: 1_000_000, chance_ppm: 100_000, payouts: [75, 20, 5]}
-      ]
+      tiers: test_tiers(seats)
     }
   end
+
+  # Лесенка шансов одна на обе рассадки — различается только дележ фонда:
+  # за столом на двоих третьего места не существует, и `audit/1` таблицу
+  # с тремя долями не пропустит.
+  defp test_tiers(seats) do
+    top = test_payouts(seats)
+
+    [
+      %{multiplier: 200, chance_ppm: 300_000, payouts: [100]},
+      %{multiplier: 1_000, chance_ppm: 200_000, payouts: [100]},
+      %{multiplier: 2_500, chance_ppm: 200_000, payouts: [80, 20]},
+      %{multiplier: 10_000, chance_ppm: 100_000, payouts: top},
+      %{multiplier: 100_000, chance_ppm: 100_000, payouts: top},
+      %{multiplier: 1_000_000, chance_ppm: 100_000, payouts: top}
+    ]
+  end
+
+  defp test_payouts(2), do: [80, 20]
+  defp test_payouts(3), do: [75, 20, 5]
 
   @doc """
   Полная сетка: список описаний шаблонов со всем, что нужно для вставки.

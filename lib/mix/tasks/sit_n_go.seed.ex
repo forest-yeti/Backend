@@ -5,11 +5,11 @@ defmodule Mix.Tasks.SitNGo.Seed do
   Первичное наполнение `sit_n_go_settings` вместе со структурами уровней
   и таблицами призов из `BlockPoker.SitAndGo.Grid`.
 
-      mix sit_n_go.seed                        # вся сетка плюс тестовый стол
+      mix sit_n_go.seed                        # вся сетка плюс тестовые столы
       mix sit_n_go.seed --currency play_money
       mix sit_n_go.seed --game-type short_deck
       mix sit_n_go.seed --max-players 3
-      mix sit_n_go.seed --no-test              # без тестового стола
+      mix sit_n_go.seed --no-test              # без тестовых столов
       mix sit_n_go.seed --dry-run              # показать, что будет создано
       mix sit_n_go.seed --retier               # перезалить таблицы призов
 
@@ -61,11 +61,11 @@ defmodule Mix.Tasks.SitNGo.Seed do
     end
   end
 
-  # Тестовый стол идёт в сид по умолчанию: без него джекпотный путь
-  # проверить нечем. `--no-test` убирает его там, где витрина должна
+  # Тестовые столы идут в сид по умолчанию: без них джекпотный путь
+  # проверить нечем. `--no-test` убирает их там, где витрина должна
   # содержать только боевые лимиты.
   defp test_rows(opts) do
-    if Keyword.get(opts, :test, true), do: [Grid.test_row()], else: []
+    if Keyword.get(opts, :test, true), do: Grid.test_rows(), else: []
   end
 
   defp currency(nil), do: nil
