@@ -224,6 +224,9 @@ defmodule BlockPoker.GameMode.Tournament do
   end
 
   @impl true
+  def betting_structure(%RoomState{} = state), do: structure(state)
+
+  @impl true
   def display_name(%RoomState{setting: setting}), do: setting.name
 
   @doc """
@@ -251,6 +254,9 @@ defmodule BlockPoker.GameMode.Tournament do
 
   @impl true
   def bomb_pot(%RoomState{}), do: nil
+
+  @impl true
+  def bomb_pot_view(%RoomState{}), do: nil
 
   @doc """
   Посадка за турнирный стол **и есть** регистрация: с кошелька списывается

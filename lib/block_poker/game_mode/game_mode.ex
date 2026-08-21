@@ -98,6 +98,14 @@ defmodule BlockPoker.GameMode do
   """
   @callback timings(RoomState.t()) :: map()
 
+  @doc """
+  Структура ставок стола: блайнды или анте кнопки.
+
+  Её задаёт вид покера, но спрашивать шаблон напрямую снапшот не может —
+  у режимов это разные структуры настроек. Режим знает свою.
+  """
+  @callback betting_structure(RoomState.t()) :: module()
+
   @doc "Название стола для экрана: у кэша это лимит, у турнира — шаблон турнира."
   @callback display_name(RoomState.t()) :: String.t()
 
@@ -222,6 +230,15 @@ defmodule BlockPoker.GameMode do
   потому что поход в кошелёк это I/O, а режим им не владеет (§3 CLAUDE.md).
   """
   @callback results(RoomState.t()) :: [result()]
+
+  @doc """
+  Правила бомб-пота для экрана: шанс, взнос и подпись — или `nil`.
+
+  Отличается от `bomb_pot/1` тем, что описывает **стол**, а не решение по
+  ближайшей раздаче: шанс постоянен, а выпавший взнос появляется только
+  после броска.
+  """
+  @callback bomb_pot_view(RoomState.t()) :: map() | nil
 
   @doc "Вернуть фишки игроку: в кэше — cash-out в кошелёк, в турнире — no-op."
   @callback return_chips(RoomState.t(), Ecto.UUID.t(), non_neg_integer(), String.t()) ::

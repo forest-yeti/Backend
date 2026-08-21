@@ -13,7 +13,6 @@ defmodule Socket.Views.TableView do
   значения: любая арифметика над фишками — признак утёкшей сюда логики.
   """
 
-  alias BlockPoker.CashGames.CashGameSetting
   alias BlockPoker.Engine.Card
   alias BlockPoker.Engine.Hand
   alias BlockPoker.Engine.HandInsight
@@ -25,15 +24,20 @@ defmodule Socket.Views.TableView do
   @doc "Полный персональный снапшот — после join и после реконнекта."
   @spec render(RoomState.t(), Ecto.UUID.t()) :: map()
   def render(%RoomState{} = room, user_id) do
+    limits = room.mode.limits(room)
+
     %{
       room_id: room.room_id,
       setting_id: room.setting.id,
-      name: CashGameSetting.display_name(room.setting),
+      name: room.mode.display_name(room),
       game_type: room.setting.game_type,
-      betting_structure: CashGameSetting.structure(room.setting).id(),
-      small_blind: room.setting.small_blind,
-      big_blind: room.setting.big_blind,
-      ante: room.setting.ante,
+      betting_structure: room.mode.betting_structure(room).id(),
+      # Номиналы спрашиваются у режима: в кэше это поля шаблона, в турнире —
+      # текущий уровень структуры. Выбирать между ними здесь значило бы
+      # ветвиться по правилам игры (§3 CLAUDE.md).
+      small_blind: limits.small_blind,
+      big_blind: limits.big_blind,
+      ante: limits.ante,
       # Номинал, от которого клиент считает шаги ползунка ставки. Приходит
       # посчитанным: выбирать между блайндом и анте — это ветвление по
       # правилам игры, которого в транспорте быть не может (§3 CLAUDE.md).
@@ -48,10 +52,10 @@ defmodule Socket.Views.TableView do
       # Бомб-пот: правила стола (шанс и взнос) и решение по ближайшей
       # раздаче. Второе — не то же самое, что первое: шанс постоянен,
       # а `bomb_pot_next` появляется только когда кубик уже выпал.
-      bomb_pot: CashGameSetting.bomb_pot(room.setting),
+      bomb_pot: room.mode.bomb_pot_view(room),
       bomb_pot_next: room.bomb_pot,
       max_players: room.setting.max_players,
-      timings: timings(room.setting),
+      timings: room.mode.timings(room),
       action_seq: room.action_seq,
       phase: room.phase,
       button_seat: room.button_seat,
@@ -67,6 +71,9 @@ defmodule Socket.Views.TableView do
       # Открытый вопрос про два прогона с остатком времени: вернувшийся
       # внутри окна игрок должен успеть ответить.
       run_it_twice: RoomState.run_it_twice_view(room, System.monotonic_time(:millisecond)),
+      # Турнирный блок либо `nil` — режим Sit & Go описывает себя здесь
+      # целиком: уровень, время до повышения, приз и занятые места.
+      tournament: tournament(room),
       chat: room.chat,
       # Панель реакций рисуется ровно этим списком и в этом порядке.
       reactions: BlockPoker.Tables.reactions(),
@@ -75,22 +82,29 @@ defmodule Socket.Views.TableView do
   end
 
   @doc """
-  Тайминги комнаты: всё, по чему клиент рисует обратный отсчёт.
+  Турнирная часть снапшота: то, чего нет за кэш-столом.
 
-  Они приходят в снапшоте, а не зашиты в клиент, потому что принадлежат
-  шаблону комнаты: у хедз-апа, турнира и sit-n-go они разные, а правит их
-  оператор в БД без релиза клиента.
+  `nil` за кэш-столом — это не «пустой турнир», а «режим другой», и клиент
+  ветвится по наличию блока, а не по полям внутри него.
+
+  Время до повышения считается здесь, потому что дедлайн хранится в
+  монотонных миллисекундах: наружу уходит остаток, а не момент, — по тем
+  же причинам, по которым так отдаются все остальные дедлайны стола.
   """
-  @spec timings(CashGameSetting.t()) :: map()
-  def timings(setting) do
+  @spec tournament(RoomState.t()) :: map() | nil
+  def tournament(%RoomState{tournament: nil}), do: nil
+
+  def tournament(%RoomState{tournament: tournament} = room) do
     %{
-      action_timeout_ms: setting.action_timeout_ms,
-      time_bank_ms: setting.time_bank_ms,
-      time_bank_refill: setting.time_bank_refill,
-      disconnect_grace_ms: setting.disconnect_grace_ms,
-      rebuy_prompt_ms: setting.rebuy_prompt_ms,
-      straddle_offer_ms: BlockPoker.Tables.straddle_offer_ms(),
-      sit_out_timeout_ms: setting.sit_out_timeout_ms
+      level: tournament.level,
+      next_level_in_ms: remaining(tournament.level_deadline_at),
+      # Приза ещё нет, пока турнир не начался: он тянется до первой карты.
+      prize: tournament.prize,
+      buy_in: room.setting.buy_in,
+      starting_stack: room.setting.starting_stack,
+      players_left: RoomState.alive_count(room),
+      standings: tournament.standings,
+      finished: tournament.settled?
     }
   end
 

@@ -49,6 +49,37 @@ defmodule BlockPoker.SitAndGoFixtures do
     Enum.map(tiers, &struct!(%PrizeTier{id: Ecto.UUID.generate()}, &1))
   end
 
+  @doc """
+  Турнирный шаблон **в БД** вместе с уровнями и тирами.
+
+  Нужен тестам уровня 3 и 4: пул читает шаблоны из базы, и подсунуть ему
+  структуру в памяти нельзя.
+  """
+  def setting_fixture(overrides \\ %{}) do
+    built = build_setting(overrides)
+
+    attrs =
+      built
+      |> Map.take([
+        :name,
+        :game_type,
+        :currency,
+        :max_players,
+        :buy_in,
+        :starting_stack,
+        :enabled,
+        :sort_order
+      ])
+
+    levels = Enum.map(built.blind_levels, &Map.take(&1, level_keys()))
+    tiers = Enum.map(built.prize_tiers, &Map.take(&1, [:multiplier, :chance_ppm, :payouts]))
+
+    {:ok, setting} = BlockPoker.SitAndGo.create_setting(attrs, levels, tiers)
+    setting
+  end
+
+  defp level_keys, do: [:level, :small_blind, :big_blind, :ante, :duration_seconds]
+
   @doc "Турнирный шаблон в памяти со всем, что нужно комнате для старта."
   def build_setting(overrides \\ %{}) do
     levels = Map.get(overrides, :blind_levels, blind_levels())

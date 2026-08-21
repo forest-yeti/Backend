@@ -107,6 +107,9 @@ defmodule BlockPoker.GameMode.Cash do
   end
 
   @impl true
+  def betting_structure(%RoomState{setting: setting}), do: CashGameSetting.structure(setting)
+
+  @impl true
   def display_name(%RoomState{setting: setting}), do: CashGameSetting.display_name(setting)
 
   @impl true
@@ -126,6 +129,9 @@ defmodule BlockPoker.GameMode.Cash do
 
   @impl true
   def bomb_pot(%RoomState{setting: setting}), do: CashGameSetting.bomb_pot(setting)
+
+  @impl true
+  def bomb_pot_view(%RoomState{setting: setting}), do: CashGameSetting.bomb_pot(setting)
 
   @doc "Кэш-стол не заканчивается: он пустеет и ждёт новых игроков."
   @impl true

@@ -55,6 +55,49 @@ defmodule BlockPoker.Tables do
   def lobby_snapshot(query \\ %LobbyQuery{}), do: Lobby.snapshot(Lobby, query)
 
   @doc """
+  Витрина Sit & Go, суженная фильтром по дисциплине.
+
+  Разбор фильтра живёт здесь, а не в канале: что такое «дисциплина» и
+  какие они бывают — доменное знание, и транспорту его иметь незачем
+  (§3 CLAUDE.md). Незнакомые значения отбрасываются молча: клиент, у
+  которого в памяти остался снятый с продажи вид покера, должен увидеть
+  остальные, а не ошибку.
+  """
+  @spec sit_n_go_snapshot(term()) :: [map()]
+  def sit_n_go_snapshot(params \\ nil) do
+    SitAndGoLobby.snapshot(SitAndGoLobby, parse_game_types(params))
+  end
+
+  @doc "Проходит ли шаблон фильтр подписчика — для адресной рассылки обновлений."
+  @spec sit_n_go_visible?([atom()], map()) :: boolean()
+  def sit_n_go_visible?([], _snapshot), do: true
+
+  def sit_n_go_visible?(game_types, %{setting: setting}),
+    do: setting.game_type in game_types
+
+  @doc "Разбор фильтра дисциплин: пустой список означает «все»."
+  @spec parse_game_types(term()) :: [atom()]
+  def parse_game_types(%{"game_types" => types}) when is_list(types) do
+    known = VariantRegistry.ids()
+
+    types
+    |> Enum.map(&to_game_type/1)
+    |> Enum.filter(&(&1 in known))
+    |> Enum.uniq()
+  end
+
+  def parse_game_types(_params), do: []
+
+  defp to_game_type(value) when is_binary(value) do
+    case VariantRegistry.fetch(value) do
+      {:ok, variant} -> variant.id()
+      {:error, :unknown_variant} -> nil
+    end
+  end
+
+  defp to_game_type(_value), do: nil
+
+  @doc """
   Допустимые значения фильтров и сортировок — их же клиент рисует в панели.
   Список приходит с сервера, чтобы новая категория не требовала релиза
   клиента с захардкоженным списком.

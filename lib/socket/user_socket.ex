@@ -14,6 +14,7 @@ defmodule Socket.UserSocket do
   alias Socket.Protocol.Version
 
   channel "lobby", Socket.Channels.LobbyChannel
+  channel "sit_n_go", Socket.Channels.SitAndGoChannel
   channel "table:*", Socket.Channels.TableChannel
   channel "wallet:*", Socket.Channels.WalletChannel
 
