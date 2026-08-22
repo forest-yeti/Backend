@@ -117,6 +117,17 @@ defmodule BlockPoker.OfcGames.OfcSetting do
   def max_buy_in_chips(%__MODULE__{max_buy_in: nil}), do: nil
   def max_buy_in_chips(%__MODULE__{} = setting), do: setting.max_buy_in * bet_unit(setting)
 
+  @doc """
+  Подпись шаблона для отчётов и логов. Имя оператора, если оно есть; иначе
+  номинал и размер стола — то же, чем стол отличается от соседнего в сетке.
+  """
+  @spec display_name(t()) :: String.t()
+  def display_name(%__MODULE__{name: name}) when is_binary(name) and name != "", do: name
+
+  def display_name(%__MODULE__{} = setting) do
+    "#{setting.point_value}/очко #{setting.max_players}-max"
+  end
+
   @doc "Видна ли комната в общей сетке лобби."
   @spec public?(t()) :: boolean()
   def public?(%__MODULE__{visibility: :private}), do: false
