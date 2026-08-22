@@ -7,6 +7,7 @@ defmodule BlockPoker.Tables.RoomStateTest do
 
   import BlockPoker.CashGamesFixtures
 
+  alias BlockPoker.CashGames.CashGameSetting
   alias BlockPoker.Tables.{RoomState, Seat}
 
   setup do
@@ -202,7 +203,7 @@ defmodule BlockPoker.Tables.RoomStateTest do
 
     test "докупка возвращает его в игру", %{room: room} do
       room = RoomState.zero_stack(room, 2)
-      {:ok, room, "ref-1"} = RoomState.begin_add_chips(room, "user-1", 400, "ref-1")
+      {:ok, room, "ref-1", nil} = RoomState.begin_add_chips(room, "user-1", 400, "ref-1")
       {:ok, room, seat} = RoomState.commit_add_chips(room, "user-1", "ref-1")
 
       assert seat.status == :playing
@@ -216,13 +217,87 @@ defmodule BlockPoker.Tables.RoomStateTest do
     end
   end
 
-  test "докупка во время раздачи запрещена", %{room: room} do
+  test "докупка во время раздачи ждёт следующей, а не отклоняется", %{room: room} do
     {:ok, room} = RoomState.reserve(room, 2, "user-1", "res-1")
     {:ok, room, _seat} = RoomState.confirm(room, "res-1", 500, :wait_bb)
     room = %{room | phase: :hand}
 
-    assert {:error, :hand_in_progress} =
-             RoomState.begin_add_chips(room, "user-1", 100, "ref-1")
+    {:ok, room, "ref-1", nil} = RoomState.begin_add_chips(room, "user-1", 100, "ref-1")
+    {:queued, room, seat, 100} = RoomState.commit_add_chips(room, "user-1", "ref-1")
+
+    # Фишки на стол посреди торговли не падают, но заявка видна столу.
+    assert seat.stack == 500
+    assert RoomState.queued_add_chips(seat) == 100
+
+    {room, [applied]} = RoomState.apply_queued_add_chips(%{room | phase: :waiting})
+
+    assert applied.credited == 100
+    assert applied.refund == 0
+    assert Map.fetch!(room.seats, 2).stack == 600
+    assert RoomState.queued_add_chips(Map.fetch!(room.seats, 2)) == nil
+  end
+
+  test "отложенная докупка урезается до потолка бай-ина, остаток на возврат", %{room: room} do
+    {:ok, room} = RoomState.reserve(room, 2, "user-1", "res-1")
+    {:ok, room, _seat} = RoomState.confirm(room, "res-1", 500, :wait_bb)
+    room = %{room | phase: :hand}
+
+    {:ok, room, "ref-1", nil} = RoomState.begin_add_chips(room, "user-1", 400, "ref-1")
+    {:queued, room, _seat, 400} = RoomState.commit_add_chips(room, "user-1", "ref-1")
+
+    # Пока заявка ждала, игрок выиграл банк и до потолка осталось меньше.
+    room = put_in(room.seats[2].stack, 800)
+    max = CashGameSetting.max_buy_in_chips(room.setting)
+    {room, [applied]} = RoomState.apply_queued_add_chips(%{room | phase: :waiting})
+
+    assert applied.credited == max - 800
+    assert applied.refund == 400 - (max - 800)
+    assert Map.fetch!(room.seats, 2).stack == max
+  end
+
+  test "отложенную докупку можно отменить до раздачи", %{room: room} do
+    {:ok, room} = RoomState.reserve(room, 2, "user-1", "res-1")
+    {:ok, room, _seat} = RoomState.confirm(room, "res-1", 500, :wait_bb)
+    room = %{room | phase: :hand}
+
+    {:ok, room, "ref-1", nil} = RoomState.begin_add_chips(room, "user-1", 100, "ref-1")
+    {:queued, room, _seat, 100} = RoomState.commit_add_chips(room, "user-1", "ref-1")
+
+    assert {:ok, room, "ref-1", 100} = RoomState.cancel_add_chips(room, "user-1")
+    assert {:error, :no_queued_add_chips} = RoomState.cancel_add_chips(room, "user-1")
+
+    {room, []} = RoomState.apply_queued_add_chips(%{room | phase: :waiting})
+    assert Map.fetch!(room.seats, 2).stack == 500
+  end
+
+  test "новая сумма заменяет отложенную докупку", %{room: room} do
+    {:ok, room} = RoomState.reserve(room, 2, "user-1", "res-1")
+    {:ok, room, _seat} = RoomState.confirm(room, "res-1", 500, :wait_bb)
+    room = %{room | phase: :hand}
+
+    {:ok, room, "ref-1", nil} = RoomState.begin_add_chips(room, "user-1", 100, "ref-1")
+    {:queued, room, _seat, 100} = RoomState.commit_add_chips(room, "user-1", "ref-1")
+
+    # Заменённая заявка названа в ответе: её деньги возвращает вызывающий.
+    assert {:ok, room, "ref-2", %{ref: "ref-1", amount: 100}} =
+             RoomState.begin_add_chips(room, "user-1", 200, "ref-2")
+
+    {:queued, room, _seat, 200} = RoomState.commit_add_chips(room, "user-1", "ref-2")
+    {room, [applied]} = RoomState.apply_queued_add_chips(%{room | phase: :waiting})
+
+    assert applied.credited == 200
+    assert Map.fetch!(room.seats, 2).stack == 700
+  end
+
+  test "уход из-за стола забирает отложенную докупку с собой", %{room: room} do
+    {:ok, room} = RoomState.reserve(room, 2, "user-1", "res-1")
+    {:ok, room, _seat} = RoomState.confirm(room, "res-1", 500, :wait_bb)
+    room = %{room | phase: :hand}
+
+    {:ok, room, "ref-1", nil} = RoomState.begin_add_chips(room, "user-1", 100, "ref-1")
+    {:queued, room, _seat, 100} = RoomState.commit_add_chips(room, "user-1", "ref-1")
+
+    assert {:ok, _room, 600} = RoomState.begin_leave(%{room | phase: :waiting}, "user-1", "out-1")
   end
 
   test "комната закрывается только пустой и без фишек", %{room: room} do

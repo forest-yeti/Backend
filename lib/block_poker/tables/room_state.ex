@@ -1138,6 +1138,12 @@ defmodule BlockPoker.Tables.RoomState do
   @doc """
   Начало докупки: проверка условий и **закрепление ключа** за местом.
 
+  Раздача докупку не запрещает: заказать её можно в любой момент, а лягут
+  фишки на стол в начале следующей раздачи (`queue_add_chips/3`). Ловить
+  паузу между раздачами игрок не обязан — это требование от него ничего
+  не защищало, кроме эффективного стека посреди торговли, а его защищает
+  сам факт отложенного зачисления.
+
   Ключ живёт в месте, а не выдаётся заново на каждый вызов, потому что между
   проверкой и зачислением лежит поход в кошелёк. Двойной клик по «докупить»
   успевает пройти проверку дважды **до** первого зачисления — с новым ключом
@@ -1147,29 +1153,44 @@ defmodule BlockPoker.Tables.RoomState do
 
   Другая сумма поверх незавершённой докупки — не повтор, а второй запрос, и
   он отклоняется: какая из двух сумм окажется на столе, иначе решала бы гонка.
+  Поверх **отложенной** докупки та же сумма, наоборот, разрешена и заменяет
+  её: заявка ещё не сработала, менять её игрок вправе. Заменённая заявка
+  возвращается третьим элементом ответа — деньги по ней вернёт вызывающий.
   """
   @spec begin_add_chips(t(), Ecto.UUID.t(), pos_integer(), String.t()) ::
-          {:ok, t(), String.t()} | {:error, atom()}
+          {:ok, t(), String.t(), %{ref: String.t(), amount: pos_integer()} | nil}
+          | {:error, atom()}
   def begin_add_chips(state, user_id, amount, ref) do
     with {:ok, seat} <- fetch_player(state, user_id),
-         :ok <- ensure_between_hands(state),
-         {:ok, ref} <- reuse_ref(seat, amount, ref),
+         {:ok, ref, replaced} <- reuse_ref(seat, amount, ref),
          :ok <- validate_buy_in(state, amount, seat.stack) do
       seat = %{seat | add_chips: %{ref: ref, amount: amount, status: :pending}}
-      {:ok, put_seat(state, seat), ref}
+      {:ok, put_seat(state, seat), ref, replaced}
     end
   end
 
-  defp reuse_ref(%Seat{add_chips: %{status: :pending, amount: amount, ref: ref}}, amount, _new),
-    do: {:ok, ref}
+  defp reuse_ref(%Seat{add_chips: %{status: status, amount: amount, ref: ref}}, amount, _new)
+       when status in [:pending, :queued],
+       do: {:ok, ref, nil}
 
+  # Ждущая своей раздачи докупка — это ещё не решение, а заявка, и другая
+  # сумма её заменяет: игрок передумал, а не заказал вторую. Списанное по
+  # старой заявке возвращает вызывающий — она названа в `replaced`.
+  defp reuse_ref(%Seat{add_chips: %{status: :queued} = old}, _amount, ref),
+    do: {:ok, ref, %{ref: old.ref, amount: old.amount}}
+
+  # А вот незавершённая докупка на другую сумму — гонка: деньги по ней прямо
+  # сейчас идут через кошелёк, и какая из двух сумм окажется на столе,
+  # решал бы порядок ответов.
   defp reuse_ref(%Seat{add_chips: %{status: :pending}}, _amount, _new),
     do: {:error, :add_chips_in_progress}
 
-  defp reuse_ref(%Seat{}, _amount, ref), do: {:ok, ref}
+  defp reuse_ref(%Seat{}, _amount, ref), do: {:ok, ref, nil}
 
   @doc """
-  Зачисление докупки. Разрешена между раздачами в любой момент, до `max_buy_in`.
+  Зачисление докупки. Между раздачами фишки ложатся на стол сразу; во время
+  раздачи докупка встаёт в очередь и зачисляется в начале следующей
+  (`apply_queued_add_chips/1`).
 
   Сумма берётся из закреплённого ключа, а не из аргумента: зачисляется ровно
   то, что было списано. Повтор по уже зачисленному ключу — `:already_credited`,
@@ -1177,23 +1198,36 @@ defmodule BlockPoker.Tables.RoomState do
   их вызывающему нечего.
   """
   @spec commit_add_chips(t(), Ecto.UUID.t(), String.t()) ::
-          {:ok, t(), Seat.t()} | {:already_credited, Seat.t()} | {:error, atom()}
+          {:ok, t(), Seat.t()}
+          | {:queued, t(), Seat.t(), pos_integer()}
+          | {:already_credited, Seat.t()}
+          | {:error, atom()}
   def commit_add_chips(state, user_id, ref) do
     with {:ok, seat} <- fetch_player(state, user_id) do
       case seat.add_chips do
-        %{ref: ^ref, status: :pending, amount: amount} -> credit(state, seat, ref, amount)
+        %{ref: ^ref, status: :pending, amount: amount} -> settle(state, seat, ref, amount)
+        %{ref: ^ref, status: :queued} = queued -> {:queued, state, seat, queued.amount}
         %{ref: ^ref, status: :settled} -> {:already_credited, seat}
         _other -> {:error, :add_chips_lost}
       end
     end
   end
 
-  # Условия проверяются заново: пока деньги шли через кошелёк, стол успевает
-  # начать раздачу. Отказ здесь — это уже списанные фишки, и возвращает их
-  # вызывающий (`Tables.commit_add_chips/5`).
+  # Идёт раздача — фишки на стол не падают: эффективный стек посреди торговли
+  # обесценил бы уже сделанные ставки. Деньги при этом уже списаны, поэтому
+  # докупка не отклоняется, а встаёт в очередь до начала следующей раздачи.
+  defp settle(%__MODULE__{phase: :hand} = state, seat, ref, amount) do
+    seat = %{seat | add_chips: %{ref: ref, amount: amount, status: :queued}}
+    {:queued, put_seat(state, seat), seat, amount}
+  end
+
+  defp settle(state, seat, ref, amount), do: credit(state, seat, ref, amount)
+
+  # Условия проверяются заново: пока деньги шли через кошелёк, стек за столом
+  # успевает измениться. Отказ здесь — это уже списанные фишки, и возвращает
+  # их вызывающий (`Tables.commit_add_chips/5`).
   defp credit(state, seat, ref, amount) do
-    with :ok <- ensure_between_hands(state),
-         :ok <- validate_buy_in(state, amount, seat.stack) do
+    with :ok <- validate_buy_in(state, amount, seat.stack) do
       seat = %{
         seat
         | stack: seat.stack + amount,
@@ -1226,6 +1260,95 @@ defmodule BlockPoker.Tables.RoomState do
   end
 
   @doc """
+  Заказанная, но ещё не зачисленная докупка этого места, либо `nil`.
+
+  Публична: соперник, считающий эффективный стек, обязан знать, что через
+  раздачу перед этим креслом будет больше фишек. Скрывать это — давать
+  преимущество тому, кто докупился, а не тому, кто внимателен.
+  """
+  @spec queued_add_chips(Seat.t()) :: pos_integer() | nil
+  def queued_add_chips(%Seat{add_chips: %{status: :queued, amount: amount}}), do: amount
+  def queued_add_chips(%Seat{}), do: nil
+
+  @doc """
+  Зачислить все отложенные докупки. Вызывается первым шагом старта раздачи —
+  до отбора играющих мест и до блайндов, чтобы обнулившийся и тут же
+  докупившийся игрок не пропускал раздачу, которую он уже оплатил.
+
+  Границы проверяются заново: пока заявка ждала, стек мог вырасти. Лишнее
+  не отменяет докупку целиком (деньги-то списаны), а урезается — остаток
+  возвращает вызывающий, он назван в списке возвратов.
+  """
+  @spec apply_queued_add_chips(t()) ::
+          {t(),
+           [
+             %{
+               user_id: Ecto.UUID.t(),
+               seat: pos_integer(),
+               credited: non_neg_integer(),
+               refund: non_neg_integer(),
+               ref: String.t()
+             }
+           ]}
+  def apply_queued_add_chips(state) do
+    state
+    |> seats()
+    |> Enum.filter(&(queued_add_chips(&1) != nil))
+    |> Enum.reduce({state, []}, fn seat, {state, applied} ->
+      %{ref: ref, amount: amount} = seat.add_chips
+      credited = trim_add_chips(state, seat, amount)
+
+      seat = %{seat | add_chips: %{ref: ref, amount: credited, status: :settled}}
+      seat = %{seat | stack: seat.stack + credited}
+
+      seat =
+        if seat.stack > 0 and seat.status == :sitting_out,
+          do: activate_seat(seat, state),
+          else: seat
+
+      entry = %{
+        user_id: seat.user_id,
+        seat: seat.number,
+        credited: credited,
+        refund: amount - credited,
+        ref: ref
+      }
+
+      {put_seat(state, seat), [entry | applied]}
+    end)
+    |> then(fn {state, applied} -> {state, Enum.reverse(applied)} end)
+  end
+
+  defp trim_add_chips(state, seat, amount) do
+    case state.mode.max_add_chips(state, seat.stack) do
+      nil -> amount
+      max -> min(amount, max)
+    end
+  end
+
+  @doc """
+  Отмена отложенной докупки: заявка снимается с места, а её сумму —
+  списанную, но так и не легшую на стол — возвращает вызывающий.
+
+  Отменить можно только заявку, ждущую следующей раздачи. Незавершённая
+  докупка (`:pending`) в этот момент идёт через кошелёк, и отменять то,
+  чем сейчас распоряжается другой шаг, значит устраивать гонку за деньги.
+  """
+  @spec cancel_add_chips(t(), Ecto.UUID.t()) ::
+          {:ok, t(), String.t(), pos_integer()} | {:error, atom()}
+  def cancel_add_chips(state, user_id) do
+    with {:ok, seat} <- fetch_player(state, user_id) do
+      case seat.add_chips do
+        %{status: :queued, ref: ref, amount: amount} ->
+          {:ok, put_seat(state, %{seat | add_chips: nil}), ref, amount}
+
+        _other ->
+          {:error, :no_queued_add_chips}
+      end
+    end
+  end
+
+  @doc """
   Начало ухода из-за стола: стек снимается со стола и уходит «в полёт»
   к кошельку, место остаётся занятым до подтверждения транзакции.
 
@@ -1236,8 +1359,11 @@ defmodule BlockPoker.Tables.RoomState do
           {:ok, t(), non_neg_integer()} | {:error, atom()}
   def begin_leave(state, user_id, ref) do
     with {:ok, seat} <- fetch_player(state, user_id) do
-      stack = seat.stack
-      seat = %{seat | status: :leaving, stack: 0, reservation_id: ref}
+      # Отложенная докупка уходит вместе с игроком: деньги по ней списаны,
+      # а стол, который он покидает, их уже не получит. Отдельным возвратом
+      # это делать нечего — cash-out и так вычисляет, сколько ему должны.
+      stack = seat.stack + (queued_add_chips(seat) || 0)
+      seat = %{seat | status: :leaving, stack: 0, reservation_id: ref, add_chips: nil}
       {:ok, put_seat(state, seat), stack}
     end
   end
@@ -1509,7 +1635,4 @@ defmodule BlockPoker.Tables.RoomState do
     # Мультитейблинг разрешён; ограничение ровно одно — одно место в комнате.
     if find_seat(state, user_id), do: {:error, :already_seated}, else: :ok
   end
-
-  defp ensure_between_hands(%__MODULE__{phase: :hand}), do: {:error, :hand_in_progress}
-  defp ensure_between_hands(_state), do: :ok
 end

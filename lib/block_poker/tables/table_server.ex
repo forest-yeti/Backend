@@ -127,15 +127,28 @@ defmodule BlockPoker.Tables.TableServer do
   на нём и держится защита от двойного списания.
   """
   @spec begin_add_chips(GenServer.server(), Ecto.UUID.t(), pos_integer()) ::
-          {:ok, String.t()} | {:error, atom()}
+          {:ok, String.t(), %{ref: String.t(), amount: pos_integer()} | nil} | {:error, atom()}
   def begin_add_chips(room, user_id, amount) do
     GenServer.call(room, {:begin_add_chips, user_id, amount})
   end
 
   @spec commit_add_chips(GenServer.server(), Ecto.UUID.t(), String.t()) ::
-          {:ok, Seat.t()} | {:already_credited, Seat.t()} | {:error, atom()}
+          {:ok, Seat.t()}
+          | {:queued, Seat.t(), pos_integer()}
+          | {:already_credited, Seat.t()}
+          | {:error, atom()}
   def commit_add_chips(room, user_id, ref) do
     GenServer.call(room, {:commit_add_chips, user_id, ref})
+  end
+
+  @doc """
+  Отменить отложенную докупку. Возвращает ключ и сумму, которую вызывающий
+  обязан вернуть в кошелёк: со стола она снята здесь.
+  """
+  @spec cancel_add_chips(GenServer.server(), Ecto.UUID.t()) ::
+          {:ok, String.t(), pos_integer()} | {:error, atom()}
+  def cancel_add_chips(room, user_id) do
+    GenServer.call(room, {:cancel_add_chips, user_id})
   end
 
   @doc "Докупка сорвалась и деньги возвращены: снять ключ с места."
@@ -502,8 +515,13 @@ defmodule BlockPoker.Tables.TableServer do
 
   def handle_call({:begin_add_chips, user_id, amount}, _from, state) do
     case RoomState.begin_add_chips(state.room, user_id, amount, new_ref()) do
-      {:ok, room, ref} -> {:reply, {:ok, ref}, put_room(state, room)}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:ok, room, ref, replaced} ->
+        state = put_room(state, room)
+        if replaced, do: announce(state)
+        {:reply, {:ok, ref, replaced}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -523,11 +541,37 @@ defmodule BlockPoker.Tables.TableServer do
         broadcast(state, "chips_added", %{seat: seat.number, stack: seat.stack})
         {:reply, {:ok, seat}, state}
 
+      # Идёт раздача: деньги списаны, но фишки лягут на стол только в начале
+      # следующей. Стол объявляет заявку сразу — эффективный стек этого места
+      # через раздачу вырастет, и знать об этом должны все, а не только
+      # заказавший.
+      {:queued, room, seat, amount} ->
+        state = state |> put_room(room) |> cancel_timer({:rebuy, seat.number})
+
+        announce(state)
+        broadcast(state, "add_chips_queued", %{seat: seat.number, amount: amount})
+        {:reply, {:queued, seat, amount}, state}
+
       # Ключ уже отработал: фишки на столе, второй раз их зачислять нечего
       # и возвращать нечего. Повтор отличается от первого вызова только тем,
       # что стол уже ничего не меняет.
       {:already_credited, seat} ->
         {:reply, {:already_credited, seat}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:cancel_add_chips, user_id}, _from, state) do
+    case RoomState.cancel_add_chips(state.room, user_id) do
+      {:ok, room, ref, amount} ->
+        state = put_room(state, room)
+        seat = RoomState.find_seat(state.room, user_id)
+
+        announce(state)
+        broadcast(state, "add_chips_cancelled", %{seat: seat.number})
+        {:reply, {:ok, ref, amount}, state}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -831,6 +875,10 @@ defmodule BlockPoker.Tables.TableServer do
     # между раздачами игрок вправе встать, и кнопка остаётся на месте,
     # которое эту раздачу не играет. Позиции тогда считаются от пустого
     # кресла — блайнды платят не те.
+    # Отложенные докупки — первым шагом: до отбора играющих мест и до
+    # блайндов. Иначе обнулившийся и тут же докупившийся игрок пропустил бы
+    # раздачу, за которую уже заплатил.
+    state = apply_queued_add_chips(state)
     state = maybe_draw_prize(state)
     state = maybe_advance_level(state)
     state = put_room(state, ensure_button_in_play(state.room))
@@ -1276,6 +1324,32 @@ defmodule BlockPoker.Tables.TableServer do
 
     announce(state)
     state
+  end
+
+  defp apply_queued_add_chips(state) do
+    {room, applied} = RoomState.apply_queued_add_chips(state.room)
+    state = put_room(state, room)
+
+    Enum.each(applied, fn entry ->
+      broadcast(state, "chips_added", %{
+        seat: entry.seat,
+        stack: RoomState.find_seat(state.room, entry.user_id).stack
+      })
+
+      # Урезанный остаток возвращается в кошелёк вне процесса: стол не имеет
+      # права ждать базу, держа в руках начало раздачи.
+      if entry.refund > 0 do
+        return_chips_async(state.room, entry.user_id, entry.refund, entry.ref)
+      end
+    end)
+
+    if applied != [], do: announce(state)
+
+    state
+  end
+
+  defp return_chips_async(%RoomState{} = room, user_id, amount, ref) do
+    Task.start(fn -> BlockPoker.Tables.return_chips(room, user_id, amount, "trim:#{ref}") end)
   end
 
   defp default_payout(%RoomState{} = room, results) do

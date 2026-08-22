@@ -321,10 +321,12 @@ defmodule BlockPoker.Tables do
   end
 
   @doc """
-  Докупка. Разрешена между раздачами в любой момент, независимо от текущего
-  стека; верх ограничен `max_buy_in`. Во время раздачи запрещена: докупка
-  на ходу меняет эффективный стек посреди торговли и ломает уже сделанные
-  ставки.
+  Докупка. Разрешена в любой момент, независимо от текущего стека; верх
+  ограничен `max_buy_in`. Во время раздачи фишки на стол не падают —
+  это меняло бы эффективный стек посреди торговли, — но и отказа игрок
+  не получает: деньги списываются сразу, а фишки ложатся на стол в начале
+  следующей раздачи (`{:ok, %{queued: true}}`). Ловить паузу между раздачами
+  игрок не должен: заказать докупку и играть дальше — одно действие.
 
   Порядок трёхшаговый и по той же причине, что у посадки: между проверкой и
   зачислением лежит поход в кошелёк, а за это время комната успевает начать
@@ -342,22 +344,37 @@ defmodule BlockPoker.Tables do
   @spec add_chips(Ecto.UUID.t(), Ecto.UUID.t(), pos_integer()) :: {:ok, map()} | {:error, error()}
   def add_chips(room_id, user_id, amount) do
     with {:ok, pid} <- fetch_room(room_id),
-         {:ok, ref} <- TableServer.begin_add_chips(pid, user_id, amount),
+         {:ok, ref, replaced} <- TableServer.begin_add_chips(pid, user_id, amount),
          room = TableServer.state(pid),
-         :ok <- take_buy_in(pid, room, user_id, amount, ref) do
+         :ok <- take_buy_in(pid, room, user_id, amount, ref, replaced) do
+      refund_replaced(room, user_id, replaced)
       commit_add_chips(pid, room_id, user_id, amount, ref)
     end
   end
 
+  # Новая заявка вытеснила старую отложенную: её деньги возвращаются в
+  # кошелёк. Возврат делается после успешного списания новой суммы — так
+  # игрок не может, меняя заявку туда-обратно, оказаться с деньгами и на
+  # столе, и в кошельке.
+  defp refund_replaced(_room, _user_id, nil), do: :ok
+
+  defp refund_replaced(room, user_id, %{ref: ref, amount: amount}) do
+    return_lost_chips(room, user_id, amount, "replaced:#{ref}")
+  end
+
   # Списание не прошло: ключ надо снять с места, иначе следующая попытка
   # упрётся в «предыдущая докупка ещё не завершена» при пустом кошельке.
-  defp take_buy_in(pid, room, user_id, amount, ref) do
+  defp take_buy_in(pid, room, user_id, amount, ref, replaced) do
     case room.mode.take_buy_in(room, user_id, amount, ref) do
       :ok ->
         :ok
 
       {:error, reason} ->
         TableServer.abort_add_chips(pid, user_id, ref)
+
+        # Вытесненная заявка уже снята со стола: её деньги возвращаются даже
+        # тогда, когда новая не прошла, — иначе они пропадут между двумя.
+        refund_replaced(room, user_id, replaced)
         {:error, reason}
     end
   end
@@ -372,13 +389,18 @@ defmodule BlockPoker.Tables do
   def commit_add_chips(pid, room_id, user_id, amount, ref) do
     case TableServer.commit_add_chips(pid, user_id, ref) do
       {:ok, seat} ->
-        {:ok, %{room_id: room_id, seat: seat.number, stack: seat.stack}}
+        {:ok, %{room_id: room_id, seat: seat.number, stack: seat.stack, queued: 0}}
+
+      # Стол в раздаче: деньги списаны, фишки ждут её конца. Для игрока это
+      # успех — с той разницей, что стек вырастет не сейчас.
+      {:queued, seat, queued} ->
+        {:ok, %{room_id: room_id, seat: seat.number, stack: seat.stack, queued: queued}}
 
       # Повтор по уже отработавшему ключу: фишки на столе с первого раза,
       # второго списания не было (кошелёк снял дубль по `idempotency_key`),
       # и возвращать нечего. Игроку это неотличимо от успеха — им и является.
       {:already_credited, seat} ->
-        {:ok, %{room_id: room_id, seat: seat.number, stack: seat.stack}}
+        {:ok, %{room_id: room_id, seat: seat.number, stack: seat.stack, queued: 0}}
 
       # Между проверкой и зачислением стол начал раздачу или место ушло —
       # деньги уже списаны, и без возврата они остались бы ни в кошельке,
@@ -406,6 +428,28 @@ defmodule BlockPoker.Tables do
         :error
     end
   end
+
+  @doc """
+  Отменить отложенную докупку до того, как она легла на стол. Деньги
+  возвращаются в кошелёк; отменять уже зачисленную докупку нечего —
+  это обычный уход из-за стола.
+  """
+  @spec cancel_add_chips(Ecto.UUID.t(), Ecto.UUID.t()) :: {:ok, map()} | {:error, error()}
+  def cancel_add_chips(room_id, user_id) do
+    with {:ok, pid} <- fetch_room(room_id),
+         {:ok, ref, amount} <- TableServer.cancel_add_chips(pid, user_id) do
+      room = TableServer.state(pid)
+      return_lost_chips(room, user_id, amount, "cancel:#{ref}")
+      {:ok, %{room_id: room_id, returned: amount}}
+    end
+  end
+
+  @doc """
+  Вернуть фишки в кошелёк. Публична ради комнаты: урезанный остаток
+  отложенной докупки возвращается из процесса стола фоновой задачей.
+  """
+  @spec return_chips(map(), Ecto.UUID.t(), pos_integer(), String.t()) :: :ok | :error
+  def return_chips(room, user_id, amount, ref), do: return_lost_chips(room, user_id, amount, ref)
 
   @doc "Игровое действие: fold, check, call, {:raise, to}, :all_in."
   @spec act(Ecto.UUID.t(), Ecto.UUID.t(), term(), non_neg_integer() | nil) ::

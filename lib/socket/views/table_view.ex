@@ -190,6 +190,10 @@ defmodule Socket.Views.TableView do
       # рисует как обычную — новая косметика не требует его релиза.
       flair: seat.flair,
       stack: seat.stack,
+      # Заказанная докупка публична по той же причине, что и страддл: она
+      # меняет цену будущей раздачи для всех за столом, а не только для того,
+      # кто её заказал.
+      add_chips: RoomState.queued_add_chips(seat),
       waiting_for_bb: seat.waiting_for_bb,
       wants_post: seat.wants_post,
       missed_blinds: seat.missed_blinds,
@@ -222,6 +226,7 @@ defmodule Socket.Views.TableView do
           seated: true,
           seat: seat.number,
           stack: seat.stack,
+          add_chips: RoomState.queued_add_chips(seat),
           status: seat.status,
           waiting_for_bb: seat.waiting_for_bb,
           sit_out_pending: seat.sit_out_pending,

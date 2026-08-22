@@ -154,10 +154,10 @@ defmodule BlockPoker.Tables.MoneyTest do
     assert balance(user) == before
   end
 
-  test "докупка, не дошедшая до стола, возвращается в кошелёк", %{user: user} do
-    # Гонка: между проверкой докупки и зачислением комната начала раздачу.
-    # Через `add_chips/3` её не воспроизвести — вызов синхронный, поэтому
-    # шаги разложены руками ровно в том порядке, в каком их делает контекст.
+  test "докупка, заказанная в раздаче, ждёт её конца и отменяема", %{user: user} do
+    # Раздача, начавшаяся между проверкой и зачислением, докупку больше не
+    # отменяет: деньги списаны, и стол принимает заявку. Проверяется, что
+    # списанное не растворяется — отмена возвращает его в кошелёк целиком.
     %{room_id: room_id, pid: pid, buy_in: buy_in} = start_test_room()
     other = user_fixture()
 
@@ -166,7 +166,7 @@ defmodule BlockPoker.Tables.MoneyTest do
 
     before = balance(user)
 
-    {:ok, ref} = TableServer.begin_add_chips(pid, user.id, 100)
+    {:ok, ref, nil} = TableServer.begin_add_chips(pid, user.id, 100)
     room = TableServer.state(pid)
     :ok = GameMode.Cash.take_buy_in(room, user.id, 100, ref)
     assert balance(user) == before - 100
@@ -175,9 +175,10 @@ defmodule BlockPoker.Tables.MoneyTest do
     :ok = TableServer.fire_timer(pid, :button_draw)
     assert TableServer.state(pid).phase == :hand
 
-    assert {:error, :hand_in_progress} =
-             Tables.commit_add_chips(pid, room_id, user.id, 100, ref)
+    assert {:ok, %{queued: 100}} = Tables.commit_add_chips(pid, room_id, user.id, 100, ref)
+    assert balance(user) == before - 100, "заявка не должна возвращать деньги сама по себе"
 
+    assert {:ok, %{returned: 100}} = Tables.cancel_add_chips(room_id, user.id)
     assert balance(user) == before
     assert Enum.count(entries(user), &(&1.type == :cash_out)) == 1
   end
@@ -191,8 +192,8 @@ defmodule BlockPoker.Tables.MoneyTest do
 
     before = balance(user)
 
-    {:ok, first} = TableServer.begin_add_chips(pid, user.id, 100)
-    {:ok, second} = TableServer.begin_add_chips(pid, user.id, 100)
+    {:ok, first, nil} = TableServer.begin_add_chips(pid, user.id, 100)
+    {:ok, second, nil} = TableServer.begin_add_chips(pid, user.id, 100)
     assert first == second, "второй клик получил новый ключ идемпотентности"
 
     :ok = GameMode.Cash.take_buy_in(TableServer.state(pid), user.id, 100, first)

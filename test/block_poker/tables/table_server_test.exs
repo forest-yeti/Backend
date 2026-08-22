@@ -700,14 +700,14 @@ defmodule BlockPoker.Tables.TableServerTest do
     end
 
     test "двойной клик до зачисления получает тот же ключ", %{pid: pid} do
-      {:ok, first} = TableServer.begin_add_chips(pid, "user-1", 100)
-      {:ok, second} = TableServer.begin_add_chips(pid, "user-1", 100)
+      {:ok, first, nil} = TableServer.begin_add_chips(pid, "user-1", 100)
+      {:ok, second, nil} = TableServer.begin_add_chips(pid, "user-1", 100)
 
       assert first == second, "второй клик выдал новый ключ — это второе списание"
     end
 
     test "зачисление по ключу происходит ровно один раз", %{pid: pid} do
-      {:ok, ref} = TableServer.begin_add_chips(pid, "user-1", 100)
+      {:ok, ref, nil} = TableServer.begin_add_chips(pid, "user-1", 100)
 
       assert {:ok, seat} = TableServer.commit_add_chips(pid, "user-1", ref)
       assert seat.stack == 500
@@ -718,24 +718,24 @@ defmodule BlockPoker.Tables.TableServerTest do
     end
 
     test "другая сумма поверх незавершённой докупки отклоняется", %{pid: pid} do
-      {:ok, _ref} = TableServer.begin_add_chips(pid, "user-1", 100)
+      {:ok, _ref, nil} = TableServer.begin_add_chips(pid, "user-1", 100)
 
       assert {:error, :add_chips_in_progress} = TableServer.begin_add_chips(pid, "user-1", 200)
     end
 
     test "сорвавшаяся докупка освобождает ключ", %{pid: pid} do
-      {:ok, ref} = TableServer.begin_add_chips(pid, "user-1", 100)
+      {:ok, ref, nil} = TableServer.begin_add_chips(pid, "user-1", 100)
       :ok = TableServer.abort_add_chips(pid, "user-1", ref)
 
-      assert {:ok, other} = TableServer.begin_add_chips(pid, "user-1", 200)
+      assert {:ok, other, nil} = TableServer.begin_add_chips(pid, "user-1", 200)
       refute other == ref
     end
 
     test "после зачисления докупаться можно снова", %{pid: pid} do
-      {:ok, ref} = TableServer.begin_add_chips(pid, "user-1", 100)
+      {:ok, ref, nil} = TableServer.begin_add_chips(pid, "user-1", 100)
       {:ok, _seat} = TableServer.commit_add_chips(pid, "user-1", ref)
 
-      assert {:ok, next} = TableServer.begin_add_chips(pid, "user-1", 100)
+      assert {:ok, next, nil} = TableServer.begin_add_chips(pid, "user-1", 100)
       refute next == ref
       assert {:ok, seat} = TableServer.commit_add_chips(pid, "user-1", next)
       assert seat.stack == 600

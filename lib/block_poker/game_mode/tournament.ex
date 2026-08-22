@@ -161,6 +161,9 @@ defmodule BlockPoker.GameMode.Tournament do
   означает, что игрок уже в турнире.
   """
   @impl true
+  def max_add_chips(%RoomState{}, _current_stack), do: 0
+
+  @impl true
   def validate_buy_in(%RoomState{setting: setting}, amount, current_stack) do
     if current_stack == 0 and amount == setting.starting_stack do
       :ok

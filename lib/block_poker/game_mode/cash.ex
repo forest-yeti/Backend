@@ -142,6 +142,14 @@ defmodule BlockPoker.GameMode.Cash do
   def results(%RoomState{}), do: []
 
   @impl true
+  def max_add_chips(%RoomState{setting: setting}, current_stack) do
+    case CashGameSetting.max_buy_in_chips(setting) do
+      nil -> nil
+      max -> max(max - current_stack, 0)
+    end
+  end
+
+  @impl true
   def take_buy_in(%RoomState{} = state, user_id, amount, reservation_id) do
     case Wallet.buy_in(user_id, state.setting.currency, amount, "buyin:#{reservation_id}",
            ref_id: state.room_id

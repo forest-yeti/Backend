@@ -92,7 +92,7 @@ defmodule BlockPoker.Tables.RebuyTest do
   test "докупка в окне снимает таймер" do
     %{pid: pid, broke: broke} = busted_room()
 
-    {:ok, ref} = TableServer.begin_add_chips(pid, broke.user_id, 400)
+    {:ok, ref, nil} = TableServer.begin_add_chips(pid, broke.user_id, 400)
     {:ok, seat} = TableServer.commit_add_chips(pid, broke.user_id, ref)
 
     assert seat.stack == 400

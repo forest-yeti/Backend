@@ -153,6 +153,12 @@ defmodule Socket.Channels.TableChannel do
     end
   end
 
+  def handle_in("cancel_add_chips", _payload, socket) do
+    socket.assigns.room_id
+    |> Tables.cancel_add_chips(socket.assigns.user_id)
+    |> Message.reply(socket)
+  end
+
   def handle_in("start_game", _payload, socket) do
     socket.assigns.room_id
     |> Tables.start_game(socket.assigns.user_id)

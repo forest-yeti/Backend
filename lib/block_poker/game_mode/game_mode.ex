@@ -146,6 +146,17 @@ defmodule BlockPoker.GameMode do
   @callback validate_buy_in(RoomState.t(), non_neg_integer(), non_neg_integer()) ::
               :ok | {:error, :invalid_buy_in}
 
+  @doc """
+  Сколько фишек ещё можно доложить к такому стеку. `nil` — потолка нет.
+
+  Нужна отложенной докупке: пока она ждала конца раздачи, стек мог вырасти,
+  и заказанная сумма уже не влезает. Отказывать целиком в этот момент нечестно
+  — деньги списаны, — поэтому докупка урезается до потолка, а остаток уходит
+  назад в кошелёк. Граница спрашивается у режима по той же причине, что и
+  `validate_buy_in/3`: в кэше её задаёт шаблон, в турнире доложить нельзя вовсе.
+  """
+  @callback max_add_chips(RoomState.t(), non_neg_integer()) :: non_neg_integer() | nil
+
   @doc "Раздача завершилась: раздать результаты, обновить состояние комнаты."
   @callback on_hand_finished(RoomState.t(), results :: term()) :: RoomState.t()
 
