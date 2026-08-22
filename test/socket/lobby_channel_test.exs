@@ -270,4 +270,26 @@ defmodule Socket.Channels.LobbyChannelTest do
     assert TableRegistry.whereis(room_id) != nil
     assert user.id != nil
   end
+
+  test "set_avatar меняет метку аватара" do
+    %{user: user, channel: channel} = join_lobby()
+
+    assert user.avatar == "First"
+
+    ref = push(channel, "set_avatar", %{"avatar" => "Third"})
+    assert_reply ref, :ok, %{avatar: "Third"}
+
+    assert {:ok, updated} = BlockPoker.Accounts.get_user(user.id)
+    assert updated.avatar == "Third"
+  end
+
+  test "неизвестная метка аватара отвергается" do
+    %{user: user, channel: channel} = join_lobby()
+
+    ref = push(channel, "set_avatar", %{"avatar" => "Sixth"})
+    assert_reply ref, :error, %{code: "validation_failed"}
+
+    assert {:ok, unchanged} = BlockPoker.Accounts.get_user(user.id)
+    assert unchanged.avatar == "First"
+  end
 end

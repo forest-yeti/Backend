@@ -111,6 +111,26 @@ defmodule BlockPoker.Accounts do
     user |> User.flair_changeset(flair) |> Repo.update()
   end
 
+  @doc """
+  Смена аватара. Единственная косметика, которую игрок ставит себе сам,
+  поэтому путь у неё транспортный, а не через mix-задачу: клиент присылает
+  метку строкой, сервер сверяет её со списком известных и сохраняет.
+
+  Аватар за столом — снимок профиля на момент посадки, так что новая метка
+  доедет до соседей со следующей посадки.
+  """
+  @spec set_avatar(Ecto.UUID.t(), String.t()) ::
+          {:ok, User.t()} | {:error, :not_found | :validation_failed}
+  def set_avatar(user_id, avatar) do
+    with {:ok, user} <- get_user(user_id),
+         {:ok, updated} <- user |> User.avatar_changeset(avatar) |> Repo.update() do
+      {:ok, updated}
+    else
+      {:error, %Ecto.Changeset{}} -> {:error, :validation_failed}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   @doc "Регистрация + сразу выданная пара токенов."
   @spec register_session(map()) :: {:ok, session()} | {:error, Ecto.Changeset.t()}
   def register_session(attrs) do

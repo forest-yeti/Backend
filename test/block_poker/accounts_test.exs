@@ -62,7 +62,7 @@ defmodule BlockPoker.AccountsTest do
     end
 
     test "аватар по умолчанию" do
-      assert user_fixture().avatar == "/users/avatars/default.png"
+      assert user_fixture().avatar == "First"
     end
 
     test "невалидные данные отвергаются changeset'ом" do

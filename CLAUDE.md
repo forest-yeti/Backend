@@ -264,6 +264,7 @@ BlockPoker.Supervisor (:one_for_one)
 "reaction"    %{id: "fire"}             # эмодзи-реакция над аватаром
 "ping"        %{t: 1755528000123}      # замер задержки, любой топик
 "find_by_code" %{code: "a1b2c3"}        # поиск закрытой комнаты, топик lobby
+"set_avatar"  %{avatar: "Second"}      # смена аватара, топик lobby
 ```
 
 Сервер → клиент:

@@ -22,14 +22,14 @@ defmodule Socket.Views.TableViewTest do
     {:ok, room} =
       RoomState.reserve(room, 1, "me", "res-1", %{
         name: "Hero",
-        avatar: "/a.png",
+        avatar: "First",
         flair: "influencer"
       })
 
     {:ok, room, _seat} = RoomState.confirm(room, "res-1", 400, :wait_bb)
 
     {:ok, room} =
-      RoomState.reserve(room, 4, "opponent", "res-2", %{name: "Villain", avatar: "/b.png"})
+      RoomState.reserve(room, 4, "opponent", "res-2", %{name: "Villain", avatar: "Second"})
 
     {:ok, room, _seat} = RoomState.confirm(room, "res-2", 600, :wait_bb)
 
@@ -102,7 +102,7 @@ defmodule Socket.Views.TableViewTest do
     villain = Enum.find(snapshot.seats, &(&1.seat == 4))
 
     assert villain.name == "Villain"
-    assert villain.avatar == "/b.png"
+    assert villain.avatar == "Second"
   end
 
   test "карта уходит парой rank/suit, а не внутренним числом", %{room: room} do

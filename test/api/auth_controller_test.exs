@@ -23,7 +23,7 @@ defmodule Api.AuthControllerTest do
       assert is_binary(refresh)
       assert user["name"] == attrs["name"]
       assert user["email"] == attrs["email"]
-      assert user["avatar"] == "/users/avatars/default.png"
+      assert user["avatar"] == "First"
 
       assert Enum.sort_by(wallets, & &1["type"]) == [
                %{"type" => "main", "amount" => 0},

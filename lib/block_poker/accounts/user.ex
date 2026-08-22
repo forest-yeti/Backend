@@ -18,7 +18,8 @@ defmodule BlockPoker.Accounts.User do
   @roles [:default, :admin]
   @flairs ["default", "influencer"]
   @default_flair "default"
-  @default_avatar "/users/avatars/default.png"
+  @avatars ["First", "Second", "Third", "Four", "Five"]
+  @default_avatar "First"
 
   @name_format ~r/\A[A-Za-z0-9_-]+\z/
   @email_format ~r/\A[^\s@]+@[^\s@,]+\.[^\s@,]+\z/
@@ -35,6 +36,10 @@ defmodule BlockPoker.Accounts.User do
   schema "users" do
     field :name, :string
     field :email, :string
+
+    # Аватар — не путь к файлу, а метка набора: сервер хранит строку из
+    # @avatars, а чем её рисовать, знает клиент. Игрок меняет её сам —
+    # прав она не даёт и на правила не влияет.
     field :avatar, :string, default: @default_avatar
     field :status, Ecto.Enum, values: @statuses, default: :active
 
@@ -59,6 +64,9 @@ defmodule BlockPoker.Accounts.User do
 
     timestamps(type: :utc_datetime_usec)
   end
+
+  @spec avatars() :: [String.t()]
+  def avatars, do: @avatars
 
   @spec default_avatar() :: String.t()
   def default_avatar, do: @default_avatar
@@ -93,6 +101,19 @@ defmodule BlockPoker.Accounts.User do
     |> cast(%{flair: flair}, [:flair])
     |> validate_required([:flair])
     |> validate_inclusion(:flair, @flairs)
+  end
+
+  @doc """
+  Смена аватара. В отличие от косметики, аватар игрок выбирает сам, поэтому
+  значение проверяется по списку известных: клиент присылает строку, и чужая
+  метка не должна доехать до чужих экранов.
+  """
+  @spec avatar_changeset(t(), String.t()) :: Ecto.Changeset.t()
+  def avatar_changeset(user, avatar) do
+    user
+    |> cast(%{avatar: avatar}, [:avatar])
+    |> validate_required([:avatar])
+    |> validate_inclusion(:avatar, @avatars)
   end
 
   @spec admin?(t()) :: boolean()

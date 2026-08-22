@@ -13,6 +13,7 @@ defmodule Socket.Channels.LobbyChannel do
 
   use Phoenix.Channel
 
+  alias BlockPoker.Accounts
   alias BlockPoker.Tables
   alias BlockPoker.Tables.Lobby
   alias Socket.Protocol.Message
@@ -52,6 +53,15 @@ defmodule Socket.Channels.LobbyChannel do
   # обязано уметь ответить, куда возвращаться.
   def handle_in("my_seats", _payload, socket) do
     {:reply, {:ok, LobbyView.my_seats(Tables.my_seats(socket.assigns.user_id))}, socket}
+  end
+
+  # Смена аватара: клиент шлёт метку строкой, канал только достаёт `user_id`
+  # из assigns и зовёт контекст. Список допустимых меток — в ядре.
+  def handle_in("set_avatar", payload, socket) do
+    case Accounts.set_avatar(socket.assigns.user_id, Map.get(payload, "avatar")) do
+      {:ok, user} -> {:reply, {:ok, %{avatar: user.avatar}}, socket}
+      {:error, code} -> Message.error_reply(code, socket)
+    end
   end
 
   # Вход по коду: канал отдаёт превью комнаты, садится игрок обычным
