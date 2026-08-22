@@ -126,6 +126,22 @@ defmodule Socket.Channels.OfcChannelTest do
       assert snapshot.discipline == :ofc_pineapple
     end
 
+    test "вскрытие приходит событием, а карты в нём — парами", context do
+      # Итог раздачи клиент читает из события: снапшот к этому моменту уже
+      # может относиться к следующей раздаче. Карты в событии обязаны быть
+      # парами `%{rank, suit}` — с внутренними метками дисциплины оно не
+      # пережило бы кодирование в JSON и до клиента не дошло бы вовсе.
+      players = seat_players(context, 2)
+      play_out(context.pid, players)
+
+      assert_push "showdown", %{seats: seats}
+
+      for {_seat, view} <- seats do
+        assert Enum.all?(view.rows.top, &match?(%{rank: _rank, suit: _suit}, &1))
+        assert is_integer(view.points)
+      end
+    end
+
     test "двое играют раздачу целиком", context do
       players = seat_players(context, 2)
       room = play_out(context.pid, players)

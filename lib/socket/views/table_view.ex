@@ -137,6 +137,10 @@ defmodule Socket.Views.TableView do
     Map.update(payload, :cards, [], &drawn_cards/1)
   end
 
+  # Событие дисциплины уходит тем же путём, что и снапшот, и карты в нём
+  # помечены так же — `{:card, _}` и `{:cards, _}`. Без разворачивания
+  # кортежи не пережили бы кодирование в JSON, и событие не дошло бы вовсе.
+  def event(_name, payload) when is_map(payload), do: cards(payload)
   def event(_name, payload), do: payload
 
   defp drawn_cards(cards) do
