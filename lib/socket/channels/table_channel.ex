@@ -13,6 +13,8 @@ defmodule Socket.Channels.TableChannel do
 
   use Phoenix.Channel
 
+  require Logger
+
   alias BlockPoker.Tables
   alias BlockPoker.Tables.TableServer
   alias Socket.Protocol.Message
@@ -200,7 +202,12 @@ defmodule Socket.Channels.TableChannel do
   def handle_info(_message, socket), do: {:noreply, socket}
 
   @impl true
-  def terminate(_reason, socket) do
+  def terminate(reason, socket) do
+    # Причина закрытия пишется в лог: место после этого показывается столу
+    # как «нет связи», и без неё невозможно отличить ушедшего игрока от
+    # упавшего канала — а жалоба выглядит одинаково.
+    log_terminate(reason, socket)
+
     # Разрыв соединения — не cash-out: комната держит место grace-период
     # и решает сама, что делать по его истечении.
     #
@@ -213,6 +220,19 @@ defmodule Socket.Channels.TableChannel do
       nil -> :ok
       room_id -> disconnect_quietly(room_id, socket.assigns.user_id)
     end
+  end
+
+  # Обычный уход — это `:normal`, `:shutdown` и `{:shutdown, _}`: закрыли
+  # окно, вышли, оборвалась сеть. Всё остальное — падение канала, и оно
+  # обязано быть видно.
+  defp log_terminate(reason, _socket) when reason in [:normal, :shutdown], do: :ok
+  defp log_terminate({:shutdown, _reason}, _socket), do: :ok
+
+  defp log_terminate(reason, socket) do
+    Logger.warning(
+      "table channel down: room=#{Map.get(socket.assigns, :room_id)} " <>
+        "user=#{Map.get(socket.assigns, :user_id)} reason=#{inspect(reason)}"
+    )
   end
 
   defp disconnect_quietly(room_id, user_id) do
