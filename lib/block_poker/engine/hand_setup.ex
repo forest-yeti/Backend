@@ -13,11 +13,12 @@ defmodule BlockPoker.Engine.HandSetup do
   alias BlockPoker.Engine.{BettingStructure, BombPot, Straddle, Variant}
 
   @type player :: %{
-          seat: pos_integer(),
-          id: term(),
-          stack: non_neg_integer(),
-          post: non_neg_integer(),
-          dead_post: non_neg_integer()
+          :seat => pos_integer(),
+          :id => term(),
+          :stack => non_neg_integer(),
+          :post => non_neg_integer(),
+          :dead_post => non_neg_integer(),
+          optional(:fantasy) => boolean()
         }
 
   @type t :: %__MODULE__{
@@ -28,6 +29,7 @@ defmodule BlockPoker.Engine.HandSetup do
           big_blind: non_neg_integer(),
           ante: non_neg_integer(),
           ante_type: :big_blind | :per_player,
+          point_value: non_neg_integer(),
           straddle: Straddle.t() | nil,
           bomb_pot: BombPot.t() | nil,
           run_it_twice_allowed: boolean()
@@ -44,6 +46,10 @@ defmodule BlockPoker.Engine.HandSetup do
     big_blind: 0,
     ante: 0,
     ante_type: :big_blind,
+    # Стоимость очка для дисциплин без банка: в китайском покере раздача
+    # рассчитывается очками, а не потом, и цена очка приходит числом ровно
+    # по той же причине, что и блайнды, — движку неоткуда знать про шаблон.
+    point_value: 0,
     # Ставка вслепую, объявленная до карт (`Engine.Straddle`). Приходит уже
     # разрешённой — одна на раздачу, с проверенной суммой: выбирать между
     # заявками мест обязан тот, кто их собирал, а не движок раздачи.

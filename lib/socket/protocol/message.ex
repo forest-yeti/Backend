@@ -8,6 +8,7 @@ defmodule Socket.Protocol.Message do
   из правил игры.
   """
 
+  alias BlockPoker.Engine.Card
   alias BlockPoker.ErrorCode
 
   @spec fetch_id(map(), String.t()) :: {:ok, Ecto.UUID.t()} | {:error, :validation_failed}
@@ -79,6 +80,57 @@ defmodule Socket.Protocol.Message do
       error -> error
     end
   end
+
+  @doc """
+  Раскладка карт: один ход целиком.
+
+  Частичных размещений сервер не хранит, поэтому и разбирается ход целиком —
+  список `%{"card" => %{...}, "row" => "bottom"}` и одна сброшенная карта
+  либо `null`.
+
+  Разбираются только **карты**: имя ряда уходит дальше строкой, как пришло.
+  Знать, какие ряды бывают, транспорту незачем — это правило дисциплины, и
+  список рядов в двух местах сразу означал бы, что новая дисциплина требует
+  правки канала (§3 CLAUDE.md).
+  """
+  @spec fetch_placement(map()) ::
+          {:ok, {:place, [{term(), String.t()}], term() | nil}} | {:error, atom()}
+  def fetch_placement(%{"placements" => placements} = payload) when is_list(placements) do
+    with {:ok, parsed} <- parse_placements(placements),
+         {:ok, discard} <- parse_discard(Map.get(payload, "discard")) do
+      {:ok, {:place, parsed, discard}}
+    end
+  end
+
+  def fetch_placement(_payload), do: {:error, :invalid_placement}
+
+  defp parse_placements(placements) do
+    Enum.reduce_while(placements, {:ok, []}, fn placement, {:ok, acc} ->
+      case parse_placement(placement) do
+        {:ok, parsed} -> {:cont, {:ok, acc ++ [parsed]}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp parse_placement(%{"card" => card, "row" => row}) when is_binary(row) do
+    case parse_card(card) do
+      {:ok, parsed} -> {:ok, {parsed, row}}
+      error -> error
+    end
+  end
+
+  defp parse_placement(_placement), do: {:error, :invalid_placement}
+
+  defp parse_card(card) do
+    case Card.from_map(card) do
+      {:ok, parsed} -> {:ok, parsed}
+      {:error, _reason} -> {:error, :invalid_placement}
+    end
+  end
+
+  defp parse_discard(nil), do: {:ok, nil}
+  defp parse_discard(card), do: parse_card(card)
 
   @doc """
   Какие из своих карт игрок открывает: список индексов либо `:all`.

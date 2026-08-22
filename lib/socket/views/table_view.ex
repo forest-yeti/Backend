@@ -14,7 +14,6 @@ defmodule Socket.Views.TableView do
   """
 
   alias BlockPoker.Engine.Card
-  alias BlockPoker.Engine.Hand
   alias BlockPoker.Engine.HandInsight
   alias BlockPoker.Engine.Stats
   alias BlockPoker.Engine.Straddle
@@ -139,38 +138,38 @@ defmodule Socket.Views.TableView do
     Enum.map(cards, fn %{seat: seat, card: card} -> %{seat: seat, card: Card.to_map(card)} end)
   end
 
-  # Публичная часть раздачи: борд, банк, чей ход. Карманных карт здесь нет
-  # и быть не может — они уходят только владельцу места.
+  # Публичная часть раздачи. Что именно показать, решает дисциплина: view
+  # не выбирает поля по виду игры и не считает ничего сам (§3 CLAUDE.md).
+  # Дедлайн и тайм-банк добавляются здесь — они принадлежат столу, а не
+  # раздаче, и хранятся в монотонных мс, которых наружу быть не должно.
   defp hand(%RoomState{hand: nil}), do: nil
 
   defp hand(%RoomState{hand: hand} = room) do
-    %{
-      street: hand.street,
-      # Взнос идущей раздачи, если она бомбовая: по нему клиент подписывает
-      # банк, а не пересчитывает его сам.
-      bomb_pot: hand.bomb_pot,
-      board: Enum.map(hand.board, &Card.to_map/1),
-      # Второй прогон борда; `nil` — обычная раздача.
-      board_2: hand.board_2 && Enum.map(hand.board_2, &Card.to_map/1),
-      pot: hand.pot,
-      bet: hand.bet,
-      to_act: hand.to_act,
-      action_seq: hand.seq,
+    hand
+    |> room.discipline.public_view()
+    |> cards()
+    |> Map.merge(%{
       deadline_ms: remaining(room.deadline_at),
       # Идёт ли отсчёт из личного запаса: подключившийся в середине хода
       # должен увидеть тот же таймер, что и остальные.
-      time_bank_running: room.time_bank_at != nil,
-      seats:
-        Map.new(hand.players, fn {seat, player} ->
-          {seat,
-           %{
-             committed: player.committed,
-             total: player.total,
-             status: player.status
-           }}
-        end)
-    }
+      time_bank_running: room.time_bank_at != nil
+    })
   end
+
+  @doc """
+  Карты в снапшоте дисциплины на пути в JSON.
+
+  Внутри ядра карта — целое число, и превратить её в `%{rank, suit}` обязан
+  транспорт: дисциплина помечает такие значения `{:card, _}` и `{:cards, _}`,
+  а этот обход их разворачивает. Ветвления по дисциплине тут нет — метка
+  одна на всех.
+  """
+  @spec cards(term()) :: term()
+  def cards({:card, card}), do: Card.to_map(card)
+  def cards({:cards, list}), do: Enum.map(list, &Card.to_map/1)
+  def cards(%{} = map) when not is_struct(map), do: Map.new(map, fn {k, v} -> {k, cards(v)} end)
+  def cards(list) when is_list(list), do: Enum.map(list, &cards/1)
+  def cards(other), do: other
 
   defp remaining(nil), do: nil
 
@@ -255,23 +254,14 @@ defmodule Socket.Views.TableView do
 
   # Свои карты, своя комбинация и свои легальные действия. Единственное
   # место, где приватное вообще попадает в снапшот, — и только владельцу.
+  # Набор полей выбирает дисциплина: у раскладки это боксы и рука, у
+  # холдема — карманные карты и легальные действия.
   defp private_hand(%RoomState{hand: nil}, _seat), do: %{}
 
-  defp private_hand(%RoomState{hand: hand}, seat) do
-    case Map.get(hand.players, seat) do
-      nil ->
-        %{}
-
-      player ->
-        %{
-          hole_cards: Enum.map(player.hole, &Card.to_map/1),
-          combination: combination(hand, seat),
-          # Окно-калькулятор: что играет и какие есть доезды. Приходит и
-          # снапшотом, чтобы открытое окно не ждало отдельного запроса.
-          insight: insight(Hand.insight(hand, seat)),
-          in_hand: player.status != :folded,
-          legal_actions: Hand.legal_actions(hand, seat)
-        }
+  defp private_hand(%RoomState{hand: hand} = room, seat) do
+    case room.discipline.private_view(hand, seat) do
+      nil -> %{}
+      view -> view |> cards() |> Map.update(:insight, nil, &insight/1)
     end
   end
 
@@ -292,13 +282,5 @@ defmodule Socket.Views.TableView do
           %{type: draw.type, outs: draw.outs, cards: Enum.map(draw.cards, &Card.to_map/1)}
         end)
     }
-  end
-
-  # Комбинация появляется с флопа: раньше пяти карт просто не набирается.
-  defp combination(hand, seat) do
-    case Hand.combination(hand, seat) do
-      nil -> nil
-      rank -> %{category: rank.category, cards: Enum.map(rank.cards, &Card.to_map/1)}
-    end
   end
 end

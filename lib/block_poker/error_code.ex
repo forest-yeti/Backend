@@ -32,6 +32,7 @@ defmodule BlockPoker.ErrorCode do
           | :post_not_available
           | :straddle_unavailable
           | :invalid_straddle
+          | :invalid_placement
           | :start_not_available
           | :zero_stack
           | :already_sitting_out
@@ -79,6 +80,7 @@ defmodule BlockPoker.ErrorCode do
     post_not_available: {409, "Войти за взнос сейчас нельзя"},
     straddle_unavailable: {409, "Страддл сейчас недоступен"},
     invalid_straddle: {422, "Размер страддла вне допустимых границ"},
+    invalid_placement: {422, "Так карты выложить нельзя"},
     start_not_available: {409, "Запустить игру сейчас нельзя"},
     zero_stack: {409, "Нулевой стек: сначала докупитесь"},
     already_sitting_out: {409, "Вы уже в паузе"},

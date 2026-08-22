@@ -27,7 +27,11 @@ defmodule BlockPoker.Tables do
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.Reactions
 
+  alias BlockPoker.OfcGames
+  alias BlockPoker.OfcGames.OfcSetting
+
   alias BlockPoker.Tables.{
+    Blueprint,
     Lobby,
     LobbyQuery,
     RoomState,
@@ -48,8 +52,10 @@ defmodule BlockPoker.Tables do
   дважды: на первичной выдаче и на каждом `lobby_delta` — чтобы не слать
   подписчику лимиты, которые он отфильтровал.
   """
-  @spec lobby_query(map() | nil) :: {:ok, LobbyQuery.t()} | {:error, :validation_failed}
-  def lobby_query(params \\ nil), do: LobbyQuery.parse(params)
+  @spec lobby_query(map() | nil, Blueprint.category()) ::
+          {:ok, LobbyQuery.t()} | {:error, :validation_failed}
+  def lobby_query(params \\ nil, category \\ :cash),
+    do: LobbyQuery.parse(params, category)
 
   @spec lobby_snapshot(LobbyQuery.t()) :: [map()]
   def lobby_snapshot(query \\ %LobbyQuery{}), do: Lobby.snapshot(Lobby, query)
@@ -113,6 +119,20 @@ defmodule BlockPoker.Tables do
     }
   end
 
+  @doc """
+  Фильтры витрины китайского покера. Категории лимита у неё свои: очко и
+  большой блайнд — разные величины, и одна шкала на обе врала бы.
+  """
+  @spec ofc_lobby_filters() :: map()
+  def ofc_lobby_filters do
+    %{
+      currencies: LobbyQuery.currencies(),
+      table_sizes: LobbyQuery.table_sizes(),
+      limit_tiers: LobbyQuery.limit_tiers(),
+      sort_fields: LobbyQuery.sort_fields()
+    }
+  end
+
   @doc "Проходит ли обновление лимита фильтр подписчика."
   @spec lobby_visible?(LobbyQuery.t(), map()) :: boolean()
   def lobby_visible?(query, snapshot), do: LobbyQuery.matches?(query, snapshot)
@@ -127,7 +147,7 @@ defmodule BlockPoker.Tables do
   """
   @spec find_by_code(term()) :: {:ok, map()} | {:error, :not_found | :no_seats_available}
   def find_by_code(code) do
-    with {:ok, setting} <- CashGames.get_by_code(code),
+    with {:ok, setting} <- setting_by_code(code),
          {:ok, room} <- pick_room_for(setting) do
       {:ok,
        %{
@@ -140,7 +160,16 @@ defmodule BlockPoker.Tables do
     end
   end
 
-  # У закрытого шаблона комната ровно одна (`CashGameSetting.room_limit/1`),
+  # Код ищется в обоих разделах витрины: закрытая комната китайского покера
+  # заводится тем же кодом и тем же способом, что и кэшевая.
+  defp setting_by_code(code) do
+    case CashGames.get_by_code(code) do
+      {:ok, setting} -> {:ok, setting}
+      {:error, :not_found} -> OfcGames.get_by_code(code)
+    end
+  end
+
+  # У закрытого шаблона комната ровно одна (`Blueprint.room_limit/1`),
   # поэтому выбирать не из чего — но заполненную отдавать как найденную
   # нельзя: игроку нужен не адрес стола, а место за ним.
   defp pick_room_for(setting) do
@@ -155,12 +184,17 @@ defmodule BlockPoker.Tables do
   end
 
   @doc "Границы бай-ина комнаты в фишках — их клиент рисует ползунком стека."
-  @spec buy_in_range(CashGameSetting.t()) :: %{min: pos_integer(), max: pos_integer() | nil}
+  @spec buy_in_range(CashGameSetting.t() | OfcSetting.t()) ::
+          %{min: pos_integer(), max: pos_integer() | nil}
   def buy_in_range(%CashGameSetting{} = setting) do
     %{
       min: CashGameSetting.min_buy_in_chips(setting),
       max: CashGameSetting.max_buy_in_chips(setting)
     }
+  end
+
+  def buy_in_range(%OfcSetting{} = setting) do
+    %{min: OfcSetting.min_buy_in_chips(setting), max: OfcSetting.max_buy_in_chips(setting)}
   end
 
   @spec room_state(Ecto.UUID.t()) :: {:ok, RoomState.t()} | {:error, :not_found}

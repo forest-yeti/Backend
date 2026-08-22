@@ -102,6 +102,80 @@ defmodule BlockPoker.TablesHelpers do
   defp noop_payout(_room, _results), do: :ok
 
   @doc """
+  Стол китайского покера: тот же `TableServer`, но со своим шаблоном,
+  режимом и дисциплиной. Ровно эти три вещи его и отличают — всё остальное
+  в оболочке у него общее с кэшем, и именно это тест и проверяет.
+  """
+  def start_ofc_room!(overrides \\ %{}, opts \\ []) do
+    setting = BlockPoker.OfcGamesFixtures.build_setting(overrides)
+    room_id = Ecto.UUID.generate()
+
+    {:ok, pid} =
+      start_supervised(
+        {TableServer,
+         Keyword.merge(
+           [
+             room_id: room_id,
+             setting: setting,
+             game_mode: BlockPoker.GameMode.OfcCash,
+             discipline: BlockPoker.Engine.Ofc.Hand,
+             timers: :manual,
+             rng: Rng.seeded(Keyword.get(opts, :seed, "ofc"))
+           ],
+           Keyword.drop(opts, [:seed])
+         )},
+        id: room_id
+      )
+
+    %{pid: pid, room_id: room_id, setting: setting}
+  end
+
+  @doc """
+  Ход раскладки за игрока: карты берутся из его личного снапшота, а
+  размещение выбирает та же автораскладка, которой ходит стол по тайм-ауту.
+  Тесты уровня 2 проверяют оболочку, а не стратегию.
+  """
+  def place!(pid, user_id) do
+    room = TableServer.state(pid)
+    seat = BlockPoker.Tables.RoomState.find_seat(room, user_id)
+
+    %{deal: {:cards, cards}, legal_actions: legal} =
+      room.discipline.private_view(room.hand, seat.number)
+
+    board = ofc_board(room, seat.number)
+
+    {placements, discard} =
+      BlockPoker.Engine.Ofc.Autoplace.choose(board, cards, legal.discard, room.hand.context)
+
+    TableServer.act(pid, user_id, {:place, placements, discard}, room.action_seq)
+  end
+
+  @doc "Доигрывает раздачу OFC до конца, ходя за всех по очереди."
+  def play_ofc_hand!(pid) do
+    room = TableServer.state(pid)
+
+    case room.hand && room.discipline.to_act(room.hand) do
+      nil ->
+        room
+
+      seat ->
+        :ok = place!(pid, room.seats[seat].user_id)
+        play_ofc_hand!(pid)
+    end
+  end
+
+  defp ofc_board(room, seat) do
+    alias BlockPoker.Engine.Ofc.Board
+
+    %{rows: rows} = room.discipline.public_view(room.hand).seats[seat]
+
+    Enum.reduce(Board.rows(), Board.new(), fn row, board ->
+      {:cards, cards} = rows[row]
+      Map.put(board, row, cards)
+    end)
+  end
+
+  @doc """
   Посадка без похода в кошелёк: тесты уровня 2 проверяют комнату, а не
   деньги. Деньги проверяются на уровне 3, где есть настоящая БД.
   """

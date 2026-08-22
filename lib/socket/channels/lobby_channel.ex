@@ -18,14 +18,21 @@ defmodule Socket.Channels.LobbyChannel do
   alias BlockPoker.Tables.Lobby
   alias Socket.Protocol.Message
   alias Socket.Views.LobbyView
+  alias Socket.Views.OfcLobbyView
 
+  # Разделов витрины два, и `lobby` — только кэш-столы холдема. Столы
+  # китайского покера в общую сетку не подмешиваются: у них своя категория
+  # и свой топик, и подписчик `lobby` об их существовании не узнаёт.
   @impl true
-  def join("lobby", payload, socket) do
-    case Tables.lobby_query(payload) do
+  def join("lobby", payload, socket), do: join_lobby(:cash, payload, socket)
+  def join("lobby:ofc", payload, socket), do: join_lobby(:ofc, payload, socket)
+
+  defp join_lobby(category, payload, socket) do
+    case Tables.lobby_query(payload, category) do
       {:ok, query} ->
-        :ok = Phoenix.PubSub.subscribe(BlockPoker.PubSub, Lobby.topic())
+        :ok = Phoenix.PubSub.subscribe(BlockPoker.PubSub, Lobby.topic(category))
         socket = assign(socket, :lobby_query, query)
-        {:ok, LobbyView.render(Tables.lobby_snapshot(query)), socket}
+        {:ok, render(query, Tables.lobby_snapshot(query)), socket}
 
       {:error, code} ->
         {:error, Message.error(code)}
@@ -34,10 +41,10 @@ defmodule Socket.Channels.LobbyChannel do
 
   @impl true
   def handle_in("list", payload, socket) do
-    case Tables.lobby_query(payload) do
+    case Tables.lobby_query(payload, socket.assigns.lobby_query.category) do
       {:ok, query} ->
         socket = assign(socket, :lobby_query, query)
-        {:reply, {:ok, LobbyView.render(Tables.lobby_snapshot(query))}, socket}
+        {:reply, {:ok, render(query, Tables.lobby_snapshot(query))}, socket}
 
       {:error, code} ->
         Message.error_reply(code, socket)
@@ -68,7 +75,7 @@ defmodule Socket.Channels.LobbyChannel do
   # `join_seat` в топике стола.
   def handle_in("find_by_code", payload, socket) do
     case Tables.find_by_code(Map.get(payload, "code")) do
-      {:ok, found} -> {:reply, {:ok, LobbyView.found_room(found)}, socket}
+      {:ok, found} -> {:reply, {:ok, found_room(found)}, socket}
       {:error, code} -> Message.error_reply(code, socket)
     end
   end
@@ -89,11 +96,25 @@ defmodule Socket.Channels.LobbyChannel do
     # Лимит, отсеянный фильтром, до подписчика не доезжает: иначе клиенту
     # пришлось бы решать это самому, то есть знать правила категорий.
     if Tables.lobby_visible?(socket.assigns.lobby_query, snapshot) do
-      push(socket, "lobby_delta", LobbyView.setting(snapshot))
+      push(socket, "lobby_delta", setting(snapshot))
     end
 
     {:noreply, socket}
   end
 
   def handle_info(_message, socket), do: {:noreply, socket}
+
+  # Какой витриной рисовать раздел, решает его категория. Набор полей у
+  # строк разный — у кэша блайнды, у китайского покера цена очка, — и
+  # подмешивать одной форме нули другой было бы враньём в снапшоте.
+  defp render(%{category: :ofc}, snapshot), do: OfcLobbyView.render(snapshot)
+  defp render(_query, snapshot), do: LobbyView.render(snapshot)
+
+  defp setting(%{category: :ofc} = snapshot), do: OfcLobbyView.setting(snapshot)
+  defp setting(snapshot), do: LobbyView.setting(snapshot)
+
+  defp found_room(%{setting: %BlockPoker.OfcGames.OfcSetting{}} = found),
+    do: OfcLobbyView.found_room(found)
+
+  defp found_room(found), do: LobbyView.found_room(found)
 end

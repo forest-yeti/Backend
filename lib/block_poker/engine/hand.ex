@@ -14,6 +14,8 @@ defmodule BlockPoker.Engine.Hand do
   трогает второе.
   """
 
+  @behaviour BlockPoker.Engine.Discipline
+
   alias BlockPoker.Engine.{
     BombPot,
     Card,
@@ -124,6 +126,7 @@ defmodule BlockPoker.Engine.Hand do
   Возвращает состояние и события в порядке возникновения — клиент рисует
   их как есть, ничего не досчитывая.
   """
+  @impl true
   @spec start(HandSetup.t(), Rng.t(), keyword()) :: {t(), [tuple()]}
   def start(%HandSetup{} = setup, rng, opts \\ []) do
     {deck, rng} = setup.variant |> Deck.new() |> Deck.shuffle(rng)
@@ -200,6 +203,7 @@ defmodule BlockPoker.Engine.Hand do
   end
 
   @doc "Легальные действия игрока — единственный источник правды для кнопок."
+  @impl true
   @spec legal_actions(t(), pos_integer()) :: map()
   def legal_actions(%__MODULE__{} = hand, seat) do
     player = Map.get(hand.players, seat)
@@ -228,6 +232,7 @@ defmodule BlockPoker.Engine.Hand do
   Действие игрока. `seq` защищает от даблкликов и лагов: клиент присылает
   тот счётчик, который видел, устаревший отвергается.
   """
+  @impl true
   @spec act(t(), pos_integer(), action(), non_neg_integer() | nil) ::
           {:ok, t(), [tuple()]} | {:error, atom()}
   def act(%__MODULE__{street: :complete}, _seat, _action, _seq), do: {:error, :hand_finished}
@@ -241,6 +246,7 @@ defmodule BlockPoker.Engine.Hand do
   end
 
   @doc "Время на ход вышло: чек, если бесплатно, иначе фолд."
+  @impl true
   @spec timeout(t()) :: {:ok, t(), [tuple()]} | {:error, atom()}
   def timeout(%__MODULE__{to_act: nil}), do: {:error, :no_action}
 
@@ -255,6 +261,7 @@ defmodule BlockPoker.Engine.Hand do
 
   До конца раздачи решения ещё нет — пустая карта.
   """
+  @impl true
   @spec reveal_decision(t()) :: %{pos_integer() => :show | :muck}
   def reveal_decision(%__MODULE__{results: %{reveal: reveal}}), do: reveal
   def reveal_decision(%__MODULE__{}), do: %{}
@@ -272,6 +279,7 @@ defmodule BlockPoker.Engine.Hand do
   Карманные карты по местам — то, из чего собирается окно показа после
   раздачи. Живой раздаче эта функция не нужна и ею не вызывается.
   """
+  @impl true
   @spec hole_cards(t()) :: %{pos_integer() => [Card.t()]}
   def hole_cards(%__MODULE__{} = hand) do
     hand.players
@@ -295,6 +303,7 @@ defmodule BlockPoker.Engine.Hand do
   подсказок живут разными жизнями, и первое не должно меняться каждый раз,
   когда во втором добавилась строчка.
   """
+  @impl true
   @spec insight(t(), pos_integer()) :: HandInsight.t() | nil
   def insight(%__MODULE__{} = hand, seat) do
     case Map.get(hand.players, seat) do
@@ -302,6 +311,119 @@ defmodule BlockPoker.Engine.Hand do
       _other -> nil
     end
   end
+
+  # --- Engine.Discipline ----------------------------------------------------
+  #
+  # Холдем и был той дисциплиной, под которую писалась оболочка, поэтому
+  # реализация behaviour здесь — не слой поверх правил, а подпись под тем,
+  # что модуль и так умел. Ни одна функция ниже не решает ничего нового.
+
+  @impl true
+  def id, do: :holdem
+
+  @impl true
+  def min_players, do: 2
+
+  @impl true
+  def max_players, do: 10
+
+  @impl true
+  def to_act(%__MODULE__{to_act: seat}), do: seat
+
+  @impl true
+  def seq(%__MODULE__{seq: seq}), do: seq
+
+  @impl true
+  def players(%__MODULE__{players: players}) do
+    Map.new(players, fn {seat, player} ->
+      {seat, %{id: player.id, stack: player.stack, total: player.total}}
+    end)
+  end
+
+  @impl true
+  def results(%__MODULE__{results: results}), do: results
+
+  @doc """
+  Чего раздача ждёт: хода, ответа про два прогона, следующей улицы доводки
+  или ничего — она кончилась.
+
+  Порядок проверок — это порядок приоритетов стола: доигранную раздачу не
+  спрашивают об ответах, а открытый вопрос останавливает доводку.
+  """
+  @impl true
+  def progress(%__MODULE__{} = hand) do
+    cond do
+      finished?(hand) -> :finished
+      offering_run_it_twice?(hand) -> :offering
+      hand.runout? -> :running_out
+      true -> :acting
+    end
+  end
+
+  @impl true
+  def offer_view(%__MODULE__{rit: rit} = hand) do
+    if offering_run_it_twice?(hand), do: %{seats: rit.seats}
+  end
+
+  @impl true
+  def stats_new(%__MODULE__{} = hand), do: BlockPoker.Engine.HandStats.new(hand)
+
+  @impl true
+  def rabbit_runout(%__MODULE__{} = hand), do: BlockPoker.Engine.Rabbit.runout(hand)
+
+  @doc """
+  Публичная часть раздачи в снапшоте: борд, банк, чей ход.
+
+  Карманных карт здесь нет и быть не может — они уходят только владельцу
+  места. Карты помечены `{:cards, _}`: превращать целое число в
+  `%{rank, suit}` обязан транспорт, а не раздача.
+  """
+  @impl true
+  def public_view(%__MODULE__{} = hand) do
+    %{
+      street: hand.street,
+      # Взнос идущей раздачи, если она бомбовая: по нему клиент подписывает
+      # банк, а не пересчитывает его сам.
+      bomb_pot: hand.bomb_pot,
+      board: {:cards, hand.board},
+      # Второй прогон борда; `nil` — обычная раздача.
+      board_2: hand.board_2 && {:cards, hand.board_2},
+      pot: hand.pot,
+      bet: hand.bet,
+      to_act: hand.to_act,
+      action_seq: hand.seq,
+      seats:
+        Map.new(hand.players, fn {seat, player} ->
+          {seat, %{committed: player.committed, total: player.total, status: player.status}}
+        end)
+    }
+  end
+
+  @doc """
+  Личная часть снапшота: свои карты, своя комбинация, свои легальные
+  действия. `nil` — этого места в раздаче нет.
+  """
+  @impl true
+  def private_view(%__MODULE__{} = hand, seat) do
+    case Map.get(hand.players, seat) do
+      nil ->
+        nil
+
+      player ->
+        %{
+          hole_cards: {:cards, player.hole},
+          combination: combination_view(combination(hand, seat)),
+          # Окно-калькулятор: что играет и какие есть доезды. Приходит и
+          # снапшотом, чтобы открытое окно не ждало отдельного запроса.
+          insight: insight(hand, seat),
+          in_hand: player.status != :folded,
+          legal_actions: legal_actions(hand, seat)
+        }
+    end
+  end
+
+  defp combination_view(nil), do: nil
+  defp combination_view(rank), do: %{category: rank.category, cards: {:cards, rank.cards}}
 
   @doc "Сумма фишек в раздаче: стеки плюс банк. Инвариант денег."
   @spec total_chips(t()) :: non_neg_integer()
@@ -652,7 +774,7 @@ defmodule BlockPoker.Engine.Hand do
     %{rank: out.rank, count: out.count, cards: Enum.map(out.cards, &Card.to_map/1)}
   end
 
-  defp contenders(hand), do: hand |> players() |> Enum.filter(&(&1.status != :folded))
+  defp contenders(hand), do: hand |> seated() |> Enum.filter(&(&1.status != :folded))
 
   defp deal_street(hand) do
     street = @streets |> Enum.drop_while(&(&1 != hand.street)) |> Enum.at(1)
@@ -726,7 +848,7 @@ defmodule BlockPoker.Engine.Hand do
   # --- банк и вскрытие ------------------------------------------------------
 
   defp payout(hand) do
-    contenders = Enum.filter(players(hand), &(&1.status != :folded))
+    contenders = Enum.filter(seated(hand), &(&1.status != :folded))
 
     case contenders do
       [only] ->
@@ -817,7 +939,7 @@ defmodule BlockPoker.Engine.Hand do
   # который не претендует никто. Такой банк делился между пустым списком
   # победителей — то есть на ноль.
   defp pot_layers(hand, contenders) do
-    dead = hand |> players() |> Enum.reduce(0, &(&1.dead + &2))
+    dead = hand |> seated() |> Enum.reduce(0, &(&1.dead + &2))
 
     # Потолок банка — вторая по величине ставка за раздачу: выше неё ставку
     # никто не покрыл, и эти фишки в банк не входят.
@@ -825,7 +947,7 @@ defmodule BlockPoker.Engine.Hand do
 
     refunds =
       hand
-      |> players()
+      |> seated()
       |> Enum.filter(&(&1.total > cap))
       |> Map.new(&{&1.seat, &1.total - cap})
 
@@ -841,7 +963,7 @@ defmodule BlockPoker.Engine.Hand do
       |> Enum.with_index()
       |> Enum.map_reduce(0, fn {level, index}, prev ->
         contributed =
-          Enum.reduce(players(hand), 0, fn player, acc ->
+          Enum.reduce(seated(hand), 0, fn player, acc ->
             total = min(player.total, cap)
             acc + min(total, level) - min(total, prev)
           end)
@@ -894,7 +1016,7 @@ defmodule BlockPoker.Engine.Hand do
   end
 
   defp matched_cap(hand) do
-    case hand |> players() |> Enum.map(& &1.total) |> Enum.sort(:desc) do
+    case hand |> seated() |> Enum.map(& &1.total) |> Enum.sort(:desc) do
       [] -> 0
       [only] -> only
       [_highest, second | _rest] -> second
@@ -1076,11 +1198,11 @@ defmodule BlockPoker.Engine.Hand do
   defp street_open?(hand), do: next_to_act(hand) != nil
 
   defp no_more_betting?(hand) do
-    Enum.count(players(hand), &(&1.status == :active)) <= 1
+    Enum.count(seated(hand), &(&1.status == :active)) <= 1
   end
 
   defp single_contender?(hand) do
-    Enum.count(players(hand), &(&1.status != :folded)) == 1
+    Enum.count(seated(hand), &(&1.status != :folded)) == 1
   end
 
   defp prompt(%{to_act: nil}), do: []
@@ -1099,7 +1221,7 @@ defmodule BlockPoker.Engine.Hand do
     ]
   end
 
-  defp players(hand), do: Map.values(hand.players)
+  defp seated(hand), do: Map.values(hand.players)
 
   # Деньги, которые лежат в банке, но ставкой игрока не являются. Отдельный
   # счётчик нужен разбору банка: слои сайд-потов строятся по ставкам, а
@@ -1112,7 +1234,7 @@ defmodule BlockPoker.Engine.Hand do
   defp put_player(hand, player), do: %{hand | players: Map.put(hand.players, player.seat, player)}
 
   defp max_committed(hand),
-    do: hand |> players() |> Enum.map(& &1.committed) |> Enum.max(fn -> 0 end)
+    do: hand |> seated() |> Enum.map(& &1.committed) |> Enum.max(fn -> 0 end)
 
   defp hole_payload(hand) do
     Map.new(hand.players, fn {seat, player} -> {seat, Enum.map(player.hole, &Card.to_map/1)} end)
@@ -1149,7 +1271,7 @@ defmodule BlockPoker.Engine.Hand do
   # окне после раздачи и приезжает отдельным событием.
   defp shown_cards(hand, reveal) do
     hand
-    |> players()
+    |> seated()
     |> Enum.filter(&(&1.hole != [] and Map.get(reveal, &1.seat) == :show))
     |> Enum.sort_by(& &1.seat)
     |> Enum.map(fn player ->
@@ -1171,7 +1293,7 @@ defmodule BlockPoker.Engine.Hand do
   # ничего не мучует: он и не был обязан показывать.
   defp mucked_seats(hand, reveal) do
     hand
-    |> players()
+    |> seated()
     |> Enum.filter(&(&1.status != :folded and Map.get(reveal, &1.seat) == :muck))
     |> Enum.map(& &1.seat)
     |> Enum.sort()

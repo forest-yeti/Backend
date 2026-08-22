@@ -24,7 +24,17 @@ defmodule BlockPoker.Tables.Lobby do
 
   alias BlockPoker.CashGames
   alias BlockPoker.CashGames.CashGameSetting
-  alias BlockPoker.Tables.{LobbyQuery, RoomState, TableRegistry, TableServer, TableSupervisor}
+  alias BlockPoker.OfcGames
+
+  alias BlockPoker.Tables.{
+    Blueprint,
+    LobbyQuery,
+    RoomState,
+    TableRegistry,
+    TableServer,
+    TableSupervisor
+  }
+
   alias Phoenix.PubSub
 
   @pubsub BlockPoker.PubSub
@@ -35,8 +45,17 @@ defmodule BlockPoker.Tables.Lobby do
 
   defmodule Room do
     @moduledoc false
-    @enforce_keys [:room_id, :setting_id, :pid, :max_players]
-    defstruct [:room_id, :setting_id, :pid, :max_players, seats_taken: 0, draining?: false]
+    @enforce_keys [:room_id, :setting_id, :pid, :max_players, :category]
+
+    defstruct [
+      :room_id,
+      :setting_id,
+      :pid,
+      :max_players,
+      :category,
+      seats_taken: 0,
+      draining?: false
+    ]
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -44,9 +63,16 @@ defmodule BlockPoker.Tables.Lobby do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
-  @doc "Топик, в который уходят обновления лобби."
-  @spec topic() :: String.t()
-  def topic, do: @topic
+  @doc """
+  Топик, в который уходят обновления раздела витрины.
+
+  Разделов два, и это решение продуктовое, а не техническое: столы
+  китайского покера в общую сетку кэша не подмешиваются, у них своя
+  категория и свой канал. Подписчик кэш-лобби об их существовании
+  не узнаёт вовсе.
+  """
+  @spec topic(Blueprint.category()) :: String.t()
+  def topic(category \\ :cash), do: "#{@topic}:#{category}"
 
   @doc """
   Перечитать шаблоны из БД и привести пул в соответствие.
@@ -174,8 +200,10 @@ defmodule BlockPoker.Tables.Lobby do
 
   # --- пул -----------------------------------------------------------------
 
+  # Оба раздела грузятся одним процессом: он и так владеет пулом комнат,
+  # а разделяется витрина, а не столы.
   defp do_reload(state) do
-    settings = Map.new(CashGames.list_settings(), &{&1.id, &1})
+    settings = Map.new(CashGames.list_settings() ++ OfcGames.list_settings(), &{&1.id, &1})
     state = %{state | settings: settings}
     state = Enum.reduce(Map.values(settings), state, &sync_setting(&2, &1))
 
@@ -189,18 +217,22 @@ defmodule BlockPoker.Tables.Lobby do
     Enum.reduce(orphans, state, &drain_room(&2, &1))
   end
 
-  defp sync_setting(state, %CashGameSetting{enabled: false} = setting) do
-    state |> rooms_of(setting.id) |> Enum.reduce(state, &drain_room(&2, &1))
+  defp sync_setting(state, setting) do
+    if Blueprint.enabled?(setting) do
+      enforce_invariant(state, setting.id)
+    else
+      state |> rooms_of(setting.id) |> Enum.reduce(state, &drain_room(&2, &1))
+    end
   end
-
-  defp sync_setting(state, setting), do: enforce_invariant(state, setting.id)
 
   # Ядро всей конструкции: ровно одна комната со свободными местами.
   defp enforce_invariant(state, setting_id) do
     case Map.fetch(state.settings, setting_id) do
-      :error -> state
-      {:ok, %CashGameSetting{enabled: false}} -> state
-      {:ok, setting} -> do_enforce(state, setting)
+      :error ->
+        state
+
+      {:ok, setting} ->
+        if Blueprint.enabled?(setting), do: do_enforce(state, setting), else: state
     end
   end
 
@@ -209,7 +241,7 @@ defmodule BlockPoker.Tables.Lobby do
     open = Enum.filter(rooms, &open?/1)
 
     cond do
-      open == [] and length(rooms) < CashGameSetting.room_limit(setting) ->
+      open == [] and length(rooms) < Blueprint.room_limit(setting) ->
         start_room(state, setting)
 
       # Лишние пустые комнаты закрываются: иначе после вечернего пика
@@ -235,7 +267,13 @@ defmodule BlockPoker.Tables.Lobby do
 
   defp start_room(state, setting) do
     room_id = Ecto.UUID.generate()
-    opts = Keyword.merge(state.room_opts, room_id: room_id, setting: setting)
+
+    # Режим и дисциплину называет сам шаблон: лобби не спрашивает, кэш это
+    # или китайский покер, — оно спрашивает, чем поднимать комнату.
+    opts =
+      state.room_opts
+      |> Keyword.merge(Blueprint.room_opts(setting))
+      |> Keyword.merge(room_id: room_id, setting: setting)
 
     case TableSupervisor.start_room(opts) do
       {:ok, pid} ->
@@ -245,7 +283,8 @@ defmodule BlockPoker.Tables.Lobby do
           room_id: room_id,
           setting_id: setting.id,
           pid: pid,
-          max_players: setting.max_players
+          max_players: Blueprint.max_players(setting),
+          category: Blueprint.category(setting)
         }
 
         %{state | rooms: Map.put(state.rooms, room_id, room)}
@@ -330,9 +369,16 @@ defmodule BlockPoker.Tables.Lobby do
   defp build_snapshot(state, query) do
     state.settings
     |> Map.values()
-    |> Enum.filter(&(&1.enabled and CashGameSetting.public?(&1)))
+    |> Enum.filter(&visible?(&1, query.category))
     |> Enum.map(&setting_snapshot(state, &1))
     |> then(&LobbyQuery.apply(query, &1))
+  end
+
+  # Раздел витрины отсекается здесь, а не фильтром запроса: подписчик
+  # кэш-лобби о существовании OFC-столов не узнаёт вовсе.
+  defp visible?(setting, category) do
+    Blueprint.enabled?(setting) and Blueprint.public?(setting) and
+      Blueprint.category(setting) == category
   end
 
   defp setting_snapshot(state, setting) do
@@ -345,7 +391,8 @@ defmodule BlockPoker.Tables.Lobby do
       # Занятость лимита — заполненность комнаты, в которую посадит быстрый
       # вход: именно её игрок видит как «6/9» напротив строки лобби.
       seats_taken: featured_seats_taken(rooms),
-      max_players: setting.max_players,
+      max_players: Blueprint.max_players(setting),
+      category: Blueprint.category(setting),
       limit_tier: LobbyQuery.limit_tier(setting),
       table_size: LobbyQuery.table_size(setting)
     }
@@ -366,8 +413,12 @@ defmodule BlockPoker.Tables.Lobby do
       # Закрытой комнаты в общей сетке нет — значит, нет и её обновлений:
       # иначе подписчик лобби узнал бы о столе, которого не должен видеть.
       {:ok, setting} ->
-        if CashGameSetting.public?(setting) do
-          PubSub.broadcast(@pubsub, @topic, {:lobby_update, setting_snapshot(state, setting)})
+        if Blueprint.public?(setting) do
+          PubSub.broadcast(
+            @pubsub,
+            topic(Blueprint.category(setting)),
+            {:lobby_update, setting_snapshot(state, setting)}
+          )
         else
           :ok
         end
@@ -382,13 +433,18 @@ defmodule BlockPoker.Tables.Lobby do
   defp warn_about_zero_rake(state) do
     state.settings
     |> Map.values()
-    |> Enum.filter(&(&1.enabled and &1.currency == :main and &1.rake_percent == 0))
+    |> Enum.filter(&zero_rake?/1)
     |> Enum.each(fn setting ->
       Logger.warning(
-        "шаблон #{CashGameSetting.display_name(setting)} на реальные деньги с нулевым рейком"
+        "шаблон #{Blueprint.display_name(setting)} на реальные деньги с нулевым рейком"
       )
     end)
   end
+
+  # Рейк есть только у кэша: у стола без банка процент брать не с чего,
+  # и молчание про него — не забытая настройка, а отсутствие механики.
+  defp zero_rake?(%CashGameSetting{enabled: true, currency: :main, rake_percent: 0}), do: true
+  defp zero_rake?(_setting), do: false
 
   @doc false
   @spec room_state(Ecto.UUID.t()) :: RoomState.t() | nil

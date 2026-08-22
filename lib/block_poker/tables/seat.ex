@@ -85,6 +85,7 @@ defmodule BlockPoker.Tables.Seat do
           role: role(),
           status: status(),
           stack: non_neg_integer(),
+          carry: term(),
           reservation_id: String.t() | nil,
           waiting_for_bb: boolean(),
           post_required: boolean(),
@@ -115,6 +116,13 @@ defmodule BlockPoker.Tables.Seat do
     role: :default,
     status: :empty,
     stack: 0,
+    # Что место уносит из раздачи в следующую. Значение непрозрачное:
+    # им владеет режим стола, а комната его только хранит и раздаёт.
+    # Так у дисциплины появляется место для состояния, которое по
+    # определению живёт **между** раздачами, — и оболочке при этом не
+    # приходится знать, что это за состояние. Встав из-за стола, игрок
+    # теряет его вместе с местом: `new/1` заводит место пустым.
+    carry: nil,
     waiting_for_bb: false,
     post_required: false,
     can_post: false,

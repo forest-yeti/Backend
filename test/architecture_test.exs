@@ -107,6 +107,35 @@ defmodule BlockPoker.ArchitectureTest do
     assert offenders == []
   end
 
+  test "транспорт не знает правил китайского покера" do
+    # §7 задачи 6. Слово `ofc` в транспорте разрешено — это **раздел
+    # витрины**: у столов китайского покера свой топик лобби, и назвать
+    # его как-то надо. А вот правила дисциплины — фантазия, роялти и
+    # названия боксов — в транспорт протечь не должны: набор полей
+    # выбирает дисциплина, view его только рендерит.
+    pattern = ~r/fantasy|royalt|:top|:middle|:bottom/
+
+    assert offenders(@transport, pattern) == []
+  end
+
+  test "оболочка стола не знает, во что за ним играют" do
+    # §8 задачи 6: дисциплина зовётся модулем, и ни один файл оболочки не
+    # называет ни OFC, ни его понятий.
+    shell = [
+      "lib/block_poker/tables/table_server.ex",
+      "lib/block_poker/tables/room_state.ex",
+      "lib/socket/views/table_view.ex"
+    ]
+
+    assert offenders(shell, ~r/Ofc|ofc_|fantas|royalt|boxes/) == []
+  end
+
+  test "дисциплина китайского покера не ходит в БД и не заводит процессов" do
+    pattern = ~r/BlockPoker\.Repo|Repo\.|Ecto\.|Phoenix\.|GenServer|send\(|Process\./
+
+    assert offenders(["lib/block_poker/engine/ofc"], pattern) == []
+  end
+
   test "ядро правил не знает про режим игры" do
     assert offenders(@engine, ~r/GameMode/) == []
   end

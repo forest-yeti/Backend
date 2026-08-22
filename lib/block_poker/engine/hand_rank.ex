@@ -130,6 +130,28 @@ defmodule BlockPoker.Engine.HandRank do
     end)
   end
 
+  @doc """
+  Рука, собранная по уже разобранной форме: категория, ранги для сравнения
+  внутри неё и сами карты.
+
+  Нужна там, где карт не пять и общий разбор неприменим, — верхний бокс
+  китайского покера состоит из трёх. Шкала при этом остаётся **одной**:
+  ранги укладываются в те же позиции, поэтому пара тузов с кикером из трёх
+  карт и пара тузов из пяти сравниваются между собой правильно, и правило
+  «нижний бокс не слабее верхнего» не требует второй таблицы силы.
+  """
+  @spec build(atom(), [Card.rank()], [Card.t()], module() | Context.t()) :: t()
+  def build(category, tiebreakers, cards, variant) when is_atom(variant),
+    do: build(category, tiebreakers, cards, context(variant))
+
+  def build(category, tiebreakers, cards, %Context{} = context) do
+    %__MODULE__{
+      score: score(category, tiebreakers, context),
+      category: category,
+      cards: sort_cards(cards, category, tiebreakers)
+    }
+  end
+
   @doc "Сравнение рук: `:gt`, `:eq` или `:lt`."
   @spec compare(t(), t()) :: :gt | :eq | :lt
   def compare(%__MODULE__{score: left}, %__MODULE__{score: right}) do

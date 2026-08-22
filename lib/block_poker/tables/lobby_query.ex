@@ -28,10 +28,12 @@ defmodule BlockPoker.Tables.LobbyQuery do
 
   alias BlockPoker.CashGames.CashGameSetting
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
+  alias BlockPoker.Tables.Blueprint
 
-  @type entry :: %{required(:setting) => CashGameSetting.t(), optional(atom()) => term()}
+  @type entry :: %{required(:setting) => term(), optional(atom()) => term()}
 
   @type t :: %__MODULE__{
+          category: Blueprint.category(),
           game_types: [atom()],
           currencies: [atom()],
           table_sizes: [atom()],
@@ -39,7 +41,12 @@ defmodule BlockPoker.Tables.LobbyQuery do
           sort: {:limit | :occupancy, :asc | :desc} | nil
         }
 
-  defstruct game_types: [], currencies: [], table_sizes: [], limit_tiers: [], sort: nil
+  defstruct category: :cash,
+            game_types: [],
+            currencies: [],
+            table_sizes: [],
+            limit_tiers: [],
+            sort: nil
 
   @currencies CashGameSetting.currencies()
   @table_sizes [:heads_up, :six_max, :nine_max]
@@ -75,10 +82,12 @@ defmodule BlockPoker.Tables.LobbyQuery do
   Разбор запроса клиента. Неизвестное значение — ошибка, а не молчаливое
   игнорирование: иначе опечатка в фильтре выглядит как пустой рум.
   """
-  @spec parse(map() | nil) :: {:ok, t()} | {:error, :validation_failed}
-  def parse(nil), do: {:ok, %__MODULE__{}}
+  @spec parse(map() | nil, Blueprint.category()) :: {:ok, t()} | {:error, :validation_failed}
+  def parse(params, category \\ :cash)
 
-  def parse(params) when is_map(params) do
+  def parse(nil, category), do: {:ok, %__MODULE__{category: category}}
+
+  def parse(params, category) when is_map(params) do
     with {:ok, game_types} <- list(params, "game_types", VariantRegistry.ids()),
          {:ok, currencies} <- list(params, "currencies", @currencies),
          {:ok, table_sizes} <- list(params, "table_sizes", @table_sizes),
@@ -86,6 +95,7 @@ defmodule BlockPoker.Tables.LobbyQuery do
          {:ok, sort} <- sort(params) do
       {:ok,
        %__MODULE__{
+         category: category,
          game_types: game_types,
          currencies: currencies,
          table_sizes: table_sizes,
@@ -95,7 +105,7 @@ defmodule BlockPoker.Tables.LobbyQuery do
     end
   end
 
-  def parse(_params), do: {:error, :validation_failed}
+  def parse(_params, _category), do: {:error, :validation_failed}
 
   @doc "Отфильтрованный и отсортированный снапшот."
   @spec apply(t(), [entry()]) :: [entry()]
@@ -111,17 +121,22 @@ defmodule BlockPoker.Tables.LobbyQuery do
   """
   @spec matches?(t(), entry()) :: boolean()
   def matches?(%__MODULE__{} = query, %{setting: setting}) do
-    in?(query.game_types, setting.game_type) and
-      in?(query.currencies, setting.currency) and
+    Blueprint.category(setting) == query.category and
+      in?(query.game_types, Blueprint.game_type(setting)) and
+      in?(query.currencies, Blueprint.currency(setting)) and
       in?(query.table_sizes, table_size(setting)) and
       in?(query.limit_tiers, limit_tier(setting))
   end
 
   @doc "Формат стола по количеству мест."
-  @spec table_size(CashGameSetting.t()) :: :heads_up | :six_max | :nine_max
-  def table_size(%CashGameSetting{max_players: max}) when max <= 2, do: :heads_up
-  def table_size(%CashGameSetting{max_players: max}) when max <= 6, do: :six_max
-  def table_size(%CashGameSetting{}), do: :nine_max
+  @spec table_size(term()) :: :heads_up | :six_max | :nine_max
+  def table_size(setting) do
+    case Blueprint.max_players(setting) do
+      max when max <= 2 -> :heads_up
+      max when max <= 6 -> :six_max
+      _max -> :nine_max
+    end
+  end
 
   @doc """
   Категория лимита: микро / средний / хайроллер.
@@ -129,10 +144,10 @@ defmodule BlockPoker.Tables.LobbyQuery do
   Считается от базовой единицы стола, а не от большого блайнда: на анте-столе
   блайндов нет, и «лимит 0» отправлял бы все такие столы в микро.
   """
-  @spec limit_tier(CashGameSetting.t()) :: :micro | :medium | :high_roller
-  def limit_tier(%CashGameSetting{} = setting) do
-    bounds = Map.get(@tier_bounds, setting.currency, [])
-    unit = CashGameSetting.bet_unit(setting)
+  @spec limit_tier(term()) :: :micro | :medium | :high_roller
+  def limit_tier(setting) do
+    bounds = Map.get(@tier_bounds, Blueprint.currency(setting), [])
+    unit = Blueprint.bet_unit(setting)
 
     Enum.find_value(bounds, :high_roller, fn {tier, max_unit} ->
       if unit <= max_unit, do: tier
@@ -221,20 +236,25 @@ defmodule BlockPoker.Tables.LobbyQuery do
   defp sort_key(%__MODULE__{sort: {:limit, direction}}, entry) do
     %{setting: setting} = entry
 
-    {currency_rank(setting), signed(CashGameSetting.bet_unit(setting), direction),
-     default_key(entry)}
+    {currency_rank(setting), signed(Blueprint.bet_unit(setting), direction), default_key(entry)}
   end
 
   defp sort_key(%__MODULE__{sort: {:occupancy, direction}}, entry) do
     {currency_rank(entry.setting), signed(occupancy(entry), direction), default_key(entry)}
   end
 
+  # Умолчание разводит шаблоны с одинаковым лимитом. Базовая единица и
+  # вместимость есть у любого стола; всё, что дальше, — уже частности
+  # блайндового, и спрашиваются они только у него.
   defp default_key(%{setting: setting}) do
-    {currency_rank(setting), CashGameSetting.bet_unit(setting), setting.small_blind,
-     setting.max_players, setting.ante, setting.id}
+    {currency_rank(setting), Blueprint.bet_unit(setting), Blueprint.max_players(setting),
+     tie_break(setting), setting.id}
   end
 
-  defp currency_rank(setting), do: Map.get(@currency_order, setting.currency, 99)
+  defp tie_break(%CashGameSetting{} = setting), do: {setting.small_blind, setting.ante}
+  defp tie_break(_setting), do: {0, 0}
+
+  defp currency_rank(setting), do: Map.get(@currency_order, Blueprint.currency(setting), 99)
 
   # Занятость лимита — это заполненность той комнаты, куда игрока посадит
   # быстрый вход: игрок сравнивает «2/9» и «8/9», а не сумму по всем комнатам.

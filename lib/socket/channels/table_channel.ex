@@ -69,6 +69,21 @@ defmodule Socket.Channels.TableChannel do
     end
   end
 
+  # Раскладка карт: один ход целиком. Канал разбирает форму сообщения и
+  # зовёт ту же функцию контекста, что и обычное действие, — «действие» для
+  # стола это то, что прислал игрок, а не то, что бывает в холдеме.
+  def handle_in("place_cards", payload, socket) do
+    case Message.fetch_placement(payload) do
+      {:ok, action} ->
+        socket.assigns.room_id
+        |> Tables.act(socket.assigns.user_id, action, Message.action_seq(payload))
+        |> Message.reply(socket)
+
+      {:error, code} ->
+        Message.error_reply(code, socket)
+    end
+  end
+
   def handle_in("preselect", payload, socket) do
     socket.assigns.room_id
     |> Tables.preselect(socket.assigns.user_id, Map.get(payload, "action"))

@@ -18,6 +18,7 @@ defmodule BlockPoker.Tables.RoomState do
     BlindSchedule,
     BombPot,
     Card,
+    Discipline,
     EntryRules,
     Hand,
     HandInsight,
@@ -57,6 +58,7 @@ defmodule BlockPoker.Tables.RoomState do
           room_id: Ecto.UUID.t(),
           setting: setting(),
           mode: module(),
+          discipline: module(),
           seats: %{pos_integer() => Seat.t()},
           phase: phase(),
           draining?: boolean(),
@@ -175,6 +177,10 @@ defmodule BlockPoker.Tables.RoomState do
     # — ветвление по режиму существует ровно в одном месте, при выборе
     # реализации, и `case` по :cash / :tournament в комнате не появляется.
     mode: BlockPoker.GameMode.Cash,
+    # Дисциплина: что вообще происходит внутри раздачи (`Engine.Discipline`).
+    # Модуль, а не флаг, — по той же причине, что и режим: ветвление по
+    # дисциплине существует ровно в одном месте, при выборе реализации.
+    discipline: BlockPoker.Engine.Hand,
     phase: :idle,
     draining?: false,
     game_started?: false,
@@ -229,14 +235,22 @@ defmodule BlockPoker.Tables.RoomState do
   @doc """
   Новая комната из шаблона.
 
-  Режим передаётся модулем и хранится **в комнате**, а не в процессе стола:
-  так у вопроса «кэш это или турнир» остаётся один источник истины, и
-  чистые функции комнаты отвечают на него без обращения к `TableServer`.
+  Режим и дисциплина передаются модулями и хранятся **в комнате**, а не в
+  процессе стола: так у вопросов «кэш это или турнир» и «холдем это или
+  раскладка» остаётся один источник истины, и чистые функции комнаты
+  отвечают на них без обращения к `TableServer`.
   """
-  @spec new(Ecto.UUID.t(), setting(), module()) :: t()
-  def new(room_id, setting, mode \\ BlockPoker.GameMode.Cash) do
+  @spec new(Ecto.UUID.t(), setting(), module(), module()) :: t()
+  def new(room_id, setting, mode \\ BlockPoker.GameMode.Cash, discipline \\ Hand) do
     seats = Map.new(1..setting.max_players, fn number -> {number, Seat.new(number)} end)
-    %__MODULE__{room_id: room_id, setting: setting, mode: mode, seats: seats}
+
+    %__MODULE__{
+      room_id: room_id,
+      setting: setting,
+      mode: mode,
+      discipline: discipline,
+      seats: seats
+    }
   end
 
   @doc """
@@ -742,8 +756,9 @@ defmodule BlockPoker.Tables.RoomState do
   def run_it_twice_view(%__MODULE__{hand: nil}, _now), do: nil
 
   def run_it_twice_view(%__MODULE__{hand: hand} = state, now) do
-    if Hand.offering_run_it_twice?(hand) do
-      %{seats: hand.rit.seats, deadline_ms: max((state.rit_deadline_at || now) - now, 0)}
+    case Discipline.optional(state.discipline, :offer_view, [hand], nil) do
+      nil -> nil
+      offer -> Map.put(offer, :deadline_ms, max((state.rit_deadline_at || now) - now, 0))
     end
   end
 
@@ -754,14 +769,15 @@ defmodule BlockPoker.Tables.RoomState do
   места попадают в окно с полностью открытыми картами, и кнопки показа у
   них не будет — показывать нечего.
   """
-  @spec put_reveal(t(), Hand.t(), integer()) :: t()
+  @spec put_reveal(t(), term(), integer()) :: t()
   def put_reveal(%__MODULE__{} = state, hand, expires_at) do
-    cards = Hand.hole_cards(hand)
-    decision = Hand.reveal_decision(hand)
+    cards = Discipline.optional(state.discipline, :hole_cards, [hand], %{})
+    decision = Discipline.optional(state.discipline, :reveal_decision, [hand], %{})
+    owners = state.discipline.players(hand)
 
     reveal = %{
       cards: Map.new(cards, fn {seat, hole} -> {seat, Enum.map(hole, &Card.to_map/1)} end),
-      users: Map.new(cards, fn {seat, _hole} -> {seat, Hand.player_id(hand, seat)} end),
+      users: Map.new(cards, fn {seat, _hole} -> {seat, owners[seat].id} end),
       shown:
         Map.new(cards, fn {seat, hole} ->
           open =
@@ -773,6 +789,27 @@ defmodule BlockPoker.Tables.RoomState do
     }
 
     %{state | reveal: reveal}
+  end
+
+  @doc """
+  Разложить по местам то, что они уносят в следующую раздачу.
+
+  Комната не знает, что это за значение: ей приходит готовая карта
+  «место → что унести», и она её раскладывает. Что туда класть, решает
+  режим — тому, кто отвечает за происходящее **между** раздачами, такой
+  перенос и принадлежит.
+  """
+  @spec put_carry(t(), %{pos_integer() => term()}) :: t()
+  def put_carry(%__MODULE__{} = state, carry) when is_map(carry) do
+    seats =
+      Enum.reduce(carry, state.seats, fn {number, value}, seats ->
+        case Map.get(seats, number) do
+          nil -> seats
+          seat -> Map.put(seats, number, %{seat | carry: value})
+        end
+      end)
+
+    %{state | seats: seats}
   end
 
   @spec clear_reveal(t()) :: t()
@@ -846,7 +883,7 @@ defmodule BlockPoker.Tables.RoomState do
   def insight(%__MODULE__{hand: hand} = state, user_id) do
     case find_seat(state, user_id) do
       nil -> nil
-      seat -> Hand.insight(hand, seat.number)
+      seat -> Discipline.optional(state.discipline, :insight, [hand, seat.number], nil)
     end
   end
 
