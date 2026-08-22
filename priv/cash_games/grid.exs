@@ -15,12 +15,16 @@
   # Пока разворачивается только 6-max — это решение сетки, а не правило:
   # ни 9-max, ни хедз-ап для Short Deck нигде не запрещены, и появятся они
   # добавлением строки сюда.
+  #
+  # `label` — необязательная пометка к имени лимита: «NL5 (Ante)». Вид игры
+  # и размер стола в имя не пишутся — лобби выводит их отдельными тегами,
+  # и дубль делал бы подписи длиннее без единого нового факта.
   formats: [
-    %{suffix: "6-max", max_players: 6, ante: :none},
-    %{suffix: "6-max Ante", max_players: 6, ante: :half_big_blind},
-    %{suffix: "9-max", max_players: 9, ante: :none},
-    %{suffix: "HU", max_players: 2, ante: :none},
-    %{suffix: "Short Deck 6-max", max_players: 6, ante: :big_blind, game_type: :short_deck}
+    %{max_players: 6, ante: :none},
+    %{label: "Ante", max_players: 6, ante: :half_big_blind},
+    %{max_players: 9, ante: :none},
+    %{max_players: 2, ante: :none},
+    %{max_players: 6, ante: :big_blind, game_type: :short_deck}
   ],
 
   # Общие для всей сетки значения. Меняются здесь, а не в коде задачи.
@@ -52,7 +56,6 @@
     main: %{felt_color: "#1F6F4A", background_color: "#10241C"},
     play_money: %{felt_color: "#2A5FA8", background_color: "#14203A"}
   },
-
   levels: %{
     main: [
       %{level: "NL2", small_blind: 1, big_blind: 2},

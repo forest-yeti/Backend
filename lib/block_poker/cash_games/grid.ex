@@ -86,6 +86,16 @@ defmodule BlockPoker.CashGames.Grid do
   defp keep_level?(_level, nil), do: true
   defp keep_level?(level, only), do: level.level in only
 
+  # Имя лимита — сам уровень и, если формат её задаёт, пометка в скобках.
+  # Вид игры и размер стола лобби показывает тегами: «NL5 Short Deck 6-max»
+  # повторяло бы в подписи то, что и так стоит рядом.
+  defp name(level, format) do
+    case Map.get(format, :label) do
+      nil -> level.level
+      label -> "#{level.level} (#{label})"
+    end
+  end
+
   defp game_type(format, grid), do: Map.get(format, :game_type) || grid.defaults.game_type
 
   defp structure(game_type) do
@@ -100,7 +110,7 @@ defmodule BlockPoker.CashGames.Grid do
     |> Map.merge(Map.fetch!(grid.visuals, currency))
     |> Map.merge(limits)
     |> Map.merge(%{
-      name: "#{level.level} #{format.suffix}",
+      name: name(level, format),
       game_type: game_type,
       currency: currency,
       max_players: format.max_players,
