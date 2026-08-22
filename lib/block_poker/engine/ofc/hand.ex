@@ -192,7 +192,10 @@ defmodule BlockPoker.Engine.Ofc.Hand do
              rows: rows_view(player.board),
              placed: Board.size(player.board),
              discarded: length(player.discards),
-             fantasy: player.fantasy?
+             fantasy: player.fantasy?,
+             # Роспись собранных боксов. Считает её всё равно сервер, а без
+             # неё клиенту пришлось бы завести вторую копию правил варианта.
+             combinations: categories(hand, player)
            }}
         end),
       showdown: hand.results && hand.results.showdown
@@ -211,6 +214,7 @@ defmodule BlockPoker.Engine.Ofc.Hand do
           deal: {:cards, player.hand},
           rows: rows_view(player.board),
           royalties: royalties(hand, player),
+          combinations: categories(hand, player),
           in_hand: true,
           legal_actions: legal_actions(hand, seat)
         }
@@ -348,6 +352,7 @@ defmodule BlockPoker.Engine.Ofc.Hand do
         {seat,
          %{
            rows: rows_view(player.board),
+           combinations: categories(hand, player),
            foul: scores[seat].foul?,
            royalties: scores[seat].royalties.rows,
            points: scores[seat].total,
@@ -390,6 +395,15 @@ defmodule BlockPoker.Engine.Ofc.Hand do
     else
       Map.new(Board.rows(), &{&1, 0})
     end
+  end
+
+  # Роспись каждого бокса или `nil`, пока он не собран: неполную руку не
+  # оценивают, и придумывать ей категорию нельзя.
+  defp categories(hand, player) do
+    Map.new(Board.rows(), fn row ->
+      rank = Board.rank(player.board, row, hand.context)
+      {row, rank && rank.category}
+    end)
   end
 
   defp rows_view(board) do

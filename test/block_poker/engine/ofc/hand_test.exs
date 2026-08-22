@@ -103,6 +103,31 @@ defmodule BlockPoker.Engine.Ofc.HandTest do
       end)
     end
 
+    test "роспись боксов приходит только у собранных" do
+      {start, _events} = setup_hand([{1, 1000}, {2, 1000}])
+      seat = Hand.to_act(start)
+
+      # До хода не собран ни один бокс: расписывать нечего, и придумывать
+      # категорию неполной руке нельзя.
+      assert %{top: nil, middle: nil, bottom: nil} =
+               Hand.public_view(start).seats[seat].combinations
+
+      {hand, _events} = play_out({start, []})
+      %{seats: seats} = Hand.public_view(hand)
+
+      # По концу раскладки расписаны все три: клиент берёт категорию отсюда,
+      # а не считает её сам — это правило варианта, а не оформление.
+      for {_seat, view} <- seats do
+        assert %{top: top, middle: middle, bottom: bottom} = view.combinations
+        assert top != nil
+        assert middle != nil
+        assert bottom != nil
+      end
+
+      assert %{combinations: %{bottom: bottom}} = Hand.private_view(hand, seat)
+      assert bottom != nil
+    end
+
     test "51 сданная карта при троих попарно различна" do
       {hand, events} = play_out(setup_hand([{1, 1000}, {2, 1000}, {3, 1000}]))
 
