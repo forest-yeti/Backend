@@ -115,6 +115,17 @@ defmodule Socket.Channels.OfcChannelTest do
   end
 
   describe "раздача через сокет" do
+    test "снапшот называет дисциплину", %{room_id: room_id} do
+      user = user_fixture()
+      {:ok, %{token: token}} = BlockPoker.Accounts.start_session(user)
+      {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+      # По этому полю клиент выбирает игровой экран: у китайского покера
+      # нет ни борда, ни банка, и открыть под него окно холдема нельзя.
+      assert {:ok, snapshot, _channel} = subscribe_and_join(socket, "table:#{room_id}", %{})
+      assert snapshot.discipline == :ofc_pineapple
+    end
+
     test "двое играют раздачу целиком", context do
       players = seat_players(context, 2)
       room = play_out(context.pid, players)

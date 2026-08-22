@@ -30,6 +30,11 @@ defmodule Socket.Views.TableView do
       setting_id: room.setting.id,
       name: room.mode.display_name(room),
       game_type: room.setting.game_type,
+      # Дисциплина комнаты. Клиент выбирает по ней игровой экран: у
+      # китайского покера нет ни борда, ни банка, и настроить под него
+      # экран холдема нечем. Спрашивается у самой дисциплины — выводить её
+      # из названия комнаты или числа мест значило бы гадать.
+      discipline: room.discipline.id(),
       betting_structure: room.mode.betting_structure(room).id(),
       # Номиналы спрашиваются у режима: в кэше это поля шаблона, в турнире —
       # текущий уровень структуры. Выбирать между ними здесь значило бы
