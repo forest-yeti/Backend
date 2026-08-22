@@ -41,18 +41,35 @@ defmodule BlockPoker.CashGames do
   @doc """
   Поиск по естественному ключу — тому же, на котором стоит UNIQUE.
   Нужен сиду: «такая строка уже есть» определяется ключом, а не именем.
+
+  Код входа — часть ключа, и это не деталь: в UNIQUE он входит как
+  `code_key = IFNULL(code, '')`, потому что домашняя игра на тех же
+  блайндах, что и публичный лимит, — законная строка, а не дубль
+  (миграция `add_cash_game_code`). Искать без него значит спрашивать
+  «строки с такими блайндами», а на этот вопрос у базы законно бывает
+  несколько ответов: один публичный лимит и сколько угодно закрытых
+  комнат поверх него. Сид от такого падал бы `MultipleResultsError` —
+  и падал ровно там, где оператор завёл приватку на сеточных лимитах.
   """
   @spec get_by_natural_key(map()) :: CashGameSetting.t() | nil
   def get_by_natural_key(attrs) do
-    Repo.get_by(CashGameSetting,
-      game_type: attrs.game_type,
-      currency: attrs.currency,
-      small_blind: attrs.small_blind,
-      big_blind: attrs.big_blind,
-      ante: attrs.ante,
-      max_players: attrs.max_players
+    CashGameSetting
+    |> where(
+      game_type: ^attrs.game_type,
+      currency: ^attrs.currency,
+      small_blind: ^attrs.small_blind,
+      big_blind: ^attrs.big_blind,
+      ante: ^attrs.ante,
+      max_players: ^attrs.max_players
     )
+    |> by_code(Map.get(attrs, :code))
+    |> Repo.one()
   end
+
+  # `code: nil` в keyword-фильтр Ecto не пускает (сравнение с NULL небезопасно),
+  # поэтому ветка отделена явно: у сеточных шаблонов кода нет вовсе.
+  defp by_code(query, nil), do: where(query, [c], is_nil(c.code))
+  defp by_code(query, code), do: where(query, [c], c.code == ^code)
 
   @doc """
   Поиск закрытой комнаты по коду входа. Регистр и пробелы игроку прощаются,

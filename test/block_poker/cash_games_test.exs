@@ -196,6 +196,36 @@ defmodule BlockPoker.CashGamesTest do
       assert length(CashGames.list_settings()) == 5
     end
 
+    test "приватка на сеточных лимитах не ломает сид" do
+      rows = Grid.expand(currency: :play_money, only: ["NL1000"])
+      [%{attrs: attrs} | _rest] = rows
+
+      # Закрытая комната на тех же блайндах — законная строка: в UNIQUE
+      # входит ещё и код. Но сид искал шаблон без кода и получал из базы
+      # два ответа вместо одного, после чего падал MultipleResultsError
+      # и оставлял сервис на деплое остановленным.
+      Grid.seed(rows)
+
+      private =
+        private_setting_fixture(%{
+          game_type: attrs.game_type,
+          currency: attrs.currency,
+          small_blind: attrs.small_blind,
+          big_blind: attrs.big_blind,
+          ante: attrs.ante,
+          max_players: attrs.max_players
+        })
+
+      assert private.code
+
+      second = Grid.seed(rows)
+      assert second.created == []
+      assert length(second.skipped) == 5
+
+      # Приватку сид не трогает и вторым публичным шаблоном не считает.
+      assert length(CashGames.list_settings()) == 6
+    end
+
     test "--force перезаписывает, но не воскрешает выключенный оператором лимит" do
       rows = Grid.expand(currency: :play_money, only: ["NL1000"])
       Grid.seed(rows)
