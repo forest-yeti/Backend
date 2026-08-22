@@ -143,7 +143,7 @@ defmodule BlockPoker.Engine.PrizePool do
   end
 
   @doc """
-  Множитель словами — то, что клиент рисует на барабане («x2», «x2.5»).
+  Множитель словами — то, что клиент рисует на барабане («X2», «X2.5»).
 
   Считается здесь, а не во view: деление сотых долей на разы — арифметика
   над доменным значением (§3 CLAUDE.md).
@@ -153,9 +153,9 @@ defmodule BlockPoker.Engine.PrizePool do
     whole = div(multiplier, @multiplier_scale)
 
     case rem(multiplier, @multiplier_scale) do
-      0 -> "x#{whole}"
-      tenths when rem(tenths, 10) == 0 -> "x#{whole}.#{div(tenths, 10)}"
-      rest -> "x#{whole}.#{String.pad_leading(Integer.to_string(rest), 2, "0")}"
+      0 -> "X#{whole}"
+      tenths when rem(tenths, 10) == 0 -> "X#{whole}.#{div(tenths, 10)}"
+      rest -> "X#{whole}.#{String.pad_leading(Integer.to_string(rest), 2, "0")}"
     end
   end
 

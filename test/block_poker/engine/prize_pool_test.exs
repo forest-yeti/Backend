@@ -131,13 +131,13 @@ defmodule BlockPoker.Engine.PrizePoolTest do
 
   describe "multiplier_label/1" do
     test "целые множители пишутся без дробной части" do
-      assert PrizePool.multiplier_label(200) == "x2"
-      assert PrizePool.multiplier_label(1_000_000) == "x10000"
+      assert PrizePool.multiplier_label(200) == "X2"
+      assert PrizePool.multiplier_label(1_000_000) == "X10000"
     end
 
     test "дробные множители сохраняют значащие разряды" do
-      assert PrizePool.multiplier_label(250) == "x2.5"
-      assert PrizePool.multiplier_label(205) == "x2.05"
+      assert PrizePool.multiplier_label(250) == "X2.5"
+      assert PrizePool.multiplier_label(205) == "X2.05"
     end
   end
 end

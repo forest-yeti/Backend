@@ -70,7 +70,7 @@ defmodule Socket.Channels.SitAndGoChannelTest do
 
       row = hd(snapshot.tournaments)
 
-      assert hd(row.prize_tiers).label == "x2"
+      assert hd(row.prize_tiers).label == "X2"
       assert hd(row.blind_levels).label == "10/20"
     end
 

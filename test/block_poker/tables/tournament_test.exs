@@ -72,7 +72,7 @@ defmodule BlockPoker.Tables.TournamentTest do
 
       # Вырожденная таблица фикстуры: x2 при взносе 100 — фонд 200.
       assert prize.multiplier == 200
-      assert prize.label == "x2"
+      assert prize.label == "X2"
       assert prize.pool == 200
       assert prize.payouts == [100]
     end
@@ -253,7 +253,7 @@ defmodule BlockPoker.Tables.TournamentTest do
 
       prize = TableServer.state(pid).tournament.prize
 
-      assert prize.label == "x1.5"
+      assert prize.label == "X1.5"
       # Взнос фикстуры — 100, фонд полтора взноса.
       assert prize.pool == 150
     end
