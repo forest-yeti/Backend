@@ -14,6 +14,10 @@ defmodule Socket.UserSocket do
   alias Socket.Protocol.Version
 
   channel "lobby", Socket.Channels.LobbyChannel
+  # Разделов витрины два, и второй — китайский покер. Топик `lobby:ofc`
+  # обслуживает тот же канал: без этой строки сокет его просто не
+  # маршрутизирует, и клиент получает отказ вместо списка столов.
+  channel "lobby:*", Socket.Channels.LobbyChannel
   channel "sit_n_go", Socket.Channels.SitAndGoChannel
   channel "table:*", Socket.Channels.TableChannel
   channel "wallet:*", Socket.Channels.WalletChannel

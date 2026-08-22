@@ -40,6 +40,18 @@ defmodule Socket.Channels.LobbyChannelTest do
     %{user: user, channel: channel, snapshot: snapshot}
   end
 
+  test "топик lobby:ofc маршрутизируется сокетом" do
+    socket = socket_for()
+
+    # Витрина китайского покера живёт в отдельном топике того же канала.
+    # Проверяется именно маршрут сокета: канал умел `lobby:ofc` и раньше,
+    # но топик до него не доходил — клиент получал отказ вместо списка.
+    assert {:ok, snapshot, _channel} = subscribe_and_join(socket, "lobby:ofc", %{})
+    assert is_list(snapshot.settings)
+    # Кэш-столы в эту витрину не подмешиваются ни при каких условиях.
+    assert Enum.all?(snapshot.settings, &(&1.discipline == "ofc_pineapple"))
+  end
+
   test "join отдаёт список шаблонов с комнатами", %{setting: setting} do
     %{snapshot: snapshot} = join_lobby()
 
