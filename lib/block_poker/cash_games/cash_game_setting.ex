@@ -305,12 +305,84 @@ defmodule BlockPoker.CashGames.CashGameSetting do
     end
   end
 
-  @doc "Название для лобби: явное имя шаблона либо производное от лимитов."
+  @doc """
+  Название для лобби: явное имя шаблона либо производное от лимитов.
+
+  Имя чистится на лету: вид игры и размер стола лобби показывает
+  отдельными полями, и в подписи они лишние — «NL1000 Short Deck 6-max»
+  превращается в «NL1000», а «NL5 6-max Ante» в «NL5 (Ante)». Именно на
+  лету, а не миграцией: в БД лежит имя, которое задал оператор, и
+  переписывать его ради вёрстки витрины сервер не вправе.
+  """
   @spec display_name(t()) :: String.t()
-  def display_name(%__MODULE__{name: name}) when is_binary(name) and name != "", do: name
+  def display_name(%__MODULE__{name: name} = setting) when is_binary(name) and name != "" do
+    short_name(name, setting)
+  end
 
   def display_name(%__MODULE__{} = setting) do
     "#{setting.small_blind}/#{setting.big_blind} #{setting.max_players}-max"
+  end
+
+  # Первое слово — сам лимит («NL5»), оно остаётся всегда. Из остальных
+  # выбрасываются те, что дублируют вид игры или размер стола; уцелевшее
+  # («Ante», «Turbo» — что угодно, чего сетка ещё не знает) уходит в скобки,
+  # потому что незнакомое слово это факт, которого больше нигде нет.
+  defp short_name(name, setting) do
+    case String.split(name, ~r/\s+/, trim: true) do
+      [] -> name
+      [level | rest] -> join_name(level, drop_known(rest, known_words(setting)))
+    end
+  end
+
+  defp join_name(level, []), do: level
+
+  defp join_name(level, rest) do
+    tail = Enum.join(rest, " ")
+
+    # Второй прогон над уже подстриженным именем не должен плодить скобки.
+    if String.starts_with?(tail, "(") and String.ends_with?(tail, ")"),
+      do: "#{level} #{tail}",
+      else: "#{level} (#{tail})"
+  end
+
+  # Хвост из двух слов проверяется первым: «Short Deck» длиннее «Deck».
+  defp drop_known([], _known), do: []
+
+  defp drop_known([a, b | rest], known) do
+    cond do
+      normalize_word(a <> b) in known -> drop_known(rest, known)
+      normalize_word(a) in known -> drop_known([b | rest], known)
+      true -> [a | drop_known([b | rest], known)]
+    end
+  end
+
+  defp drop_known([a | rest], known) do
+    if normalize_word(a) in known,
+      do: drop_known(rest, known),
+      else: [a | drop_known(rest, known)]
+  end
+
+  # Написания вида игры, встречающиеся в именах шаблонов. Незнакомый вид
+  # даёт хотя бы себя самого: «omaha» и «omaha» совпадут без словаря.
+  @game_type_words %{
+    "texas_holdem" => ["holdem", "texas holdem", "nlhe"],
+    "short_deck" => ["short deck", "6+"]
+  }
+
+  defp known_words(setting) do
+    game_type = to_string(setting.game_type)
+    words = [game_type | Map.get(@game_type_words, game_type, [])]
+    sizes = ["#{setting.max_players}-max", "#{setting.max_players}max"]
+
+    # «HU» — это размер стола, а не украшение: на шестимаксе такое слово
+    # в имени означало бы что-то другое, и трогать его нельзя.
+    sizes = if setting.max_players == 2, do: ["hu", "heads-up" | sizes], else: sizes
+
+    MapSet.new(Enum.map(words ++ sizes, &normalize_word/1))
+  end
+
+  defp normalize_word(word) do
+    word |> String.downcase() |> String.replace(~r/[^a-z0-9]/, "")
   end
 
   defp validate_code(changeset) do

@@ -119,6 +119,25 @@ defmodule BlockPoker.CashGamesTest do
 
       assert CashGameSetting.display_name(setting) == "5/10 6-max"
     end
+
+    # Стрижка имени смотрит только на три поля, и записывать ради неё
+    # валидный шаблон в БД незачем — сравниваем на голой структуре.
+    test "из имени вырезается то, что лобби показывает отдельными полями" do
+      assert named("NL1000 Short Deck 6-max", :short_deck, 6) == "NL1000"
+      assert named("NL1000 ShortDeck 6-max", :short_deck, 6) == "NL1000"
+      assert named("NL10 Holdem 9-max", :texas_holdem, 9) == "NL10"
+      assert named("NL5 HU", :texas_holdem, 2) == "NL5"
+    end
+
+    test "незнакомая часть имени сохраняется в скобках" do
+      assert named("NL5 6-max Ante", :texas_holdem, 6) == "NL5 (Ante)"
+
+      # Уже короткое имя стрижка не портит — прогон идемпотентен.
+      assert named("NL5 (Ante)", :texas_holdem, 6) == "NL5 (Ante)"
+
+      # «HU» на шестимаксе размером стола быть не может — значит, это факт.
+      assert named("NL5 HU", :texas_holdem, 6) == "NL5 (HU)"
+    end
   end
 
   describe "mix cash_game.seed" do
@@ -332,5 +351,13 @@ defmodule BlockPoker.CashGamesTest do
       assert CashGameSetting.min_buy_in_chips(setting) == 400
       assert CashGameSetting.max_buy_in_chips(setting) == 1_000
     end
+  end
+
+  defp named(name, game_type, max_players) do
+    CashGameSetting.display_name(%CashGameSetting{
+      name: name,
+      game_type: game_type,
+      max_players: max_players
+    })
   end
 end
