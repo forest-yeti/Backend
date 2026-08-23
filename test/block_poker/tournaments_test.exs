@@ -102,6 +102,89 @@ defmodule BlockPoker.TournamentsTest do
     end
   end
 
+  describe "снапшот настроек" do
+    test "снимается при открытии регистрации" do
+      setting = setting_fixture()
+      tournament = tournament_fixture(setting)
+
+      assert is_map(tournament.snapshot)
+      assert tournament.status == :registering
+    end
+
+    test "несёт уровни вместе с флагами входа" do
+      setting = setting_fixture()
+      tournament = tournament_fixture(setting)
+
+      levels = tournament.snapshot["levels"]
+
+      assert length(levels) == 2
+      assert Enum.map(levels, & &1["level"]) == [1, 2]
+      assert Enum.map(levels, & &1["big_blind"]) == [50, 100]
+
+      # Флаг входа — половина смысла снапшота: по нему процесс решает,
+      # можно ли ещё войти, и читать его из шаблона он не вправе.
+      assert Enum.map(levels, & &1["rebuy_allowed"]) == [true, false]
+      assert Enum.map(levels, & &1["addon_allowed"]) == [false, false]
+    end
+
+    test "несёт сетку выплат" do
+      setting = setting_fixture()
+      tournament = tournament_fixture(setting)
+
+      assert [first, second] = tournament.snapshot["payouts"]
+      assert first["share_ppm"] == 650_000
+      assert second["place_from"] == 2
+    end
+
+    test "несёт цены, включая выведенные из умолчаний" do
+      setting = setting_fixture(%{rebuy_allowed: true, max_rebuys: 1})
+      tournament = tournament_fixture(setting)
+
+      # `rebuy_cost` и `rebuy_stack` в шаблоне пустые — в снапшот уходят
+      # уже посчитанные значения, а не `nil`, который процессу пришлось бы
+      # разворачивать самому.
+      assert tournament.snapshot["rebuy_cost"] == 1100
+      assert tournament.snapshot["rebuy_stack"] == 5000
+    end
+
+    test "ключи строковые: это JSON, а не структура Elixir" do
+      setting = setting_fixture()
+      tournament = tournament_fixture(setting)
+
+      assert Enum.all?(Map.keys(tournament.snapshot), &is_binary/1)
+
+      assert Enum.all?(tournament.snapshot["levels"], fn level ->
+               Enum.all?(Map.keys(level), &is_binary/1)
+             end)
+    end
+
+    test "переживает перечитывание из БД" do
+      setting = setting_fixture()
+      tournament = tournament_fixture(setting)
+
+      {:ok, reloaded} = Tournaments.get_tournament(tournament.id)
+
+      assert reloaded.snapshot == tournament.snapshot
+    end
+
+    test "правка шаблона после снятия снапшота его не меняет" do
+      setting = setting_fixture()
+      tournament = tournament_fixture(setting)
+
+      {:ok, _updated} =
+        setting.blind_levels
+        |> hd()
+        |> BlockPoker.Tournaments.BlindLevel.changeset(%{big_blind: 999_999})
+        |> Repo.update()
+
+      {:ok, reloaded} = Tournaments.get_tournament(tournament.id)
+
+      # Ради этого снапшот и существует: правка структуры в БД не должна
+      # поднимать блайнды посреди идущего турнира.
+      assert hd(reloaded.snapshot["levels"])["big_blind"] == 50
+    end
+  end
+
   describe "цена входа" do
     test "обычный турнир: весь взнос в фонд" do
       setting = setting_fixture()
@@ -407,7 +490,10 @@ defmodule BlockPoker.TournamentsTest do
 
       assert :ok = Tournaments.unregister(tournament.id, user.id)
       assert balance(user) == before
-      assert entries_of(tournament) == []
+
+      # Строка входа остаётся возвращённой: она держит номер, из которого
+      # строится ключ идемпотентности следующей оплаты.
+      assert [%Entry{status: :refunded}] = entries_of(tournament)
     end
 
     test "счётчики возвращаются назад", %{tournament: tournament, user: user} do
@@ -425,6 +511,66 @@ defmodule BlockPoker.TournamentsTest do
       {:ok, _started} = Tournaments.start(tournament, nil)
 
       assert {:error, :unregister_too_late} = Tournaments.unregister(tournament.id, user.id)
+    end
+
+    test "повторный вход после разрегистрации снова стоит денег", %{
+      tournament: tournament,
+      user: user
+    } do
+      start = balance(user)
+
+      {:ok, _first} = Tournaments.register(tournament.id, user.id)
+      :ok = Tournaments.unregister(tournament.id, user.id)
+      assert balance(user) == start
+
+      # Ключ идемпотентности несёт номер входа. Без него кошелёк принял бы
+      # вторую регистрацию за ретрай первой и пустил бы игрока даром.
+      {:ok, second} = Tournaments.register(tournament.id, user.id)
+
+      assert second.entry_number == 2
+      assert balance(user) == start - 1100
+    end
+
+    test "разрегистрация не удаляет вход, а помечает возвращённым", %{
+      tournament: tournament,
+      user: user
+    } do
+      {:ok, entry} = Tournaments.register(tournament.id, user.id)
+      :ok = Tournaments.unregister(tournament.id, user.id)
+
+      assert Repo.get!(Entry, entry.id).status == :refunded
+    end
+
+    test "возвращённый вход не занимает места и не тратит попытку" do
+      setting =
+        setting_fixture(%{min_players: 2, max_players: 2, rebuy_allowed: true, max_rebuys: 1})
+
+      tournament = tournament_fixture(setting)
+      user = user_fixture()
+
+      {:ok, _first} = Tournaments.register(tournament.id, user.id)
+      :ok = Tournaments.unregister(tournament.id, user.id)
+
+      # Место освободилось: потолок в одного человека снова не выбран.
+      assert {:ok, second} = Tournaments.register(tournament.id, user.id)
+
+      # И попытка ре-энтри не потрачена: разрегистрация — не вылет.
+      {:ok, _busted} = Tournaments.bust(second.id, nil)
+      assert {:ok, _third} = Tournaments.reenter(tournament.id, user.id)
+    end
+
+    test "счётчик людей после разрегистрации и возврата не задваивается", %{
+      tournament: tournament,
+      user: user
+    } do
+      {:ok, _first} = Tournaments.register(tournament.id, user.id)
+      :ok = Tournaments.unregister(tournament.id, user.id)
+      {:ok, _second} = Tournaments.register(tournament.id, user.id)
+
+      {:ok, reloaded} = Tournaments.get_tournament(tournament.id)
+
+      assert reloaded.players_count == 1
+      assert reloaded.entries_count == 1
     end
 
     test "незарегистрированный получает отказ", %{tournament: tournament, user: user} do
@@ -467,6 +613,17 @@ defmodule BlockPoker.TournamentsTest do
 
       # Иначе уникальный индекс не пустил бы игрока в следующий запуск.
       assert returned.used_in_tournament_id == nil
+    end
+
+    test "входы помечаются возвращёнными, а не остаются живыми" do
+      setting = setting_fixture()
+      tournament = tournament_fixture(setting)
+      user = user_fixture()
+
+      {:ok, entry} = Tournaments.register(tournament.id, user.id)
+      {:ok, 1} = Tournaments.cancel(tournament.id)
+
+      assert Repo.get!(Entry, entry.id).status == :refunded
     end
 
     test "турнир переходит в cancelled" do

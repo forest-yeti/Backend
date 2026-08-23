@@ -379,7 +379,18 @@ defmodule BlockPoker.Tournaments do
   # Единственное место, где решается «пустят ли»: и потолки, и статус,
   # и лимит игрока. Канал этого не знает и знать не должен (§3 CLAUDE.md).
   defp check_slot(repo, tournament, setting, user_id, kind) do
-    entries = user_entries(repo, tournament.id, user_id)
+    # Возвращённые входы (разрегистрация, отмена) остаются в таблице
+    # и различаются от живых. Их роль в трёх счётах разная, и смешивать
+    # их нельзя:
+    #
+    #   * **номер входа** считается по всем записям, включая возвращённые.
+    #     Из номера строится ключ идемпотентности списания, и переиспользовать
+    #     номер значило бы переиспользовать ключ: кошелёк принял бы повторную
+    #     регистрацию за ретрай первой и не списал бы денег вовсе;
+    #   * **лимит ре-энтри** и **число людей** считаются только по живым:
+    #     разрегистрировавшийся не потратил попытку и не занимает места.
+    all_entries = user_entries(repo, tournament.id, user_id)
+    entries = Enum.reject(all_entries, &(&1.status == :refunded))
     seated? = Enum.any?(entries, &Entry.seated?/1)
 
     max_entries = setting.max_entries
@@ -415,7 +426,7 @@ defmodule BlockPoker.Tournaments do
         {:error, :tournament_full}
 
       true ->
-        {:ok, %{entry_number: length(entries) + 1, new_player?: entries == []}}
+        {:ok, %{entry_number: length(all_entries) + 1, new_player?: entries == []}}
     end
   end
 
@@ -528,7 +539,11 @@ defmodule BlockPoker.Tournaments do
   defp stake_type(:entry), do: :tournament_entry
   defp stake_type(:reentry), do: :tournament_rebuy
 
-  defp reference_of(:entry, tid, uid, _n), do: "tournament:#{tid}:entry:#{uid}"
+  # Номер входа — часть ключа и у первичной регистрации тоже. Без него
+  # игрок, разрегистрировавшийся и вошедший снова, повторил бы ключ своей
+  # первой оплаты, а кошелёк по правилу идемпотентности вернул бы старую
+  # запись вместо нового списания — то есть пустил бы второй раз даром.
+  defp reference_of(:entry, tid, uid, n), do: "tournament:#{tid}:entry:#{uid}:#{n}"
   defp reference_of(:reentry, tid, uid, n), do: "tournament:#{tid}:rebuy:#{uid}:#{n}"
 
   @doc """
@@ -629,13 +644,19 @@ defmodule BlockPoker.Tournaments do
       get_setting(tournament.tournament_setting_id)
     end)
     |> Multi.run(:entry, fn repo, %{tournament: tournament} ->
-      case repo.get_by(Entry, tournament_id: tournament.id, user_id: user_id, entry_number: 1) do
+      case active_entry(repo, tournament.id, user_id) do
         nil -> {:error, :not_registered}
         entry -> {:ok, entry}
       end
     end)
     |> Multi.run(:refund, fn repo, changes -> refund_entry(repo, changes) end)
-    |> Multi.run(:remove, fn repo, %{entry: entry} -> {:ok, repo.delete!(entry)} end)
+    # Запись входа **не удаляется**, а помечается возвращённой. Удаление
+    # освободило бы номер входа, а из номера строится ключ идемпотентности
+    # списания: следующая регистрация того же игрока выглядела бы для
+    # кошелька ретраем первой, и он пустил бы её бесплатно.
+    |> Multi.run(:release, fn repo, %{entry: entry} ->
+      entry |> Entry.changeset(%{status: :refunded}) |> repo.update()
+    end)
     |> Multi.run(:counters, fn repo, changes ->
       {1, _returned} =
         repo.update_all(from(t in Tournament, where: t.id == ^changes.tournament.id),
@@ -692,6 +713,11 @@ defmodule BlockPoker.Tournaments do
         end
       end)
     end)
+    |> Multi.update_all(
+      :release,
+      from(e in Entry, where: e.tournament_id == ^tournament_id),
+      set: [status: :refunded]
+    )
     |> Tickets.refund_all(:tickets, tournament_id)
     |> Multi.run(:status, fn repo, %{tournament: tournament} ->
       tournament |> Tournament.changeset(%{status: :cancelled}) |> repo.update()

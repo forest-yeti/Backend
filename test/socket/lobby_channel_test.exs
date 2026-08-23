@@ -48,6 +48,7 @@ defmodule Socket.Channels.LobbyChannelTest do
     # но топик до него не доходил — клиент получал отказ вместо списка.
     assert {:ok, snapshot, _channel} = subscribe_and_join(socket, "lobby:ofc", %{})
     assert is_list(snapshot.settings)
+
     # Кэш-столы в эту витрину не подмешиваются ни при каких условиях.
     assert Enum.all?(snapshot.settings, &(&1.discipline == "ofc_pineapple"))
   end

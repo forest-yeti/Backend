@@ -78,14 +78,9 @@ defmodule BlockPoker.Engine.Seating do
   def plan(tables, table_size) do
     {free, busy} = Enum.split_with(tables, &(not &1.busy?))
 
-    # Занятые столы не участвуют в перестановках, но их игроки считаются:
-    # иначе схлопывание снесло бы стол, который через секунду понадобится.
-    total = Enum.reduce(tables, 0, &(occupancy(&1) + &2))
-    keep_count = max(tables_needed(total, table_size) - length(busy), 0)
+    {kept, closed} = choose_closing(free, keep_count(tables, busy, free, table_size))
 
-    {kept, closed} = choose_closing(free, keep_count)
-
-    %{moves: [], close: Enum.map(closed, & &1.id)}
+    %{moves: [], close: Enum.map(closed, & &1.id), retain: MapSet.new()}
     |> evacuate(closed, kept, table_size)
     |> balance(table_size)
     |> finish()
@@ -118,6 +113,28 @@ defmodule BlockPoker.Engine.Seating do
 
   # --- Схлопывание ---------------------------------------------------------
 
+  # Сколько свободных столов оставить.
+  #
+  # Двух ограничений, а не одного, и второе важнее. Первое — глобальное:
+  # столько столов нужно, чтобы рассадить всех, за вычетом тех, что заняты
+  # раздачей и никуда не денутся. Второе — вместимость: игроки закрываемых
+  # столов пересаживаются **только** на оставшиеся свободные, потому что
+  # состав занятого стола посреди раздачи менять нельзя. Его пустые места
+  # существуют, но воспользоваться ими сейчас невозможно.
+  #
+  # Без второго ограничения турнир из занятого стола на одного и двух
+  # свободных по одному снёс бы оба свободных: глобально троим хватает
+  # одного стола, а физически сесть им некуда. Игроки при этом исчезали бы.
+  defp keep_count(tables, busy, free, table_size) do
+    total = Enum.reduce(tables, 0, &(occupancy(&1) + &2))
+    movable = Enum.reduce(free, 0, &(occupancy(&1) + &2))
+
+    global = tables_needed(total, table_size) - length(busy)
+    capacity = tables_needed(movable, table_size)
+
+    global |> max(capacity) |> max(0) |> min(length(free))
+  end
+
   # Убирается стол с наименьшим числом игроков: пересадок от этого меньше
   # всего. `id` в ключе — чтобы выбор был детерминирован при равенстве.
   defp choose_closing(free, keep_count) do
@@ -141,10 +158,14 @@ defmodule BlockPoker.Engine.Seating do
 
   # Игрок садится за наименее заполненный стол: так пересадки сразу
   # ложатся ровно и второй проход выравнивания оказывается почти не нужен.
+  #
+  # Если сесть некуда, стол **не закрывается**: игрок остаётся там, где
+  # сидел. Расчёт вместимости этого случая не допускает, но цена ошибки
+  # здесь — пропавший из турнира игрок, и страховка дешевле разбирательства.
   defp seat_somewhere(state, mover, table_size) do
     case Enum.filter(state.tables, &(occupancy(&1) < table_size)) do
       [] ->
-        state
+        %{state | retain: MapSet.put(state.retain, mover.from)}
 
       candidates ->
         target = Enum.min_by(candidates, &{occupancy(&1), &1.id})
@@ -253,6 +274,6 @@ defmodule BlockPoker.Engine.Seating do
   end
 
   defp finish(state) do
-    %{moves: Enum.reverse(state.moves), close: state.close}
+    %{moves: Enum.reverse(state.moves), close: state.close -- MapSet.to_list(state.retain)}
   end
 end

@@ -161,6 +161,23 @@ defmodule BlockPoker.Engine.SeatingTest do
       refute :busy in plan.close
     end
 
+    test "игроков не пересаживают на свободные места занятого стола" do
+      # Троих глобально хватило бы на один стол, но два из них сидят
+      # за свободными столами, а третий — за занятым, куда сейчас
+      # никого не посадить. Снести оба свободных нельзя: игрокам
+      # некуда идти.
+      tables = [
+        table(:busy, [:p1], busy?: true),
+        table(:b, [:p2]),
+        table(:c, [:p3])
+      ]
+
+      plan = Seating.plan(tables, 6)
+      balanced = apply_plan(tables, plan)
+
+      assert Enum.sum(Enum.map(balanced, &Seating.occupancy/1)) == 3
+    end
+
     test "игроки занятого стола всё равно считаются при схлопывании" do
       # Шестеро за занятым столом плюс один — в один стол на шесть
       # они не влезают, и сносить свободный стол нельзя.
@@ -236,6 +253,40 @@ defmodule BlockPoker.Engine.SeatingTest do
       end
     end
 
+    # Занятые столы — тот случай, где схлопывание однажды увозило игрока
+    # в никуда: глобально места хватало, а физически сесть было некуда,
+    # потому что свободные места занятого стола недоступны посреди раздачи.
+    property "игрок не теряется и тогда, когда часть столов в раздаче" do
+      check all(
+              counts <- list_of(integer(0..6), min_length: 1, max_length: 6),
+              busy <- list_of(boolean(), min_length: 1, max_length: 6),
+              max_runs: 300
+            ) do
+        tables = build_tables(counts, 6, busy)
+        before = occupants(tables)
+
+        balanced = tables |> Seating.plan(6) |> then(&apply_plan(tables, &1))
+
+        assert Enum.sort(occupants(balanced)) == Enum.sort(before)
+      end
+    end
+
+    property "стол в раздаче не закрывают и не трогают его состав" do
+      check all(
+              counts <- list_of(integer(0..6), min_length: 1, max_length: 6),
+              busy <- list_of(boolean(), min_length: 1, max_length: 6),
+              max_runs: 300
+            ) do
+        tables = build_tables(counts, 6, busy)
+        busy_ids = tables |> Enum.filter(& &1.busy?) |> MapSet.new(& &1.id)
+
+        plan = Seating.plan(tables, 6)
+
+        assert Enum.all?(plan.close, &(&1 not in busy_ids))
+        assert Enum.all?(plan.moves, &(&1.from not in busy_ids and &1.to not in busy_ids))
+      end
+    end
+
     property "число столов после плана не меньше необходимого" do
       check all(counts <- list_of(integer(0..6), min_length: 1, max_length: 6), max_runs: 200) do
         tables = build_tables(counts, 6)
@@ -249,13 +300,15 @@ defmodule BlockPoker.Engine.SeatingTest do
     end
   end
 
-  defp build_tables(counts, size) do
+  defp build_tables(counts, size, busy \\ []) do
     {tables, _next} =
       counts
       |> Enum.with_index()
       |> Enum.map_reduce(1, fn {count, index}, next ->
         players = Enum.map(next..(next + count - 1)//1, &{:p, &1})
-        {table({:t, index}, players, size: size), next + count}
+        busy? = Enum.at(busy, index, false)
+
+        {table({:t, index}, players, size: size, busy?: busy?), next + count}
       end)
 
     tables
