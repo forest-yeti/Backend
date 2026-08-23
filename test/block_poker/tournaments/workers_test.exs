@@ -18,7 +18,7 @@ defmodule BlockPoker.Tournaments.WorkersTest do
 
   alias BlockPoker.Tickets
   alias BlockPoker.Tournaments
-  alias BlockPoker.Tournaments.Workers.{CancelUnderfilled, ExpireTickets}
+  alias BlockPoker.Tournaments.Workers.{CancelUnderfilled, ExpireTickets, SettleTournament}
   alias BlockPoker.Wallet
 
   defp balance(user) do
@@ -134,6 +134,61 @@ defmodule BlockPoker.Tournaments.WorkersTest do
     test "исчезнувший турнир — не ошибка джобы" do
       assert {:error, :not_found} =
                CancelUnderfilled.perform(job(%{"tournament_id" => Ecto.UUID.generate()}))
+    end
+  end
+
+  describe "дорасчёт турнира" do
+    setup do
+      setting = setting_fixture()
+      tournament = tournament_fixture(setting)
+
+      winner = user_fixture()
+      loser = user_fixture()
+
+      {:ok, first} = Tournaments.register(tournament.id, winner.id)
+      {:ok, second} = Tournaments.register(tournament.id, loser.id)
+
+      {:ok, tournament} = Tournaments.get_tournament(tournament.id)
+      {:ok, tournament} = Tournaments.close_late_reg(tournament)
+
+      %{tournament: tournament, winner: winner, first: first, second: second}
+    end
+
+    test "доигранный турнир рассчитывается", ctx do
+      # Второй вылетел, первый остался — победитель определился.
+      {:ok, _busted} = Tournaments.bust(ctx.second.id, 2)
+
+      before = balance(ctx.winner)
+
+      assert :ok = SettleTournament.perform(job(%{"tournament_id" => ctx.tournament.id}))
+
+      {:ok, reloaded} = Tournaments.get_tournament(ctx.tournament.id)
+      assert reloaded.status == :finished
+      assert balance(ctx.winner) == before + 1300
+    end
+
+    test "недоигранный турнир не трогается", ctx do
+      # Живых двое: победителя нет, и раздавать призы не за что.
+      assert :ok = SettleTournament.perform(job(%{"tournament_id" => ctx.tournament.id}))
+
+      {:ok, reloaded} = Tournaments.get_tournament(ctx.tournament.id)
+      assert reloaded.status == :late_reg_closed
+    end
+
+    test "уже рассчитанный турнир не платит второй раз", ctx do
+      {:ok, _busted} = Tournaments.bust(ctx.second.id, 2)
+
+      :ok = SettleTournament.perform(job(%{"tournament_id" => ctx.tournament.id}))
+      after_first = balance(ctx.winner)
+
+      :ok = SettleTournament.perform(job(%{"tournament_id" => ctx.tournament.id}))
+
+      assert balance(ctx.winner) == after_first
+    end
+
+    test "исчезнувший турнир — не падение" do
+      assert {:error, :not_found} =
+               SettleTournament.perform(job(%{"tournament_id" => Ecto.UUID.generate()}))
     end
   end
 end
