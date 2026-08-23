@@ -1486,11 +1486,15 @@ defmodule BlockPoker.Tables.TableServer do
     # Окно показа живёт ту же паузу, что и стол стоит после раздачи.
     room = RoomState.put_reveal(room, hand, now_ms(state) + @next_hand_ms)
 
-    # Факт конца раздачи уходит **до** обработки вылетов: подписчику
-    # (турниру) нужны стеки на начало раздачи и состав банков, а
-    # обработка вылетов их уже затрёт. Кто слушает — столу не важно;
-    # в кэше на это событие не подписан никто.
-    broadcast(state, "hand_finished", hand_finished_payload(state, hand))
+    # Отчёт о законченной раздаче — **не** то же, что `hand_finished`
+    # движка: тот несёт вскрытие и уходит клиенту, этот несёт стеки на
+    # начало раздачи и состав банков и уходит тому, кто столом
+    # распоряжается. Имена разные намеренно: одно имя на два разных
+    # payload означало бы, что подписчик угадывает, какой из них пришёл.
+    #
+    # Уходит **до** обработки вылетов: она затрёт стеки, по которым
+    # разводятся места. В кэше на это событие не подписан никто.
+    broadcast(state, "hand_summary", hand_summary_payload(state, hand))
 
     state =
       state
@@ -1570,7 +1574,7 @@ defmodule BlockPoker.Tables.TableServer do
   # невозможно. Банки идут со списком претендентов: голова достаётся
   # победителю того банка, в котором у выбывшего кончились фишки, а не
   # победителю большего.
-  defp hand_finished_payload(state, hand) do
+  defp hand_summary_payload(state, hand) do
     players = discipline(state).players(hand)
 
     busted =

@@ -69,6 +69,10 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       :snapshot,
       :monotonic,
       :wall,
+      # Опции, с которыми поднимаются столы турнира. Существуют ради
+      # тестов: там таймеры прогоняются вручную, а не реальным временем
+      # (§11 CLAUDE.md).
+      room_opts: [],
       # `%{entry_id => Player.t()}`
       players: %{},
       # `%{table_id => pid}` — столы, которые турнир поднял и держит.
@@ -207,7 +211,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   # Раздача закончилась: это единственный момент, когда турнир вправе
   # что-то менять за столом — между раздачами. Здесь и вылеты, и головы,
   # и балансировка, и вход в перерыв.
-  def handle_info({:table_event, "hand_finished", payload}, state) do
+  def handle_info({:table_event, "hand_summary", payload}, state) do
     {:noreply, on_hand_finished(state, payload)}
   end
 
@@ -292,12 +296,13 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   defp open_table(state) do
     room_id = Ecto.UUID.generate()
 
-    opts = [
-      room_id: room_id,
-      setting: table_setting(state),
-      game_mode: BlockPoker.GameMode.Mtt,
-      discipline: BlockPoker.Engine.Hand
-    ]
+    opts =
+      Keyword.merge(state.room_opts,
+        room_id: room_id,
+        setting: table_setting(state),
+        game_mode: BlockPoker.GameMode.Mtt,
+        discipline: BlockPoker.Engine.Hand
+      )
 
     case TableSupervisor.start_room(opts) do
       {:ok, pid} ->
