@@ -711,7 +711,7 @@ defmodule BlockPoker.TournamentsTest do
       {:ok, reloaded} = Tournaments.get_tournament(tournament.id)
 
       # Два взноса по 1000; комиссия 2×100 осталась руму.
-      assert Tournaments.collected(reloaded, setting) == 2000
+      assert Tournaments.collected(reloaded) == 2000
     end
 
     test "собранное не включает головы" do
@@ -722,7 +722,45 @@ defmodule BlockPoker.TournamentsTest do
 
       {:ok, reloaded} = Tournaments.get_tournament(tournament.id)
 
-      assert Tournaments.collected(reloaded, setting) == 600
+      assert Tournaments.collected(reloaded) == 600
+    end
+
+    test "вход по билету зачитывается по номиналу билета" do
+      setting = setting_fixture()
+      ticket = ticket_fixture(setting, %{face_value: 1100})
+      user = user_fixture()
+      _user_ticket = user_ticket_fixture(ticket, user)
+
+      # Турнир подорожал уже после выдачи билета.
+      {:ok, _updated} =
+        setting
+        |> BlockPoker.Tournaments.TournamentSetting.changeset(%{buy_in: 5000})
+        |> Repo.update()
+
+      {:ok, setting} = Tournaments.get_setting(setting.id)
+      tournament = tournament_fixture(setting)
+
+      {:ok, _entry} = Tournaments.register(tournament.id, user.id, pay_with: :ticket)
+      {:ok, reloaded} = Tournaments.get_tournament(tournament.id)
+
+      # В фонд ушёл номинал за вычетом комиссии, а не сегодняшняя цена:
+      # разницу доплачивает рум, но фонд не раздувается деньгами, которых
+      # никто не вносил.
+      assert Tournaments.collected(reloaded) == 1000
+    end
+
+    test "аддон идёт в фонд целиком" do
+      setting = setting_fixture(%{addon_cost: 500, addon_stack: 5000})
+      tournament = tournament_fixture(setting)
+      user = user_fixture()
+
+      {:ok, _entry} = Tournaments.register(tournament.id, user.id)
+      {:ok, _addon} = Tournaments.addon(tournament.id, user.id)
+
+      {:ok, reloaded} = Tournaments.get_tournament(tournament.id)
+
+      # 1000 призовой части входа плюс 500 аддона: голову аддон не растит.
+      assert Tournaments.collected(reloaded) == 1500
     end
 
     test "закрытие поздней регистрации фиксирует фонд и оверлей" do
@@ -738,6 +776,90 @@ defmodule BlockPoker.TournamentsTest do
       assert closed.status == :late_reg_closed
       assert closed.prize_pool == 10_000
       assert closed.overlay == 8000
+    end
+  end
+
+  describe "оверлей" do
+    setup do
+      setting = setting_fixture(%{guarantee: 10_000})
+      tournament = tournament_fixture(setting)
+      user = user_fixture()
+
+      {:ok, entry} = Tournaments.register(tournament.id, user.id)
+      {:ok, tournament} = Tournaments.get_tournament(tournament.id)
+      {:ok, tournament} = Tournaments.close_late_reg(tournament)
+
+      %{tournament: tournament, user: user, entry: entry}
+    end
+
+    test "списывается с кассы рума отдельной записью", ctx do
+      {:ok, house} = Wallet.house_wallet(:play_money)
+      before = house.amount
+
+      {:ok, _payouts} =
+        Tournaments.settle(ctx.tournament, [%{entry_id: ctx.entry.id, place: 1}])
+
+      {:ok, house} = Wallet.house_wallet(:play_money)
+
+      # Гарантия 10 000 против собранной 1000: рум доложил 9000.
+      assert house.amount == before - 9000
+    end
+
+    test "касса уходит в минус законно", ctx do
+      {:ok, _payouts} =
+        Tournaments.settle(ctx.tournament, [%{entry_id: ctx.entry.id, place: 1}])
+
+      {:ok, house} = Wallet.house_wallet(:play_money)
+
+      # Касса — источник денег, а не их хранилище: её баланс и есть
+      # накопленный результат рума, и в начале он отрицателен.
+      assert house.amount < 0
+    end
+
+    test "запись видна в журнале типом overlay", ctx do
+      {:ok, house} = Wallet.house_wallet(:play_money)
+
+      {:ok, _payouts} =
+        Tournaments.settle(ctx.tournament, [%{entry_id: ctx.entry.id, place: 1}])
+
+      types =
+        WalletEntry
+        |> where([e], e.wallet_id == ^house.id)
+        |> Repo.all()
+        |> Enum.map(& &1.type)
+
+      assert :overlay in types
+    end
+
+    test "турнир без гарантии кассу не трогает" do
+      setting = setting_fixture()
+      tournament = tournament_fixture(setting)
+      user = user_fixture()
+
+      {:ok, entry} = Tournaments.register(tournament.id, user.id)
+      {:ok, tournament} = Tournaments.get_tournament(tournament.id)
+      {:ok, tournament} = Tournaments.close_late_reg(tournament)
+
+      {:ok, house} = Wallet.house_wallet(:play_money)
+      before = house.amount
+
+      {:ok, _payouts} = Tournaments.settle(tournament, [%{entry_id: entry.id, place: 1}])
+
+      {:ok, house} = Wallet.house_wallet(:play_money)
+      assert house.amount == before
+    end
+
+    test "повторная выплата не списывает оверлей дважды", ctx do
+      results = [%{entry_id: ctx.entry.id, place: 1}]
+
+      {:ok, _first} = Tournaments.settle(ctx.tournament, results)
+      {:ok, house} = Wallet.house_wallet(:play_money)
+      after_first = house.amount
+
+      {:ok, _second} = Tournaments.settle(ctx.tournament, results)
+
+      {:ok, house} = Wallet.house_wallet(:play_money)
+      assert house.amount == after_first
     end
   end
 

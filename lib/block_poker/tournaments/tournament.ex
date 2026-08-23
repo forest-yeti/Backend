@@ -77,6 +77,9 @@ defmodule BlockPoker.Tournaments.Tournament do
     field :reentries_count, :integer, default: 0
     field :addons_count, :integer, default: 0
 
+    # Собранное в фонд: сумма призовых частей всех входов и аддонов.
+    # Колонкой, а не расчётом по счётчикам, — см. `Tournaments.collected/1`.
+    field :collected, :integer, default: 0
     field :prize_pool, :integer, default: 0
     field :overlay, :integer, default: 0
     field :bounty_pool, :integer, default: 0
@@ -127,6 +130,7 @@ defmodule BlockPoker.Tournaments.Tournament do
       :players_count,
       :reentries_count,
       :addons_count,
+      :collected,
       :prize_pool,
       :overlay,
       :bounty_pool,
@@ -149,6 +153,7 @@ defmodule BlockPoker.Tournaments.Tournament do
         :players_count,
         :reentries_count,
         :addons_count,
+        :collected,
         :prize_pool,
         :overlay,
         :bounty_pool

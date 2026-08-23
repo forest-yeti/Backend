@@ -43,8 +43,14 @@ defmodule BlockPoker.AccountsTest do
                Accounts.register(valid_user_attrs(%{name: existing.name}))
 
       refute changeset.valid?
-      assert Repo.aggregate(User, :count) == 1
-      assert Repo.aggregate(UserWallet, :count) == 2
+
+      # Касса рума (`Wallet.house_user_id/0`) заведена миграцией и живёт
+      # в базе всегда — считаем людей, а не строки таблицы.
+      players = from(u in User, where: u.id != ^Wallet.house_user_id())
+      wallets = from(w in UserWallet, where: w.system == false)
+
+      assert Repo.aggregate(players, :count) == 1
+      assert Repo.aggregate(wallets, :count) == 2
     end
 
     test "email нормализуется в нижний регистр" do

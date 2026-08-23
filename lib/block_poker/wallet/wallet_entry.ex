@@ -83,4 +83,21 @@ defmodule BlockPoker.Wallet.WalletEntry do
     |> assoc_constraint(:wallet)
     |> unique_constraint(:idempotency_key)
   end
+
+  @doc """
+  Снимает запрет на отрицательный баланс — только для кассы рума.
+
+  Отдельной функцией, а не флагом в `changeset/2`: запрет по умолчанию
+  должен требовать усилия для снятия, иначе он рано или поздно снимется
+  случайно.
+  """
+  @spec allow_negative(Ecto.Changeset.t(), boolean()) :: Ecto.Changeset.t()
+  def allow_negative(changeset, false), do: changeset
+
+  def allow_negative(changeset, true) do
+    update_in(changeset.errors, &Keyword.delete(&1, :balance_after))
+    |> then(fn cs ->
+      if cs.errors == [], do: %{cs | valid?: true}, else: cs
+    end)
+  end
 end

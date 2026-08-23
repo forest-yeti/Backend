@@ -58,6 +58,10 @@ defmodule BlockPoker.Tournaments.Entry do
 
     field :addons_count, :integer, default: 0
 
+    # Призовая часть этого входа: сколько он внёс в фонд. У входа по
+    # билету считается от номинала билета, а не от цены шаблона.
+    field :credited, :integer, default: 0
+
     field :place, :integer
     field :prize, :integer, default: 0
 
@@ -90,6 +94,7 @@ defmodule BlockPoker.Tournaments.Entry do
       :bounty,
       :bounty_paid,
       :addons_count,
+      :credited,
       :place,
       :prize,
       :paid_with_ticket_id,
@@ -100,6 +105,7 @@ defmodule BlockPoker.Tournaments.Entry do
     |> validate_number(:bounty, greater_than_or_equal_to: 0)
     |> validate_number(:bounty_paid, greater_than_or_equal_to: 0)
     |> validate_number(:addons_count, greater_than_or_equal_to: 0)
+    |> validate_number(:credited, greater_than_or_equal_to: 0)
     |> validate_number(:prize, greater_than_or_equal_to: 0)
     |> validate_number(:place, greater_than: 0)
     |> assoc_constraint(:tournament)

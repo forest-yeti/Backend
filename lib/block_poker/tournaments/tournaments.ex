@@ -524,8 +524,14 @@ defmodule BlockPoker.Tournaments do
       |> Tickets.redeem(:ticket, user_ticket, tournament.id)
       |> repo.transaction()
       |> case do
-        {:ok, %{ticket: ticket}} -> {:ok, %{entries: [], ticket: ticket}}
-        {:error, _step, reason, _changes} -> {:error, reason}
+        # Погашение возвращает строку, прочитанную под блокировкой, — без
+        # связанного типа билета. Номинал берётся из той, что нашёл
+        # `find_for/3`: он там уже загружен, и второй запрос за ним не нужен.
+        {:ok, %{ticket: redeemed}} ->
+          {:ok, %{entries: [], ticket: %{redeemed | ticket: user_ticket.ticket}}}
+
+        {:error, _step, reason, _changes} ->
+          {:error, reason}
       end
     end
   end
@@ -592,7 +598,11 @@ defmodule BlockPoker.Tournaments do
       entry_number: slot.entry_number,
       status: :registered,
       bounty: price_of(setting, kind).bounty,
-      paid_with_ticket_id: payment.ticket && payment.ticket.id
+      paid_with_ticket_id: payment.ticket && payment.ticket.id,
+      # Сколько этот вход внёс в фонд. Хранится у входа, а не выводится из
+      # цены шаблона: билет вносит по своему номиналу, а цена шаблона могла
+      # с тех пор измениться.
+      credited: credit_of(setting, kind, payment.ticket)
     }
 
     %Entry{}
@@ -609,10 +619,10 @@ defmodule BlockPoker.Tournaments do
   end
 
   defp bump_counters(repo, changes, kind) do
-    %{tournament: tournament, setting: setting, slot: slot, entry: entry} = changes
+    %{tournament: tournament, slot: slot, entry: entry} = changes
 
     updates =
-      [entries_count: 1]
+      [entries_count: 1, collected: entry.credited]
       |> then(&if slot.new_player?, do: Keyword.put(&1, :players_count, 1), else: &1)
       |> then(&if kind == :reentry, do: Keyword.put(&1, :reentries_count, 1), else: &1)
       |> then(&Keyword.put(&1, :bounty_pool, entry.bounty))
@@ -621,7 +631,7 @@ defmodule BlockPoker.Tournaments do
     {1, _returned} =
       repo.update_all(from(t in Tournament, where: t.id == ^tournament.id), inc: updates)
 
-    {:ok, collected(tournament, setting)}
+    {:ok, :counted}
   end
 
   # --- Разрегистрация и отмена ---------------------------------------------
@@ -666,7 +676,12 @@ defmodule BlockPoker.Tournaments do
     |> Multi.run(:counters, fn repo, changes ->
       {1, _returned} =
         repo.update_all(from(t in Tournament, where: t.id == ^changes.tournament.id),
-          inc: [entries_count: -1, players_count: -1, bounty_pool: -changes.entry.bounty]
+          inc: [
+            entries_count: -1,
+            players_count: -1,
+            collected: -changes.entry.credited,
+            bounty_pool: -changes.entry.bounty
+          ]
         )
 
       {:ok, :updated}
@@ -819,7 +834,9 @@ defmodule BlockPoker.Tournaments do
 
       {1, _returned} =
         repo.update_all(from(t in Tournament, where: t.id == ^changes.tournament.id),
-          inc: [addons_count: 1]
+          # Аддон идёт в фонд целиком: голову он не увеличивает, потому
+          # что голова берётся из взноса, а аддон взносом не является.
+          inc: [addons_count: 1, collected: changes.setting.addon_cost]
         )
 
       {:ok, :counted}
@@ -862,17 +879,40 @@ defmodule BlockPoker.Tournaments do
   @doc """
   Собранное в призовой фонд на текущий момент.
 
-  `entry_fee` сюда не входит — это доход рума; `bounty_part` тоже —
-  головы игроки платят друг другу. Вход по билету засчитывается наравне
-  с денежным: разницу, если цена турнира выросла, доплачивает рум.
-  """
-  @spec collected(Tournament.t(), TournamentSetting.t()) :: non_neg_integer()
-  def collected(%Tournament{} = tournament, %TournamentSetting{} = setting) do
-    first_entries = tournament.entries_count - tournament.reentries_count
+  Читается колонкой, а не считается по счётчикам входов. Счётчики дали бы
+  верное число только там, где все входы одинаковой цены, — а вход по
+  билету её ломает: билет пускает по своему `face_value`, взятому на
+  момент выдачи, и если турнир с тех пор подорожал, разницу доплачивает
+  рум. Считать такой вход по сегодняшней цене значило бы записать в фонд
+  деньги, которых никто не вносил.
 
-    first_entries * price_of(setting, :entry).prize +
-      tournament.reentries_count * price_of(setting, :reentry).prize +
-      tournament.addons_count * setting.addon_cost
+  `entry_fee` сюда не входит — это доход рума; `bounty_part` тоже — головы
+  игроки платят друг другу.
+  """
+  @spec collected(Tournament.t()) :: non_neg_integer()
+  def collected(%Tournament{collected: collected}), do: collected
+
+  @doc """
+  Призовая часть конкретного входа: сколько он вносит в фонд.
+
+  Вход по билету зачитывается по номиналу билета, а не по цене шаблона.
+  Голова и комиссия вычитаются в той же пропорции, что и у денежного
+  входа: билет оплачивает **вход целиком**, включая обе эти части.
+  """
+  @spec credit_of(TournamentSetting.t(), :entry | :reentry, UserTicket.t() | nil) ::
+          non_neg_integer()
+  def credit_of(%TournamentSetting{} = setting, kind, nil), do: price_of(setting, kind).prize
+
+  def credit_of(%TournamentSetting{} = setting, _kind, %UserTicket{ticket: ticket}) do
+    # Комиссия и голова — **фиксированные суммы** шаблона, а не доли цены:
+    # рум берёт свои сто единиц независимо от того, чем оплачен вход, и
+    # голова стоит столько же, сколько у соседа за столом. Поэтому они
+    # вычитаются из номинала как есть, а в фонд идёт остаток.
+    #
+    # Если турнир подорожал так, что номинала не хватает даже на них,
+    # в фонд не уходит ничего: доплачивает рум, но отрицательного взноса
+    # не бывает.
+    max(ticket.face_value - setting.entry_fee - setting.bounty_part, 0)
   end
 
   @doc """
@@ -887,7 +927,7 @@ defmodule BlockPoker.Tournaments do
   def close_late_reg(%Tournament{} = tournament) do
     with {:ok, setting} <- get_setting(tournament.tournament_setting_id) do
       %{prize_pool: pool, overlay: overlay} =
-        TournamentPayout.pool(collected(tournament, setting), setting.guarantee)
+        TournamentPayout.pool(collected(tournament), setting.guarantee)
 
       tournament
       |> Tournament.changeset(%{status: :late_reg_closed, prize_pool: pool, overlay: overlay})
@@ -1193,29 +1233,23 @@ defmodule BlockPoker.Tournaments do
 
   defp record_overlay(multi, tournament, setting) do
     Multi.run(multi, :overlay, fn repo, _changes ->
-      # Оверлей списывается со «счёта рума» тем же журналом: без
-      # получателя запись некуда положить, поэтому пишется она на кошелёк
-      # системного пользователя, если он настроен, и просто логируется,
-      # если нет.
-      case Application.get_env(:block_poker, :house_user_id) do
-        nil ->
-          {:ok, :noop}
-
-        house_user_id ->
-          with {:ok, wallet} <- Wallet.get_wallet(house_user_id, setting.currency) do
-            Wallet.record_entry(Multi.new(), :overlay, %{
-              wallet_id: wallet.id,
-              amount: -tournament.overlay,
-              type: :overlay,
-              ref_id: tournament.id,
-              idempotency_key: "tournament:#{tournament.id}:overlay"
-            })
-            |> repo.transaction()
-            |> case do
-              {:ok, %{overlay: written}} -> {:ok, written}
-              {:error, _step, reason, _changes} -> {:error, reason}
-            end
-          end
+      # Оверлей списывается с кассы рума — той самой, чей баланс и есть
+      # накопленный результат. Она уходит в минус законно: это источник
+      # денег, а не хранилище (см. миграцию `CreateHouseWallet`).
+      with {:ok, wallet} <- Wallet.house_wallet(setting.currency) do
+        Multi.new()
+        |> Wallet.record_entry(:overlay, %{
+          wallet_id: wallet.id,
+          amount: -tournament.overlay,
+          type: :overlay,
+          ref_id: tournament.id,
+          idempotency_key: "tournament:#{tournament.id}:overlay"
+        })
+        |> repo.transaction()
+        |> case do
+          {:ok, %{overlay: written}} -> {:ok, written}
+          {:error, _step, reason, _changes} -> {:error, reason}
+        end
       end
     end)
   end

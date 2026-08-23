@@ -17,6 +17,10 @@ defmodule BlockPoker.Wallet do
   @pubsub BlockPoker.PubSub
 
   # Стартовые суммы живут здесь и нигде не дублируются (§3 CLAUDE.md).
+  # Касса рума. Заводится миграцией `CreateHouseWallet` с этим же
+  # идентификатором: касса одна, и искать её по признаку незачем.
+  @house_user_id "00000000-0000-0000-0000-0000000000ff"
+
   @main_default 0
   @play_money_default 10_000
 
@@ -74,6 +78,22 @@ defmodule BlockPoker.Wallet do
       wallet -> {:ok, wallet}
     end
   end
+
+  @doc """
+  Касса рума: кошелёк, с которого идёт оверлей и на который падают
+  комиссии.
+
+  Идентификатор фиксирован (заводится миграцией `CreateHouseWallet`), а не
+  ищется по признаку: касса одна на рум, и код обращается к ней по имени.
+  Её отсутствие — не игровая ситуация, а сломанная установка, поэтому
+  ошибка, а не пустой результат.
+  """
+  @spec house_wallet(:main | :play_money) :: {:ok, UserWallet.t()} | {:error, :not_found}
+  def house_wallet(currency), do: get_wallet(house_user_id(), currency)
+
+  @doc "Идентификатор кассы рума."
+  @spec house_user_id() :: Ecto.UUID.t()
+  def house_user_id, do: @house_user_id
 
   @doc """
   Выписка по кошельку, свежие записи первыми.
@@ -269,7 +289,7 @@ defmodule BlockPoker.Wallet do
 
     with {:ok, wallet} <- lock_wallet(repo, attrs.wallet_id),
          balance_after = wallet.amount + attrs.amount,
-         :ok <- ensure_non_negative(balance_after) do
+         :ok <- ensure_non_negative(wallet, balance_after) do
       insert_entry(repo, wallet, attrs, balance_after)
     end
   end
@@ -283,12 +303,19 @@ defmodule BlockPoker.Wallet do
     end
   end
 
-  defp ensure_non_negative(balance_after) when balance_after >= 0, do: :ok
-  defp ensure_non_negative(_balance_after), do: {:error, :insufficient_funds}
+  # Касса рума уходит в минус законно: она источник денег, а не их
+  # хранилище. Для всех остальных минус невозможен, и это стережёт БД.
+  defp ensure_non_negative(_wallet, balance_after) when balance_after >= 0, do: :ok
+
+  defp ensure_non_negative(%UserWallet{} = wallet, _balance_after) do
+    if UserWallet.allows_negative?(wallet), do: :ok, else: {:error, :insufficient_funds}
+  end
 
   defp insert_entry(repo, wallet, attrs, balance_after) do
     changeset =
-      WalletEntry.changeset(%WalletEntry{}, Map.put(attrs, :balance_after, balance_after))
+      %WalletEntry{}
+      |> WalletEntry.changeset(Map.put(attrs, :balance_after, balance_after))
+      |> WalletEntry.allow_negative(UserWallet.allows_negative?(wallet))
 
     case repo.insert(changeset) do
       {:ok, entry} ->
