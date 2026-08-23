@@ -17,6 +17,11 @@ defmodule BlockPoker.Application do
       Api.RateLimiter,
       {Registry, TableRegistry.child_spec_options()},
       TableSupervisor,
+      # Фоновые задачи: истечение билетов и отмена недобравших турниров.
+      # Возврат денег обязан произойти, даже если нода перезагрузилась
+      # между анонсом и стартом, — таймер процесса этого не переживёт,
+      # а строка в `oban_jobs` переживёт.
+      {Oban, Application.fetch_env!(:block_poker, Oban)},
       # Start a worker by calling: BlockPoker.Worker.start_link(arg)
       # {BlockPoker.Worker, arg},
       # Start to serve requests, typically the last entry

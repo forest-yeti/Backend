@@ -24,6 +24,16 @@ config :block_poker, Socket.Endpoint,
 # Sandbox принадлежит тест-процессу.
 config :block_poker, start_lobby: false
 
+# Планировщик турниров в тестах не тикает сам: он читает БД, а она под
+# Sandbox принадлежит тест-процессу. Тесты расписания поднимают его явно
+# и прогоняют тик руками, а не ожиданием.
+config :block_poker, start_tournament_scheduler: false
+
+# Oban в тестах не выполняет джобы фоном: очередь без воркеров означает,
+# что джоба доступна для `Oban.Testing`, но не стартует сама и не лезет
+# в чужую транзакцию.
+config :block_poker, Oban, testing: :manual
+
 # Print only warnings and errors during test
 config :logger, level: :warning
 

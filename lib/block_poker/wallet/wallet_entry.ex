@@ -19,7 +19,29 @@ defmodule BlockPoker.Wallet.WalletEntry do
   # cash-out возвращает игроку его же фишки со стола, а приз приходит из
   # призового фонда и с его стеком не связан вовсе. В выписке это разные
   # события, и путать их нельзя.
-  @types [:deposit, :buy_in, :cash_out, :rake, :prize, :adjustment]
+  #
+  # Турнирные типы разведены по смыслу, а не слиты в `buy_in` и `prize`:
+  # в выписке игрока «взнос за турнир» и «посадка за кэш-стол» — разные
+  # события, а руму нужно уметь отделить свой доход (`tournament_fee`) от
+  # призового фонда и от голов, которые игроки платят друг другу
+  # (`tournament_bounty`). `overlay` — доплата рума до гарантии: он должен
+  # видеть её отдельной строкой, а не разницей двух сумм.
+  @types [
+    :deposit,
+    :buy_in,
+    :cash_out,
+    :rake,
+    :prize,
+    :adjustment,
+    :tournament_entry,
+    :tournament_fee,
+    :tournament_rebuy,
+    :tournament_addon,
+    :tournament_prize,
+    :tournament_bounty,
+    :tournament_refund,
+    :overlay
+  ]
 
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id

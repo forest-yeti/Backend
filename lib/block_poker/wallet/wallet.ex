@@ -135,6 +135,52 @@ defmodule BlockPoker.Wallet do
     move(user_id, currency, amount, :prize, idempotency_key, opts)
   end
 
+  @doc """
+  Произвольная запись журнала — тот же `move/6`, но тип называет
+  вызывающий.
+
+  Существует ради турниров: там типов операций восемь, и заводить по
+  паре функций на каждый значило бы восемь раз переписать одно и то же.
+  Ноль записи не порождает: операция на нулевую сумму — не операция.
+
+  Для **атомарных** сценариев (взнос и комиссия одной транзакцией,
+  возврат всем участникам сразу) эта функция не годится — там нужен
+  общий `Ecto.Multi`, и собирается он из `record_entry/3`.
+  """
+  @spec record(
+          Ecto.UUID.t(),
+          :main | :play_money,
+          integer(),
+          atom(),
+          String.t(),
+          keyword()
+        ) :: {:ok, WalletEntry.t() | :noop} | {:error, term()}
+  def record(user_id, currency, amount, type, idempotency_key, opts \\ [])
+
+  def record(_user_id, _currency, 0, _type, _idempotency_key, _opts), do: {:ok, :noop}
+
+  def record(user_id, currency, amount, type, idempotency_key, opts) do
+    move(user_id, currency, amount, type, idempotency_key, opts)
+  end
+
+  @doc """
+  Рассылает событие о записи журнала.
+
+  Нужна тем, кто собрал свой `Ecto.Multi` из `record_entry/3`: событие
+  обязано уйти **после коммита**, а внутри `Multi` этого момента ещё нет.
+  Подписчик, разбуженный на неподтверждённой записи, прочитал бы старый
+  баланс и запомнил его как текущий.
+
+  `:noop` пропускается молча: события о том, чего не произошло, не бывает.
+  """
+  @spec publish(Ecto.UUID.t(), WalletEntry.t() | :noop) :: :ok
+  def publish(_user_id, :noop), do: :ok
+
+  def publish(user_id, %WalletEntry{} = entry) do
+    announce(user_id, entry.wallet_id, entry)
+    :ok
+  end
+
   defp move(user_id, currency, amount, type, idempotency_key, opts) do
     with {:ok, wallet} <- get_wallet(user_id, currency) do
       Multi.new()
