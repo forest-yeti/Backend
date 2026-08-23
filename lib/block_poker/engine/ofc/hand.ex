@@ -202,7 +202,10 @@ defmodule BlockPoker.Engine.Ofc.Hand do
     }
   end
 
-  @doc "Личное: своя рука и своя форма хода. Сбросы не уходят никому."
+  @doc """
+  Личное: своя рука, свои сбросы и своя форма хода. Сбросы видит только их
+  владелец — соперникам не уходит ни карта, ни при вскрытии.
+  """
   @impl true
   def private_view(%__MODULE__{} = hand, seat) do
     case Map.get(hand.players, seat) do
@@ -212,6 +215,7 @@ defmodule BlockPoker.Engine.Ofc.Hand do
       player ->
         %{
           deal: {:cards, player.hand},
+          discards: {:cards, player.discards},
           rows: rows_view(player.board),
           royalties: royalties(hand, player),
           combinations: categories(hand, player),

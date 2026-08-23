@@ -103,6 +103,16 @@ defmodule BlockPoker.Engine.Ofc.HandTest do
       end)
     end
 
+    test "свои сбросы приходят владельцу, чужие — никому" do
+      {hand, _events} = play_out(setup_hand([{1, 1000}, {2, 1000}]))
+
+      # Сброшенное игрок должен видеть: иначе к концу раздачи он не помнит,
+      # какие карты уже ушли, а соперник не видит их и при вскрытии.
+      %{discards: {:cards, mine}} = Hand.private_view(hand, 1)
+      assert length(mine) == 4
+      refute Map.has_key?(Hand.public_view(hand).seats[1], :discards)
+    end
+
     test "роспись боксов приходит только у собранных" do
       {start, _events} = setup_hand([{1, 1000}, {2, 1000}])
       seat = Hand.to_act(start)
