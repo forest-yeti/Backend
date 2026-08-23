@@ -52,6 +52,19 @@ defmodule BlockPoker.ErrorCode do
           | :not_a_contender
           | :already_answered
           | :wallet_not_found
+          | :registration_closed
+          | :tournament_started
+          | :tournament_cancelled
+          | :tournament_full
+          | :unregister_too_late
+          | :not_registered
+          | :already_registered
+          | :reentry_not_allowed
+          | :rebuy_limit_reached
+          | :addon_not_allowed
+          | :ticket_required
+          | :ticket_unavailable
+          | :ticket_expired
           | :internal_error
 
   @codes %{
@@ -100,6 +113,19 @@ defmodule BlockPoker.ErrorCode do
     not_a_contender: {403, "Вы не участвуете в этой раздаче"},
     already_answered: {409, "Вы уже ответили"},
     wallet_not_found: {404, "Кошелёк не найден"},
+    registration_closed: {409, "Регистрация закрыта"},
+    tournament_started: {409, "Турнир уже начался"},
+    tournament_cancelled: {409, "Турнир отменён"},
+    tournament_full: {409, "Мест в турнире больше нет"},
+    unregister_too_late: {409, "Разрегистрироваться уже нельзя"},
+    not_registered: {409, "Вы не зарегистрированы в этом турнире"},
+    already_registered: {409, "Вы уже зарегистрированы"},
+    reentry_not_allowed: {409, "Повторный вход в этом турнире запрещён"},
+    rebuy_limit_reached: {409, "Лимит повторных входов исчерпан"},
+    addon_not_allowed: {409, "Аддон сейчас недоступен"},
+    ticket_required: {422, "Подходящего билета нет"},
+    ticket_unavailable: {409, "Билет уже использован"},
+    ticket_expired: {422, "Срок действия билета истёк"},
     internal_error: {500, "Внутренняя ошибка"}
   }
 

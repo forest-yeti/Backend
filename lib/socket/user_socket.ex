@@ -20,6 +20,11 @@ defmodule Socket.UserSocket do
   # маршрутизирует, и клиент получает отказ вместо списка столов.
   channel "lobby:*", Socket.Channels.LobbyChannel
   channel "sit_n_go", Socket.Channels.SitAndGoChannel
+
+  # Витрина турниров и отдельный топик на каждый инстанс: первый про
+  # «во что играть», второй про «что происходит в моём турнире».
+  channel "tournaments", Socket.Channels.TournamentChannel
+  channel "tournament:*", Socket.Channels.TournamentChannel
   channel "table:*", Socket.Channels.TableChannel
   channel "wallet:*", Socket.Channels.WalletChannel
 

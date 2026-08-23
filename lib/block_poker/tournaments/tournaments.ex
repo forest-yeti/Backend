@@ -31,12 +31,14 @@ defmodule BlockPoker.Tournaments do
 
   alias BlockPoker.Engine.{BlindSchedule, Bounty, TournamentPayout}
   alias BlockPoker.Repo
+  alias BlockPoker.Tables.LobbyQuery
   alias BlockPoker.Tickets
   alias BlockPoker.Tickets.UserTicket
 
   alias BlockPoker.Tournaments.{
     BlindLevel,
     Entry,
+    LobbyEntry,
     PayoutRow,
     Schedule,
     SeatSnapshot,
@@ -173,6 +175,106 @@ defmodule BlockPoker.Tournaments do
   end
 
   # --- Инстансы ------------------------------------------------------------
+
+  @doc """
+  Витрина турниров: строки лобби, отфильтрованные и отсортированные.
+
+  Персональные признаки («мои», «куда пускает билет») считаются здесь,
+  а не в канале: канал знает, **кто** спрашивает, но не знает, что
+  означает «мой турнир» (§3 CLAUDE.md).
+  """
+  @spec lobby(LobbyQuery.t(), Ecto.UUID.t() | nil, DateTime.t()) :: [LobbyEntry.t()]
+  def lobby(%LobbyQuery{} = query, user_id \\ nil, now \\ DateTime.utc_now()) do
+    tournaments = list_upcoming(now)
+
+    registered = registered_ids(tournaments, user_id)
+    tickets = ticket_setting_ids(user_id, now)
+
+    tournaments
+    |> Enum.map(fn tournament ->
+      LobbyEntry.build(tournament,
+        now: now,
+        registered: tournament.id in registered,
+        has_ticket: tournament.tournament_setting_id in tickets
+      )
+    end)
+    |> then(&LobbyQuery.apply(query, &1))
+  end
+
+  # Одним запросом на всю витрину, а не по строке: витрина из трёхсот
+  # турниров иначе стоила бы трёхсот запросов на каждое открытие лобби.
+  defp registered_ids(_tournaments, nil), do: MapSet.new()
+
+  defp registered_ids(tournaments, user_id) do
+    ids = Enum.map(tournaments, & &1.id)
+
+    Entry
+    |> where([e], e.user_id == ^user_id and e.tournament_id in ^ids)
+    |> where([e], e.status in [:registered, :playing])
+    |> select([e], e.tournament_id)
+    |> Repo.all()
+    |> MapSet.new()
+  end
+
+  defp ticket_setting_ids(nil, _now), do: MapSet.new()
+
+  defp ticket_setting_ids(user_id, now) do
+    user_id
+    |> Tickets.list_active(now)
+    |> MapSet.new(& &1.ticket.tournament_setting_id)
+  end
+
+  @doc """
+  Карточка турнира: состав, структура, сетка выплат при текущей явке и
+  чипсчёт с пагинацией.
+
+  Отдельный запрос, а не подписка: лидерборд, обновляющийся на каждом
+  вылете, — это квадратичный трафик из лобби. Игрок смотрит его раз в
+  несколько минут, а вылеты идут каждые несколько секунд.
+  """
+  @spec card(Ecto.UUID.t(), keyword()) :: {:ok, map()} | {:error, :not_found}
+  def card(tournament_id, opts \\ []) do
+    with {:ok, tournament} <- get_tournament(tournament_id) do
+      limit = opts |> Keyword.get(:limit, 50) |> min(200)
+      offset = Keyword.get(opts, :offset, 0)
+
+      {:ok,
+       %{
+         entry: LobbyEntry.build(tournament, now: Keyword.get(opts, :now, DateTime.utc_now())),
+         levels: blind_schedule(tournament.setting),
+         level_flags: level_flags(tournament.setting),
+         payouts: payouts!(tournament),
+         chip_counts: chip_counts(tournament, limit, offset)
+       }}
+    end
+  end
+
+  defp payouts!(tournament) do
+    case payouts(tournament) do
+      {:ok, payouts} -> payouts
+      {:error, _reason} -> []
+    end
+  end
+
+  # Чипсчёт с пагинацией: страницами, а не целиком, потому что при
+  # трёхстах участниках целиком — это триста строк на каждое открытие.
+  defp chip_counts(tournament, limit, offset) do
+    query =
+      Entry
+      |> where([e], e.tournament_id == ^tournament.id)
+      |> preload(:user)
+
+    total = Repo.aggregate(query, :count)
+
+    rows =
+      query
+      |> order_by([e], desc: e.status == :playing, asc: e.place, asc: e.entry_number)
+      |> limit(^limit)
+      |> offset(^offset)
+      |> Repo.all()
+
+    %{entries: rows, total: total, limit: limit, offset: offset}
+  end
 
   @spec get_tournament(Ecto.UUID.t()) :: {:ok, Tournament.t()} | {:error, :not_found}
   def get_tournament(id) do

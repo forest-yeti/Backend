@@ -29,15 +29,20 @@ defmodule BlockPoker.Tables.LobbyQuery do
   alias BlockPoker.CashGames.CashGameSetting
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.Tables.Blueprint
+  alias BlockPoker.Tournaments.TournamentSetting
 
   @type entry :: %{required(:setting) => term(), optional(atom()) => term()}
 
   @type t :: %__MODULE__{
-          category: Blueprint.category(),
+          category: Blueprint.category() | :tournament,
           game_types: [atom()],
           currencies: [atom()],
           table_sizes: [atom()],
           limit_tiers: [atom()],
+          statuses: [atom()],
+          kinds: [atom()],
+          mine: boolean(),
+          has_ticket: boolean(),
           sort: {:limit | :occupancy, :asc | :desc} | nil
         }
 
@@ -46,17 +51,35 @@ defmodule BlockPoker.Tables.LobbyQuery do
             currencies: [],
             table_sizes: [],
             limit_tiers: [],
+            # Турнирные фильтры. У кэша их нет, и пустыми они ему не мешают:
+            # пустой список фильтром не является.
+            statuses: [],
+            kinds: [],
+            # Персональные фильтры: считаются от `user_id` сокета, в payload
+            # не приходят и приходить не должны.
+            mine: false,
+            has_ticket: false,
             sort: nil
 
   @currencies CashGameSetting.currencies()
   @table_sizes [:heads_up, :six_max, :nine_max]
   @limit_tiers [:micro, :medium, :high_roller]
   @sort_fields [:limit, :occupancy]
+  @statuses [:announced, :registering, :running, :late_reg, :finished]
+  @kinds [:freeroll, :rebuy, :bounty, :satellite]
   @sort_directions [:asc, :desc]
 
   # Верхние границы категорий в больших блайндах, по валютам.
   # main:       NL2..NL10 — микро, NL20..NL500 — средние, NL800+ — хайроллеры.
   # play_money: NL1000..NL10000 — микро, NL30000..NL50000 — средние, дальше хайроллеры.
+  # Границы турнирных категорий — в цене входа, а не в блайндах.
+  # main:       до $5 — микро, до $100 — средние, дальше хайроллеры.
+  # play_money: те же ступени, но в игровых фишках.
+  @entry_bounds %{
+    main: [micro: 500, medium: 10_000],
+    play_money: [micro: 50_000, medium: 1_000_000]
+  }
+
   @tier_bounds %{
     main: [micro: 10, medium: 500],
     play_money: [micro: 100, medium: 500]
@@ -78,6 +101,12 @@ defmodule BlockPoker.Tables.LobbyQuery do
   @spec sort_fields() :: [atom()]
   def sort_fields, do: @sort_fields
 
+  @spec statuses() :: [atom()]
+  def statuses, do: @statuses
+
+  @spec kinds() :: [atom()]
+  def kinds, do: @kinds
+
   @doc """
   Разбор запроса клиента. Неизвестное значение — ошибка, а не молчаливое
   игнорирование: иначе опечатка в фильтре выглядит как пустой рум.
@@ -92,6 +121,8 @@ defmodule BlockPoker.Tables.LobbyQuery do
          {:ok, currencies} <- list(params, "currencies", @currencies),
          {:ok, table_sizes} <- list(params, "table_sizes", @table_sizes),
          {:ok, limit_tiers} <- list(params, "limit_tiers", @limit_tiers),
+         {:ok, statuses} <- list(params, "statuses", @statuses),
+         {:ok, kinds} <- list(params, "kinds", @kinds),
          {:ok, sort} <- sort(params) do
       {:ok,
        %__MODULE__{
@@ -100,6 +131,12 @@ defmodule BlockPoker.Tables.LobbyQuery do
          currencies: currencies,
          table_sizes: table_sizes,
          limit_tiers: limit_tiers,
+         statuses: statuses,
+         kinds: kinds,
+         # Персональные фильтры — булевы: «мои» и «куда пускает мой билет».
+         # Чьи именно, решает не payload, а сокет.
+         mine: params["mine"] == true,
+         has_ticket: params["has_ticket"] == true,
          sort: sort
        }}
     end
@@ -120,12 +157,62 @@ defmodule BlockPoker.Tables.LobbyQuery do
   канал решает, доезжает ли до подписчика инкрементальный `lobby_delta`.
   """
   @spec matches?(t(), entry()) :: boolean()
+  def matches?(%__MODULE__{category: :tournament} = query, entry) do
+    setting = entry.setting
+
+    in?(query.game_types, setting.game_type) and
+      in?(query.currencies, setting.currency) and
+      in?(query.table_sizes, tournament_table_size(setting)) and
+      in?(query.limit_tiers, tournament_limit_tier(setting)) and
+      in?(query.statuses, entry.status) and
+      matches_kinds?(query.kinds, entry.kinds) and
+      (not query.mine or entry.registered) and
+      (not query.has_ticket or entry.has_ticket)
+  end
+
   def matches?(%__MODULE__{} = query, %{setting: setting}) do
     Blueprint.category(setting) == query.category and
       in?(query.game_types, Blueprint.game_type(setting)) and
       in?(query.currencies, Blueprint.currency(setting)) and
       in?(query.table_sizes, table_size(setting)) and
       in?(query.limit_tiers, limit_tier(setting))
+  end
+
+  # Признаков у турнира может быть несколько (ребайный баунти-саттелит),
+  # и фильтр по ним — «хотя бы один из выбранных», а не «все сразу»:
+  # игрок отмечает галки «фрироллы» и «баунти», ожидая объединение.
+  defp matches_kinds?([], _kinds), do: true
+  defp matches_kinds?(wanted, kinds), do: Enum.any?(kinds, &(&1 in wanted))
+
+  @doc """
+  Формат турнирного стола. Считается по `table_size` — по тому, сколько
+  сидит за одним столом, — а не по числу участников: турнир на триста
+  человек играется за шестимаксными столами и в витрине он `six_max`.
+  """
+  @spec tournament_table_size(TournamentSetting.t()) :: :heads_up | :six_max | :nine_max
+  def tournament_table_size(%TournamentSetting{table_size: size}) do
+    case size do
+      2 -> :heads_up
+      6 -> :six_max
+      _nine -> :nine_max
+    end
+  end
+
+  @doc """
+  Категория лимита турнира — **от цены входа**, а не от блайндов.
+
+  Блайнды в турнире растут и к пятому уровню ничего не говорят о том,
+  дорогой это турнир или дешёвый. Цена входа не меняется никогда, и
+  именно её игрок сравнивает.
+  """
+  @spec tournament_limit_tier(TournamentSetting.t()) :: :micro | :medium | :high_roller
+  def tournament_limit_tier(%TournamentSetting{} = setting) do
+    bounds = Map.get(@entry_bounds, setting.currency, [])
+    price = TournamentSetting.entry_price(setting)
+
+    Enum.find_value(bounds, :high_roller, fn {tier, max_price} ->
+      if price <= max_price, do: tier
+    end)
   end
 
   @doc "Формат стола по количеству мест."
@@ -231,6 +318,14 @@ defmodule BlockPoker.Tables.LobbyQuery do
   # Ключ строится так, чтобы `Enum.sort_by/2` оставался стабильным: валюта —
   # всегда первым разрядом, дальше выбранный параметр, дальше — умолчание,
   # разводящее шаблоны с одинаковым лимитом.
+  # Главный порядок турнирной витрины — **ближайший старт**: игрок
+  # выбирает, во что успевает. Валюта по-прежнему первым разрядом: это
+  # разделение витрины, а не сортировка.
+  defp sort_key(%__MODULE__{category: :tournament}, entry) do
+    {currency_rank(entry.setting), DateTime.to_unix(entry.starts_at, :microsecond),
+     entry.entry_price, entry.tournament_id}
+  end
+
   defp sort_key(%__MODULE__{sort: nil}, entry), do: default_key(entry)
 
   defp sort_key(%__MODULE__{sort: {:limit, direction}}, entry) do
@@ -253,6 +348,10 @@ defmodule BlockPoker.Tables.LobbyQuery do
 
   defp tie_break(%CashGameSetting{} = setting), do: {setting.small_blind, setting.ante}
   defp tie_break(_setting), do: {0, 0}
+
+  defp currency_rank(%TournamentSetting{currency: currency}) do
+    Map.get(@currency_order, currency, 99)
+  end
 
   defp currency_rank(setting), do: Map.get(@currency_order, Blueprint.currency(setting), 99)
 
