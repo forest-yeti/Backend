@@ -462,6 +462,46 @@ defmodule BlockPoker.TournamentsTest do
       assert length(Tickets.list_active(ctx.user.id)) == 1
     end
 
+    test "разрегистрация возвращает билет", ctx do
+      user_ticket = user_ticket_fixture(ctx.ticket, ctx.user)
+
+      {:ok, _entry} = Tournaments.register(ctx.tournament.id, ctx.user.id, pay_with: :ticket)
+      :ok = Tournaments.unregister(ctx.tournament.id, ctx.user.id)
+
+      returned = Repo.get!(UserTicket, user_ticket.id)
+
+      assert returned.status == :active
+
+      # Привязка к турниру снимается вместе со статусом: иначе уникальный
+      # индекс не пустил бы игрока обратно в этот же турнир.
+      assert returned.used_in_tournament_id == nil
+    end
+
+    test "возвращённым билетом можно войти снова", ctx do
+      _user_ticket = user_ticket_fixture(ctx.ticket, ctx.user)
+
+      {:ok, _first} = Tournaments.register(ctx.tournament.id, ctx.user.id, pay_with: :ticket)
+      :ok = Tournaments.unregister(ctx.tournament.id, ctx.user.id)
+
+      assert {:ok, second} =
+               Tournaments.register(ctx.tournament.id, ctx.user.id, pay_with: :ticket)
+
+      assert second.entry_number == 2
+      assert second.paid_with_ticket_id != nil
+    end
+
+    test "разрегистрация по билету денег не начисляет", ctx do
+      _user_ticket = user_ticket_fixture(ctx.ticket, ctx.user)
+      before = balance(ctx.user)
+
+      {:ok, _entry} = Tournaments.register(ctx.tournament.id, ctx.user.id, pay_with: :ticket)
+      :ok = Tournaments.unregister(ctx.tournament.id, ctx.user.id)
+
+      # Денег не списывали — возвращать нечего. Иначе билет обменивался бы
+      # на деньги парой нажатий.
+      assert balance(ctx.user) == before
+    end
+
     test "ре-энтри билетом не оплачивается" do
       setting = setting_fixture(%{rebuy_allowed: true, max_rebuys: 2})
       tournament = tournament_fixture(setting)
@@ -722,6 +762,31 @@ defmodule BlockPoker.TournamentsTest do
       {:ok, payouts} = Tournaments.payouts(tournament)
 
       assert Enum.map(payouts, & &1.amount) == [1300, 700]
+    end
+
+    test "сетка пустого турнира не роняет карточку" do
+      setting = setting_fixture()
+      tournament = tournament_fixture(setting)
+
+      # Карточка в лобби показывает выплаты «при текущей явке», и у
+      # анонсированного турнира она нулевая.
+      assert {:ok, []} = Tournaments.payouts(tournament)
+    end
+
+    test "отмена после разрегистрации не возвращает деньги дважды" do
+      setting = setting_fixture(%{min_players: 3})
+      tournament = tournament_fixture(setting)
+      user = user_fixture()
+
+      before = balance(user)
+      {:ok, _entry} = Tournaments.register(tournament.id, user.id)
+      :ok = Tournaments.unregister(tournament.id, user.id)
+
+      # Отмена перебирает все входы турнира, включая уже возвращённый.
+      # Второй возврат гасит ключ идемпотентности, а не проверка в коде.
+      {:ok, _refunded} = Tournaments.cancel(tournament.id)
+
+      assert balance(user) == before
     end
 
     test "призы начисляются на кошельки", ctx do

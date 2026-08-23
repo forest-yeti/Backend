@@ -85,6 +85,19 @@ defmodule BlockPoker.Engine.TournamentPayoutTest do
     end
   end
 
+  describe "пустой турнир" do
+    test "нулевая явка даёт пустой список, а не ошибку" do
+      # Витрина показывает сетку «при текущей явке» и у анонсированного
+      # турнира, в который ещё никто не вошёл.
+      assert TournamentPayout.compute(grid(), 0, 0, 0) == []
+      assert TournamentPayout.paid_places(grid(), 0, 0) == 0
+    end
+
+    test "входы есть, живых людей нет" do
+      assert TournamentPayout.compute(grid(), 5, 0, 1000) == []
+    end
+  end
+
   describe "деление фонда" do
     test "доли раскладываются по местам в порядке убывания" do
       payouts = TournamentPayout.compute(grid(), 50, 50, 1_000_000)

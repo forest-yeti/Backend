@@ -106,8 +106,15 @@ defmodule BlockPoker.Engine.TournamentPayout do
   призовой фонд, уже посчитанный `pool/2`.
 
   Список отсортирован по месту и не содержит мест без приза.
+
+  Нулевая явка — это пустой список, а не ошибка: витрина показывает сетку
+  «при текущей явке» и у анонсированного турнира, в который ещё никто не
+  вошёл. Падать на этом значило бы ронять карточку в лобби.
   """
-  @spec compute([row()], pos_integer(), pos_integer(), non_neg_integer()) :: [payout()]
+  @spec compute([row()], non_neg_integer(), non_neg_integer(), non_neg_integer()) :: [payout()]
+  def compute(_rows, 0, _players, _pool), do: []
+  def compute(_rows, _entries, 0, _pool), do: []
+
   def compute(rows, entries, players, pool)
       when entries > 0 and players > 0 and pool >= 0 do
     rows
@@ -133,7 +140,10 @@ defmodule BlockPoker.Engine.TournamentPayout do
   Число оплачиваемых мест при данной явке — то, что игрок видит как
   «до денег осталось N».
   """
-  @spec paid_places([row()], pos_integer(), pos_integer()) :: non_neg_integer()
+  @spec paid_places([row()], non_neg_integer(), non_neg_integer()) :: non_neg_integer()
+  def paid_places(_rows, 0, _players), do: 0
+  def paid_places(_rows, _entries, 0), do: 0
+
   def paid_places(rows, entries, players) do
     rows |> band(entries) |> expand() |> truncate(players) |> length()
   end

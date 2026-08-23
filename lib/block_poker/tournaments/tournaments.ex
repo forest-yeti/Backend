@@ -32,6 +32,7 @@ defmodule BlockPoker.Tournaments do
   alias BlockPoker.Engine.{BlindSchedule, Bounty, TournamentPayout}
   alias BlockPoker.Repo
   alias BlockPoker.Tickets
+  alias BlockPoker.Tickets.UserTicket
 
   alias BlockPoker.Tournaments.{
     BlindLevel,
@@ -650,6 +651,11 @@ defmodule BlockPoker.Tournaments do
       end
     end)
     |> Multi.run(:refund, fn repo, changes -> refund_entry(repo, changes) end)
+    # Вход по билету денег не возвращает — их и не списывали, — но билет
+    # обязан вернуться той же транзакцией: иначе есть окно, в котором
+    # игрок уже не в турнире и ещё без билета, а при откате он остался бы
+    # без билета навсегда.
+    |> Multi.run(:ticket, fn repo, %{entry: entry} -> return_ticket(repo, entry) end)
     # Запись входа **не удаляется**, а помечается возвращённой. Удаление
     # освободило бы номер входа, а из номера строится ключ идемпотентности
     # списания: следующая регистрация того же игрока выглядела бы для
@@ -734,6 +740,18 @@ defmodule BlockPoker.Tournaments do
 
       {:error, _step, reason, _changes} ->
         {:error, reason}
+    end
+  end
+
+  # Билет одного входа: возврат при разрегистрации. Отмена турнира
+  # возвращает билеты пачкой (`Tickets.refund_all/3`) — там участников
+  # много и перебирать их по одному незачем.
+  defp return_ticket(_repo, %Entry{paid_with_ticket_id: nil}), do: {:ok, :noop}
+
+  defp return_ticket(repo, %Entry{paid_with_ticket_id: id}) do
+    case repo.get(UserTicket, id) do
+      nil -> {:ok, :noop}
+      user_ticket -> user_ticket |> UserTicket.refund_changeset() |> repo.update()
     end
   end
 
