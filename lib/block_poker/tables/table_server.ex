@@ -248,6 +248,22 @@ defmodule BlockPoker.Tables.TableServer do
   def close_if_idle(room), do: GenServer.call(room, :close_if_idle)
 
   @doc """
+  Снимает игрока со стола по требованию турнира — это пересадка, а не
+  выход.
+
+  Отдельно от `begin_leave/2` намеренно: там право встать принадлежит
+  игроку, и в турнире его нет вовсе (`GameMode.Mtt.can_leave?/2`
+  возвращает `false`). Здесь распоряжается турнир, и спрашивать у режима
+  разрешения незачем — он и так подчинён турниру.
+
+  Возвращает стек: турнир кладёт его игроку на новом столе, и фишки не
+  должны потеряться между двумя комнатами.
+  """
+  @spec pull_seat(GenServer.server(), Ecto.UUID.t()) ::
+          {:ok, non_neg_integer()} | {:error, atom()}
+  def pull_seat(room, user_id), do: GenServer.call(room, {:pull_seat, user_id})
+
+  @doc """
   Прогон таймера вручную — только для тестов: реальное время в тестах
   не отсчитывается, `Process.sleep` запрещён (§10 CLAUDE.md).
   """
@@ -478,6 +494,27 @@ defmodule BlockPoker.Tables.TableServer do
     {:reply, :ok, state}
   end
 
+  def handle_call({:pull_seat, user_id}, _from, state) do
+    ref = new_ref()
+
+    case RoomState.begin_leave(state.room, user_id, ref) do
+      {:ok, room, stack} ->
+        state =
+          state
+          |> put_room(RoomState.finish_leave(room, ref))
+          |> cancel_timers_for_gone_seats()
+          |> maybe_stop_game()
+
+        announce(state)
+        broadcast(state, "seat_left", %{})
+
+        {:reply, {:ok, stack}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
   def handle_call({:begin_leave, user_id}, _from, state) do
     ref = new_ref()
 
@@ -700,6 +737,47 @@ defmodule BlockPoker.Tables.TableServer do
   @impl true
   def handle_info({:table_timeout, key, ref}, state) do
     {:noreply, handle_timeout(key, ref, state)}
+  end
+
+  # --- Команды турнира -----------------------------------------------------
+  #
+  # Стол внутри MTT не самостоятелен: уровень, паузу и признак финального
+  # стола ему называет `TournamentServer`. Приходят они сообщениями, а не
+  # вызовами, потому что турнир не вправе стоять в очереди за столом,
+  # который сейчас доигрывает раздачу.
+
+  # Уровень применяется **со следующей раздачи**: повышение посреди улицы
+  # поменяло бы цену уже принятого решения, а идущую раздачу это не трогает.
+  def handle_info({:tournament_level, level}, state) do
+    room = RoomState.put_level(state.room, level)
+    state = put_room(state, room)
+
+    broadcast(state, "level_up", level_view(room, now_ms(state)))
+
+    {:noreply, state}
+  end
+
+  # Пауза турнира: новых раздач не начинаем. Идущая доигрывается — её
+  # прерывание было бы отменой уже сделанных ставок.
+  def handle_info({:tournament_paused, paused?}, state) do
+    state = put_room(state, %{state.room | draining?: paused?})
+
+    state =
+      if paused?,
+        do: cancel_timer(state, :next_hand),
+        else: schedule(state, :next_hand, 0)
+
+    {:noreply, state}
+  end
+
+  # Стол стал финальным: вторая пара цветов и признак в снапшоте.
+  def handle_info({:tournament_final_table, setting}, state) do
+    state = put_room(state, %{state.room | setting: setting})
+
+    announce(state)
+    broadcast(state, "final_table", %{})
+
+    {:noreply, state}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -1408,6 +1486,12 @@ defmodule BlockPoker.Tables.TableServer do
     # Окно показа живёт ту же паузу, что и стол стоит после раздачи.
     room = RoomState.put_reveal(room, hand, now_ms(state) + @next_hand_ms)
 
+    # Факт конца раздачи уходит **до** обработки вылетов: подписчику
+    # (турниру) нужны стеки на начало раздачи и состав банков, а
+    # обработка вылетов их уже затрёт. Кто слушает — столу не важно;
+    # в кэше на это событие не подписан никто.
+    broadcast(state, "hand_finished", hand_finished_payload(state, hand))
+
     state =
       state
       |> put_room(room)
@@ -1478,6 +1562,45 @@ defmodule BlockPoker.Tables.TableServer do
   # к большему. Порядок важен там, где в одной раздаче вылетают двое:
   # места между ними делятся по стеку на её начало, а не по тому, в каком
   # порядке карта мест отдала свои ключи.
+  # Что турниру нужно знать о законченной раздаче: кто остался без фишек,
+  # с каким стеком он в неё вошёл и как разошлись банки.
+  #
+  # Стек **на начало раздачи** — это остаток плюс всё вложенное: по нему
+  # разводятся места при одновременном вылете, и посчитать его позже
+  # невозможно. Банки идут со списком претендентов: голова достаётся
+  # победителю того банка, в котором у выбывшего кончились фишки, а не
+  # победителю большего.
+  defp hand_finished_payload(state, hand) do
+    players = discipline(state).players(hand)
+
+    busted =
+      for {number, player} <- players,
+          player.stack == 0,
+          seat = Map.get(state.room.seats, number),
+          seat != nil and Seat.occupied?(seat) do
+        # `total` есть не у всякой дисциплины: у китайского покера вложений
+        # по ходу раздачи нет вовсе. Отсутствие поля означает ноль, а не
+        # ошибку — иначе стол чужой дисциплины падал бы на конце раздачи.
+        %{
+          seat: number,
+          user_id: seat.user_id,
+          stack_before: player.stack + Map.get(player, :total, 0)
+        }
+      end
+
+    %{
+      busted: busted,
+      pots: pots_of(discipline(state).results(hand)),
+      # Кнопку спрашиваем у комнаты, а не у раздачи: своя кнопка есть
+      # только у блайндовых дисциплин.
+      button_seat: state.room.button_seat,
+      stacks: Map.new(players, fn {number, player} -> {number, player.stack} end)
+    }
+  end
+
+  defp pots_of(%{runs: runs}), do: Enum.flat_map(runs, & &1.pots)
+  defp pots_of(_results), do: []
+
   defp handle_broke_players(state, hand) do
     hand
     |> discipline(state).players()

@@ -997,7 +997,15 @@ defmodule BlockPoker.Engine.Hand do
       best = layer.eligible |> Enum.map(&Map.fetch!(place_of, &1)) |> Enum.min(fn -> nil end)
       winners = Enum.filter(layer.eligible, &(Map.fetch!(place_of, &1) == best))
 
-      %{amount: share(layer.amount, index, runs), winners: winners}
+      # `eligible` уходит наружу вместе с банком: по нему баунти-турнир
+      # находит **тот** банк, в котором у выбывшего кончились фишки, —
+      # а он не обязательно самый большой (§6.4 задачи 7). Номера мест
+      # публичны, скрывать здесь нечего.
+      %{
+        amount: share(layer.amount, index, runs),
+        winners: winners,
+        eligible: layer.eligible
+      }
     end)
     |> Enum.reject(&(&1.amount == 0 or &1.winners == []))
   end

@@ -327,6 +327,24 @@ defmodule BlockPoker.Tables.RoomState do
     }
   end
 
+  @doc """
+  Ставит уровень, названный извне.
+
+  Нужен многостоловому турниру: там уровень — свойство турнира, а не
+  стола, и стол не отсчитывает его сам. В Sit & Go этого не бывает —
+  там стол и есть турнир, и уровень он поднимает себе сам
+  (`advance_level/2`).
+
+  Дедлайн при этом **не взводится**: сколько уровню осталось, знает
+  турнир, а стол только применяет номиналы со следующей раздачи.
+  """
+  @spec put_level(t(), pos_integer()) :: t()
+  def put_level(%__MODULE__{tournament: nil} = state, _level), do: state
+
+  def put_level(%__MODULE__{tournament: tournament} = state, level) do
+    %{state | tournament: %{tournament | level: level, level_deadline_at: nil}}
+  end
+
   @doc "Назначает дедлайн повышения для текущего уровня — от него турнир и стартует."
   @spec arm_level(t(), integer()) :: t()
   def arm_level(%__MODULE__{tournament: nil} = state, _now), do: state

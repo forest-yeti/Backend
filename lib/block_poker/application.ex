@@ -6,6 +6,7 @@ defmodule BlockPoker.Application do
   use Application
 
   alias BlockPoker.Tables.{Lobby, SitAndGoLobby, TableRegistry, TableSupervisor}
+  alias BlockPoker.Tournaments.{TournamentScheduler, TournamentSupervisor}
 
   @impl true
   def start(_type, _args) do
@@ -17,6 +18,9 @@ defmodule BlockPoker.Application do
       Api.RateLimiter,
       {Registry, TableRegistry.child_spec_options()},
       TableSupervisor,
+      # Турниры живут в своём супервизоре: падение турнира не должно
+      # задевать столы кэша, и наоборот.
+      TournamentSupervisor,
       # Фоновые задачи: истечение билетов и отмена недобравших турниров.
       # Возврат денег обязан произойти, даже если нода перезагрузилась
       # между анонсом и стартом, — таймер процесса этого не переживёт,
@@ -31,7 +35,7 @@ defmodule BlockPoker.Application do
     # Лобби поднимается последним и не поднимается в тестах: при старте оно
     # читает шаблоны из БД, а в тестах база живёт под Sandbox и принадлежит
     # тест-процессу. Тесты пула запускают своё лобби явно.
-    children = children ++ lobby_children()
+    children = children ++ lobby_children() ++ scheduler_children()
 
     # See https://elixir.hexdocs.pm/Supervisor.html
     # for other strategies and supported options
@@ -45,6 +49,18 @@ defmodule BlockPoker.Application do
   defp lobby_children do
     if Application.get_env(:block_poker, :start_lobby, true) do
       [Lobby, SitAndGoLobby]
+    else
+      []
+    end
+  end
+
+  # Планировщик поднимается последним и по тем же причинам, что и лобби:
+  # на тике он читает БД, а в тестах она под Sandbox принадлежит
+  # тест-процессу. Тесты расписания поднимают его явно и прогоняют тик
+  # руками, а не ждут минуту.
+  defp scheduler_children do
+    if Application.get_env(:block_poker, :start_tournament_scheduler, true) do
+      [TournamentScheduler]
     else
       []
     end
