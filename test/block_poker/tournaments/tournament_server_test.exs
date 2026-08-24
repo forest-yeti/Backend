@@ -113,6 +113,20 @@ defmodule BlockPoker.Tournaments.TournamentServerTest do
       assert reloaded.started_at
     end
 
+    test "посаженные входы переходят в playing", ctx do
+      %{pid: pid, tournament: tournament} = start_tournament(ctx.setting, 3)
+
+      :ok = TournamentServer.start_tournament(pid)
+
+      # Без этого статуса чипсчёт отдаёт строку игрока как `registered`,
+      # и клиент не узнаёт свой стол: `table_id` он берёт только из
+      # строки играющего входа.
+      {:ok, card} = Tournaments.card(tournament.id)
+
+      assert Enum.all?(card.chip_counts.entries, &(&1.status == :playing))
+      assert Enum.all?(card.chip_counts.entries, &(&1.table_id != nil))
+    end
+
     test "поздняя регистрация закрывается концом ребайных уровней", ctx do
       %{pid: pid, tournament: tournament} = start_tournament(ctx.setting, 3)
 

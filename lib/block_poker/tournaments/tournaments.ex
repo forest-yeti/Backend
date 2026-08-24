@@ -1153,6 +1153,27 @@ defmodule BlockPoker.Tournaments do
     |> announce()
   end
 
+  @doc """
+  Отмечает входы как играющие: они сели за стол и получили стек.
+
+  Статус пишется **в момент посадки**, а не на старте турнира: между
+  «турнир начался» и «этот вход занял место» помещается и поздняя
+  регистрация, и ре-энтри, и отказ стола дать место. Пока вход не сидит,
+  он `:registered` — и клиент по этому статусу понимает, что открывать
+  ему ещё нечего.
+  """
+  @spec mark_playing([Ecto.UUID.t()]) :: {:ok, non_neg_integer()}
+  def mark_playing([]), do: {:ok, 0}
+
+  def mark_playing(entry_ids) do
+    {count, _} =
+      Entry
+      |> where([e], e.id in ^entry_ids and e.status == :registered)
+      |> Repo.update_all(set: [status: :playing, updated_at: DateTime.utc_now()])
+
+    {:ok, count}
+  end
+
   @doc "Переводит турнир в стадию финального стола."
   @spec to_final_table(Tournament.t()) :: {:ok, Tournament.t()} | {:error, term()}
   def to_final_table(%Tournament{} = tournament) do

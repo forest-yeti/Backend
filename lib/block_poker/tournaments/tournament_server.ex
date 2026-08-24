@@ -312,6 +312,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       state =
         %{state | status: :running}
         |> seat_all(entries)
+        |> mark_seated_playing()
         |> arm_level()
         |> arm_break()
 
@@ -423,6 +424,22 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   # --- Посадка -------------------------------------------------------------
 
   defp seat_player(state, entry) do
+    with {:ok, state} <- place_player(state, entry) do
+      {:ok, _count} = Tournaments.mark_playing([entry.id])
+      {:ok, state}
+    end
+  end
+
+  # Стартовая рассадка идёт мимо `seat_player/2`, поэтому статус там
+  # проставляется одним запросом на всех, а не по входу за раз: на явке
+  # в три сотни это триста round-trip'ов на старте.
+  defp mark_seated_playing(state) do
+    {:ok, _count} = Tournaments.mark_playing(Map.keys(state.players))
+
+    state
+  end
+
+  defp place_player(state, entry) do
     case least_filled_table(state) do
       nil ->
         state = open_table(state)
