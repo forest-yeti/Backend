@@ -143,6 +143,63 @@ defmodule Socket.Channels.TournamentChannelTest do
                [mine.id, long.id, short.id, ctx.tournament.id, later.id]
     end
 
+    test "сортировка по цене входа, времени старта и числу входов", ctx do
+      now = DateTime.utc_now()
+
+      cheap = tournament_fixture(setting_fixture(%{buy_in: 100, entry_fee: 10}))
+      later = tournament_fixture(ctx.setting, %{starts_at: DateTime.add(now, 7200)})
+
+      # Один вход в дальний турнир: по числу регистраций он обязан стать
+      # первым, а по времени старта — последним.
+      {:ok, _entry} = Tournaments.register(later.id, user_fixture().id)
+
+      ids = fn reply -> Enum.map(reply.tournaments, & &1.tournament_id) end
+
+      {:ok, reply, channel} = join_lobby(ctx.user, %{"sort" => %{"field" => "entry_price"}})
+      assert ids.(reply) == [cheap.id, ctx.tournament.id, later.id]
+
+      ref = push(channel, "list", %{"sort" => %{"field" => "starts_at", "direction" => "desc"}})
+      assert_reply ref, :ok, reply
+      assert hd(ids.(reply)) == later.id
+
+      ref = push(channel, "list", %{"sort" => %{"field" => "entries", "direction" => "desc"}})
+      assert_reply ref, :ok, reply
+      assert hd(ids.(reply)) == later.id
+
+      # Словарь сортировок приходит с сервера: клиент их не выдумывает.
+      assert reply.filters.sort_fields == [:entry_price, :starts_at, :entries]
+    end
+
+    test "свои турниры первыми при любой сортировке", ctx do
+      # Дороже и дальше остальных — то есть последний по обеим
+      # выбираемым сортировкам.
+      mine =
+        tournament_fixture(
+          setting_fixture(%{buy_in: 5000, entry_fee: 500}),
+          %{starts_at: DateTime.add(DateTime.utc_now(), 10_800)}
+        )
+
+      {:ok, _entry} = Tournaments.register(mine.id, ctx.user.id)
+
+      for sort <- [
+            %{"field" => "entry_price"},
+            %{"field" => "starts_at"},
+            %{"field" => "entries"}
+          ] do
+        {:ok, reply, _channel} = join_lobby(ctx.user, %{"sort" => sort})
+
+        assert hd(reply.tournaments).tournament_id == mine.id,
+               "сортировка #{sort["field"]} увела свой турнир вниз"
+      end
+    end
+
+    test "неизвестная сортировка отвергается", ctx do
+      socket = connect_as(ctx.user)
+
+      assert {:error, %{code: "validation_failed"}} =
+               subscribe_and_join(socket, "tournaments", %{"sort" => %{"field" => "occupancy"}})
+    end
+
     test "перечитывает витрину на изменение инстанса", ctx do
       {:ok, _reply, _channel} = join_lobby(ctx.user)
 

@@ -65,6 +65,10 @@ defmodule BlockPoker.Tables.LobbyQuery do
   @table_sizes [:heads_up, :six_max, :nine_max]
   @limit_tiers [:micro, :medium, :high_roller]
   @sort_fields [:limit, :occupancy]
+  # Сортировки турнирной витрины. Набор другой, потому что у турнира нет
+  # ни лимита, ни занятости: игрок выбирает по цене, по времени до старта
+  # и по тому, сколько народу уже вошло.
+  @tournament_sort_fields [:entry_price, :starts_at, :entries]
   @statuses [:announced, :registering, :running, :late_reg, :finished]
   @kinds [:freeroll, :rebuy, :bounty, :satellite]
   @sort_directions [:asc, :desc]
@@ -101,6 +105,9 @@ defmodule BlockPoker.Tables.LobbyQuery do
   @spec sort_fields() :: [atom()]
   def sort_fields, do: @sort_fields
 
+  @spec tournament_sort_fields() :: [atom()]
+  def tournament_sort_fields, do: @tournament_sort_fields
+
   @spec statuses() :: [atom()]
   def statuses, do: @statuses
 
@@ -123,7 +130,7 @@ defmodule BlockPoker.Tables.LobbyQuery do
          {:ok, limit_tiers} <- list(params, "limit_tiers", @limit_tiers),
          {:ok, statuses} <- list(params, "statuses", @statuses),
          {:ok, kinds} <- list(params, "kinds", @kinds),
-         {:ok, sort} <- sort(params) do
+         {:ok, sort} <- sort(params, category) do
       {:ok,
        %__MODULE__{
          category: category,
@@ -283,13 +290,13 @@ defmodule BlockPoker.Tables.LobbyQuery do
 
   defp cast(_value, _allowed), do: :error
 
-  defp sort(params) do
+  defp sort(params, category) do
     case Map.get(params, "sort") do
       nil ->
         {:ok, nil}
 
       %{} = sort ->
-        with {:ok, [field]} <- cast_one(sort, "field", @sort_fields),
+        with {:ok, [field]} <- cast_one(sort, "field", sort_fields_of(category)),
              {:ok, direction} <- direction(sort) do
           {:ok, {field, direction}}
         end
@@ -298,6 +305,9 @@ defmodule BlockPoker.Tables.LobbyQuery do
         {:error, :validation_failed}
     end
   end
+
+  defp sort_fields_of(:tournament), do: @tournament_sort_fields
+  defp sort_fields_of(_category), do: @sort_fields
 
   defp cast_one(sort, key, allowed) do
     case Map.get(sort, key) do
@@ -335,9 +345,11 @@ defmodule BlockPoker.Tables.LobbyQuery do
   #
   # Валюта здесь **не** первым разрядом, в отличие от кэша: турнир, в
   # который игрок вошёл, не должен уезжать вниз оттого, что он на фишки.
-  defp sort_key(%__MODULE__{category: :tournament}, entry) do
-    {stage_rank(entry), currency_rank(entry.setting),
-     DateTime.to_unix(entry.starts_at, :microsecond), entry.entry_price, entry.tournament_id}
+  defp sort_key(%__MODULE__{category: :tournament} = query, entry) do
+    # Свои турниры — **безусловно** первым разрядом, при любой выбранной
+    # сортировке: это единственные строки, где от игрока чего-то ждут,
+    # и искать их среди трёхсот чужих он не должен.
+    {registered_rank(entry), tournament_order(query.sort, entry)}
   end
 
   defp sort_key(%__MODULE__{sort: nil}, entry), do: default_key(entry)
@@ -352,7 +364,32 @@ defmodule BlockPoker.Tables.LobbyQuery do
     {currency_rank(entry.setting), signed(occupancy(entry), direction), default_key(entry)}
   end
 
-  defp stage_rank(%{registered: true}), do: 0
+  defp registered_rank(%{registered: true}), do: 0
+  defp registered_rank(_entry), do: 1
+
+  # Умолчание витрины: сначала идущие — от начавшихся раньше к
+  # начавшимся позже, потому что дольше играющий турнир ближе к
+  # деньгам, — потом будущие по ближайшему старту, потом сыгранные.
+  defp tournament_order(nil, entry) do
+    {stage_rank(entry), currency_rank(entry.setting), starts_unix(entry), entry.entry_price,
+     entry.tournament_id}
+  end
+
+  defp tournament_order({:starts_at, direction}, entry) do
+    {signed(starts_unix(entry), direction), entry.entry_price, entry.tournament_id}
+  end
+
+  defp tournament_order({:entry_price, direction}, entry) do
+    {signed(entry.entry_price, direction), starts_unix(entry), entry.tournament_id}
+  end
+
+  # «Сколько уже вошло» считается по входам, а не по людям: игрок
+  # выбирает турнир по размеру поля, а поле — это входы.
+  defp tournament_order({:entries, direction}, entry) do
+    {signed(entry.tournament.entries_count, direction), starts_unix(entry), entry.tournament_id}
+  end
+
+  defp starts_unix(entry), do: DateTime.to_unix(entry.starts_at, :microsecond)
 
   defp stage_rank(%{status: status}) when status in [:running, :late_reg], do: 1
   defp stage_rank(%{status: status}) when status in [:announced, :registering], do: 2

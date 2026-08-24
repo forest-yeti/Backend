@@ -183,7 +183,11 @@ defmodule Socket.Views.TournamentView do
       table_sizes: BlockPoker.Tables.LobbyQuery.table_sizes(),
       limit_tiers: BlockPoker.Tables.LobbyQuery.limit_tiers(),
       statuses: BlockPoker.Tables.LobbyQuery.statuses(),
-      kinds: BlockPoker.Tables.LobbyQuery.kinds()
+      kinds: BlockPoker.Tables.LobbyQuery.kinds(),
+      # Чем можно сортировать. Список отдаёт сервер по той же причине,
+      # что и фильтры: новая сортировка не должна требовать релиза
+      # клиента.
+      sort_fields: BlockPoker.Tables.LobbyQuery.tournament_sort_fields()
     }
   end
 end
