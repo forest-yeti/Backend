@@ -1033,6 +1033,100 @@ defmodule BlockPoker.TournamentsTest do
       assert Enum.count(types, &(&1 == :tournament_bounty)) == 1
     end
 
+    test "заработанное баунти — сумма выплаченных голов этого турнира, а не текущая цена своей",
+         ctx do
+      :ok =
+        Tournaments.pay_bounty(ctx.tournament, %{
+          payouts: [
+            %{
+              entry_id: ctx.killer_entry.id,
+              victim_entry_id: ctx.victim_entry.id,
+              seat: 1,
+              amount: 200
+            }
+          ],
+          increments: [%{entry_id: ctx.killer_entry.id, amount: 200}],
+          refunds: []
+        })
+
+      # Прирост собственной головы убийцы (`entry.bounty`, 600 — см. тест
+      # выше) — это не то, что он уже получил. Заработано — только
+      # денежная часть, выплаченная сразу: 200.
+      assert Tournaments.bounty_earned(ctx.killer.id, :play_money, ctx.tournament.id) == 200
+
+      # Жертва никого не убивала — её заработок нулевой, даже если у неё
+      # была своя голова.
+      assert Tournaments.bounty_earned(ctx.victim.id, :play_money, ctx.tournament.id) == 0
+    end
+
+    test "заработанное баунти суммирует несколько голов подряд", ctx do
+      third = user_fixture()
+      {:ok, third_entry} = Tournaments.register(ctx.tournament.id, third.id)
+
+      :ok =
+        Tournaments.pay_bounty(ctx.tournament, %{
+          payouts: [
+            %{
+              entry_id: ctx.killer_entry.id,
+              victim_entry_id: ctx.victim_entry.id,
+              seat: 1,
+              amount: 200
+            }
+          ],
+          increments: [%{entry_id: ctx.killer_entry.id, amount: 200}],
+          refunds: []
+        })
+
+      :ok =
+        Tournaments.pay_bounty(ctx.tournament, %{
+          payouts: [
+            %{
+              entry_id: ctx.killer_entry.id,
+              victim_entry_id: third_entry.id,
+              seat: 1,
+              amount: 200
+            }
+          ],
+          increments: [%{entry_id: ctx.killer_entry.id, amount: 200}],
+          refunds: []
+        })
+
+      assert Tournaments.bounty_earned(ctx.killer.id, :play_money, ctx.tournament.id) == 400
+    end
+
+    test "заработанное баунти не путает турниры одного игрока", ctx do
+      other_setting = setting_fixture(%{bounty_part: 400})
+      other_tournament = tournament_fixture(other_setting)
+      {:ok, other_entry} = Tournaments.register(other_tournament.id, ctx.killer.id)
+      {:ok, other_victim} = Tournaments.register(other_tournament.id, ctx.victim.id)
+
+      :ok =
+        Tournaments.pay_bounty(ctx.tournament, %{
+          payouts: [
+            %{
+              entry_id: ctx.killer_entry.id,
+              victim_entry_id: ctx.victim_entry.id,
+              seat: 1,
+              amount: 200
+            }
+          ],
+          increments: [%{entry_id: ctx.killer_entry.id, amount: 200}],
+          refunds: []
+        })
+
+      :ok =
+        Tournaments.pay_bounty(other_tournament, %{
+          payouts: [
+            %{entry_id: other_entry.id, victim_entry_id: other_victim.id, seat: 1, amount: 200}
+          ],
+          increments: [%{entry_id: other_entry.id, amount: 200}],
+          refunds: []
+        })
+
+      assert Tournaments.bounty_earned(ctx.killer.id, :play_money, ctx.tournament.id) == 200
+      assert Tournaments.bounty_earned(ctx.killer.id, :play_money, other_tournament.id) == 200
+    end
+
     test "голова жертвы обнуляется и помечается выплаченной", ctx do
       :ok =
         Tournaments.pay_bounty(ctx.tournament, %{

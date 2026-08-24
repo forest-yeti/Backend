@@ -1138,6 +1138,33 @@ defmodule BlockPoker.Tournaments do
     end
   end
 
+  @doc """
+  Выплаты по текущей явке и **текущему** фонду — не дожидаясь, пока
+  поздняя регистрация закроется и фонд зафиксируется.
+
+  `tournament.prize_pool` появляется только в `close_late_reg/1` — до
+  этого момента это `0`, и `payouts/1` посчитал бы каждое место нулевым.
+  Игроку, вылетевшему до закрытия поздней регистрации (частый случай:
+  она держится час и больше), сумма нужна раньше. Фонд здесь берётся из
+  `collected` — того же живого счётчика, из которого `close_late_reg/1`
+  сам фонд и фиксирует, — поэтому после фиксации результат совпадает
+  с `payouts/1` ровно: `collected` дальше не меняется по построению.
+  """
+  @spec current_payouts(Tournament.t()) :: {:ok, [TournamentPayout.payout()]} | {:error, term()}
+  def current_payouts(%Tournament{} = tournament) do
+    with {:ok, setting} <- get_setting(tournament.tournament_setting_id) do
+      %{prize_pool: pool} = TournamentPayout.pool(collected(tournament), setting.guarantee)
+
+      {:ok,
+       TournamentPayout.compute(
+         payout_grid(setting),
+         tournament.entries_count,
+         tournament.players_count,
+         pool
+       )}
+    end
+  end
+
   # --- Ход турнира ---------------------------------------------------------
 
   @doc "Помечает начало турнира и крайний срок поздней регистрации."
@@ -1192,6 +1219,27 @@ defmodule BlockPoker.Tournaments do
       entry
       |> Entry.changeset(%{status: :busted, place: place, busted_at: DateTime.utc_now()})
       |> Repo.update()
+    end
+  end
+
+  @doc """
+  Сколько игрок заработал, выбивая чужие головы в этом турнире.
+
+  Не то же самое, что `entry.bounty` (цена **его собственной** головы —
+  растёт при PKO и достаётся тому, кто выбьет уже его). Отдельного
+  счётчика «заработано» нет ни у входа, ни у турнира: цифра — это сумма
+  записей `tournament_bounty` в кошельке игрока с меткой (`ref_id`)
+  этого турнира, а платит их `credit_bounty/3` сразу после раздачи, где
+  засчитан вылет жертвы.
+
+  `0`, если у турнира нет баунти или кошелёк ещё не заведён — оба случая
+  для UI неотличимы от «ничего не заработал».
+  """
+  @spec bounty_earned(Ecto.UUID.t(), :main | :play_money, Ecto.UUID.t()) :: non_neg_integer()
+  def bounty_earned(user_id, currency, tournament_id) do
+    case Wallet.get_wallet(user_id, currency) do
+      {:ok, wallet} -> Wallet.sum_by_ref(wallet.id, :tournament_bounty, tournament_id)
+      {:error, _reason} -> 0
     end
   end
 

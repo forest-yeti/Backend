@@ -277,6 +277,23 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       assert loser.busted_at
       refute winner.busted_at
     end
+
+    test "player_busted несёт приз за место — экран вылета (задача 32) не ждёт расчёта турнира",
+         ctx do
+      # Итоговый `entry.prize` пишется только при расчёте всего турнира
+      # (`play_until_finished` ждёт именно этого), а вылетевший видит
+      # экран сразу по броадкасту. У двоих игроков с этим шаблоном
+      # больше некому войти — сетка «при текущей явке» на месте вылета
+      # уже совпадает с окончательной.
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(ctx.tournament.id))
+
+      :finished = play_until_finished(ctx.pid, ctx.table)
+
+      assert_received {:tournament_event, "player_busted", busted}
+      assert busted.place == 2
+      assert busted.prize == 700
+      assert busted.bounty_earned == 0
+    end
   end
 
   describe "баунти" do
@@ -305,6 +322,39 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
 
       entries = Tournaments.list_entries(tournament.id)
       assert Enum.all?(entries, &(&1.status == :paid))
+    end
+
+    test "player_busted несёт и приз, и заработанное баунти", _ctx do
+      setting = fast_setting(%{bounty_part: 400})
+      tournament = tournament_fixture(setting)
+
+      one = user_fixture()
+      two = user_fixture()
+
+      {:ok, _first} = Tournaments.register(tournament.id, one.id)
+      {:ok, _second} = Tournaments.register(tournament.id, two.id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      [{_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(tournament.id))
+
+      :finished = play_until_finished(pid, table)
+
+      assert_received {:tournament_event, "player_busted", busted}
+
+      entries = Tournaments.list_entries(tournament.id)
+      loser = Enum.find(entries, &(&1.place == 2))
+
+      # Явка не растёт дальше — сетка «при текущей явке» на момент вылета
+      # совпадает с окончательным призом.
+      assert busted.prize == loser.prize
+
+      # Проигравший никого не убивал: голова досталась победителю, а тот
+      # ещё не вылетел и `player_busted` про себя не получал.
+      assert busted.bounty_earned == 0
     end
   end
 

@@ -953,13 +953,46 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   end
 
   defp finalize_bust(state, entry_id, place) do
-    {:ok, _entry} = Tournaments.bust(entry_id, place)
+    {:ok, entry} = Tournaments.bust(entry_id, place)
 
-    broadcast(state, "player_busted", %{entry_id: entry_id, place: place})
+    broadcast(state, "player_busted", %{
+      entry_id: entry_id,
+      place: place,
+      # Итоговый `entry.prize` в БД появляется только при расчёте всего
+      # турнира (`SettleTournament`), а вылетевший видит экран сразу.
+      # Поэтому здесь — та же сетка «при текущей явке», что и в карточке
+      # турнира (§3 задачи 30): не кэшируется, для мест вне призов — 0.
+      prize: prize_for_place(state, place),
+      bounty_earned: bounty_earned_by(state, entry)
+    })
 
     state
     |> cancel_reentry_timer(entry_id)
     |> Map.update!(:results, &[%{entry_id: entry_id, place: place} | &1])
+  end
+
+  # Сумма за место на момент вылета — по текущей явке, не по итогу
+  # турнира: тот подводится один раз в конце (`SettleTournament`), а
+  # вылетевший не может его ждать. Место вне призовой зоны — `0`.
+  defp prize_for_place(state, place) do
+    with {:ok, tournament} <- Tournaments.get_tournament(state.tournament_id),
+         {:ok, payouts} <- Tournaments.current_payouts(tournament),
+         %{amount: amount} <- Enum.find(payouts, &(&1.place == place)) do
+      amount
+    else
+      _ -> 0
+    end
+  end
+
+  # Не цена собственной головы (`entry.bounty` — растёт при PKO, достаётся
+  # тому, кто выбьет уже этого игрока) и не то, что причитается, — то, что
+  # игрок уже получил, выбивая чужие головы в этом турнире. Отдельного
+  # счётчика для этого нет: сумма берётся из его же кошелька по записям
+  # `tournament_bounty` с меткой турнира.
+  defp bounty_earned_by(%State{setting: %{bounty_part: 0}}, _entry), do: 0
+
+  defp bounty_earned_by(state, entry) do
+    Tournaments.bounty_earned(entry.user_id, state.setting.currency, state.tournament_id)
   end
 
   defp offer_reentry(state, placement) do

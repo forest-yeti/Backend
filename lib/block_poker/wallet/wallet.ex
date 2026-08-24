@@ -115,6 +115,27 @@ defmodule BlockPoker.Wallet do
   end
 
   @doc """
+  Сумма записей одного типа с одной меткой (`ref_id`) — «сколько уже
+  получено по этой причине», не читая всю выписку. Например: сколько
+  баунти игрок заработал в конкретном турнире (`ref_id` — id турнира,
+  тип — `:tournament_bounty`).
+
+  `0`, если записей нет — это не ошибка, а «пока ничего».
+  """
+  @spec sum_by_ref(Ecto.UUID.t(), atom(), String.t()) :: integer()
+  def sum_by_ref(wallet_id, type, ref_id) do
+    # MySQL отдаёт SUM() десятичным числом даже по целочисленной колонке —
+    # деньги в `amount` всегда целые, `Decimal` наружу отдавать незачем.
+    case WalletEntry
+         |> where(wallet_id: ^wallet_id, type: ^type, ref_id: ^ref_id)
+         |> Repo.aggregate(:sum, :amount) do
+      nil -> 0
+      %Decimal{} = sum -> Decimal.to_integer(sum)
+      sum -> sum
+    end
+  end
+
+  @doc """
   Бай-ин: фишки уезжают из кошелька на стол.
 
   Ключ идемпотентности задаёт вызывающий (`"buyin:<reservation_id>"`),
