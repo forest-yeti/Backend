@@ -121,13 +121,14 @@ defmodule BlockPoker.Tournaments.TournamentSetting do
     field :button_draw_animation_ms, :integer, default: 3_000
     field :rebuy_prompt_ms, :integer, default: 30_000
 
-    # Синий антураж опознаёт режим, как зелёный опознаёт кэш и золотой —
-    # Sit & Go. Вторая пара опознаёт **стадию**: финалка перекрашивается
-    # в бордовый, и это видно с одного взгляда, включая зрителей.
+    # Первая пара опознаёт **семейство** турнира и у каждого своя.
+    # Вторая опознаёт **стадию** и одинакова во всей сетке: финальный
+    # стол везде тёмно-золотой, и узнаётся он с одного взгляда — как бы
+    # ни выглядел турнир, за которым игрок до него дошёл.
     field :felt_color, :string, default: "#1F4F7A"
     field :background_color, :string, default: "#0B1A2A"
-    field :final_felt_color, :string, default: "#6E1F2E"
-    field :final_background_color, :string, default: "#1A0A10"
+    field :final_felt_color, :string, default: "#6B5518"
+    field :final_background_color, :string, default: "#191206"
 
     field :enabled, :boolean, default: true
     field :sort_order, :integer, default: 0

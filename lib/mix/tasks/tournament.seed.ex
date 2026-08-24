@@ -1,21 +1,22 @@
 defmodule Mix.Tasks.Tournament.Seed do
-  @shortdoc "Разворачивает стандартную сетку турниров"
+  @shortdoc "Разворачивает сетку турниров рума"
 
   @moduledoc """
   Первичное наполнение `tournament_settings` вместе со структурами
   уровней, сетками выплат и расписанием из `BlockPoker.Tournaments.Grid`.
 
       mix tournament.seed                       # вся сетка
-      mix tournament.seed --currency play_money
-      mix tournament.seed --speed turbo
-      mix tournament.seed --game-type short_deck
+      mix tournament.seed --only main           # только боевые семейства
+      mix tournament.seed --only play_money     # только тестовые
       mix tournament.seed --dry-run             # показать, что будет создано
+      mix tournament.seed --reset               # снести прежнюю сетку и залить заново
 
   Задача идемпотентна: шаблон с тем же естественным ключом
   (`name + game_type + currency + buy_in + table_size`) пропускается.
   Перезаписи нет намеренно — правка шаблона тянет за собой уровни,
   выплаты и расписание, и молча заменять их набор опаснее, чем ничего
-  не делать.
+  не делать. Для замены есть `--reset`, и он спрашивает подтверждение:
+  вместе с шаблонами уезжают их инстансы.
 
   Планировщик о новых строках узнаёт сам на ближайшем тике: он читает
   расписание каждую минуту, и перезапуск ноды после сида не нужен.
@@ -23,61 +24,49 @@ defmodule Mix.Tasks.Tournament.Seed do
 
   use Mix.Task
 
+  alias BlockPoker.Tournaments
   alias BlockPoker.Tournaments.Grid
 
   @requirements ["app.start"]
 
-  @switches [
-    currency: :string,
-    speed: :string,
-    game_type: :string,
-    dry_run: :boolean
-  ]
+  @switches [only: :string, dry_run: :boolean, reset: :boolean, force: :boolean]
 
   @impl Mix.Task
   def run(argv) do
     {opts, _argv} = OptionParser.parse!(argv, strict: @switches)
 
-    rows =
-      Grid.rows(
-        currency: currency(opts[:currency]),
-        speed: speed(opts[:speed]),
-        game_type: game_type(opts[:game_type])
-      )
+    rows = Grid.rows(only: only(opts[:only]))
+
+    if opts[:reset], do: reset(opts)
 
     if opts[:dry_run], do: report_dry_run(rows), else: rows |> Grid.seed() |> report()
   end
 
-  defp currency(nil), do: nil
-  defp currency("main"), do: :main
-  defp currency("play_money"), do: :play_money
+  # Снос прежней сетки. Инстансы уезжают вместе с шаблонами, поэтому
+  # спрашиваем: на боевой базе это означает отменённые турниры.
+  defp reset(opts) do
+    if opts[:force] or Mix.shell().yes?("Удалить все турнирные шаблоны вместе с инстансами?") do
+      %{settings: settings, tournaments: tournaments} = Tournaments.delete_all_settings()
 
-  defp currency(other) do
-    Mix.raise("неизвестная валюта: #{other} (ожидалось main или play_money)")
+      Mix.shell().info("удалено шаблонов: #{settings}, инстансов: #{tournaments}\n")
+    else
+      Mix.raise("отменено")
+    end
   end
 
-  defp speed(nil), do: nil
-  defp speed("regular"), do: :regular
-  defp speed("turbo"), do: :turbo
-  defp speed("hyper"), do: :hyper
+  defp only(nil), do: nil
+  defp only("main"), do: :main
+  defp only("play_money"), do: :play_money
 
-  defp speed(other) do
-    Mix.raise("неизвестная скорость: #{other} (ожидалось regular, turbo или hyper)")
-  end
-
-  defp game_type(nil), do: nil
-  defp game_type("texas_holdem"), do: :texas_holdem
-  defp game_type("short_deck"), do: :short_deck
-
-  defp game_type(other) do
-    Mix.raise("неизвестная дисциплина: #{other} (ожидалось texas_holdem или short_deck)")
+  defp only(other) do
+    Mix.raise("неизвестный набор: #{other} (ожидалось main или play_money)")
   end
 
   defp report_dry_run(rows) do
-    Enum.each(rows, fn %{attrs: attrs, levels: levels, payouts: payouts} ->
+    Enum.each(rows, fn %{attrs: attrs, levels: levels, schedules: schedules} ->
       Mix.shell().info(
         "#{attrs.name}: вход #{attrs.buy_in + attrs.entry_fee}, стек #{attrs.starting_stack}, " <>
-          "уровней #{length(levels)}, строк выплат #{length(payouts)}"
+          "уровней #{length(levels)}, запусков в сутки #{length(schedules)}"
       )
     end)
 

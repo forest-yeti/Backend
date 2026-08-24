@@ -130,8 +130,10 @@ defmodule BlockPoker.Tournaments.TournamentSchedulerTest do
       assert tournament.status == :registering
       assert is_map(tournament.snapshot)
 
-      # Процесс инстанса поднят: игрок должен видеть отсчёт до старта.
-      assert TournamentServer.whereis(tournament.id)
+      # А вот процесса у него нет и быть не должно: пустой турнир его не
+      # требует, и рум не держит сотню процессов под турниры, в которые
+      # никто не вошёл. Поднимет его первая регистрация.
+      refute TournamentServer.whereis(tournament.id)
     end
 
     test "снапшот настроек снят при открытии", ctx do

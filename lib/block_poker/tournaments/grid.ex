@@ -1,21 +1,37 @@
 defmodule BlockPoker.Tournaments.Grid do
   @moduledoc """
-  Стандартная сетка турниров рума: шаблоны, структуры уровней, выплаты
-  и расписание.
+  Сетка турниров рума: шаблоны, структуры уровней, выплаты и расписание.
 
-  Живёт в коде, а не в SQL-файле, по той же причине, что и сетка Sit & Go:
-  экономика турнира — это свойство набора строк, и её нужно уметь
-  проверить тестом. Сид только раскладывает посчитанное по таблицам.
+  Живёт в коде, а не в SQL-файле, по той же причине, что и сетка
+  Sit & Go: экономика турнира — это свойство набора строк, и её нужно
+  уметь проверить тестом. Сид только раскладывает посчитанное по таблицам.
 
   ## Что задаёт сетку
 
-  Три оси: **валюта**, **цена входа** и **скорость**. Скорость — это
-  длительность уровня и стартовый стек в больших блайндах: турбо играет
-  вдвое быстрее обычного и потому даёт меньше игры за те же деньги.
+  Семь семейств на реальные деньги и четыре тестовых на фишки. Семейство
+  задаёт дисциплину, структуру уровней, расписание и цвет стола; цена
+  входа разворачивает его в отдельные шаблоны, потому что взнос — поле
+  шаблона, а не турнира.
 
-  Число оплачиваемых мест выводится из явки, а не задаётся руками:
-  сетка выплат описана долями по диапазонам, и на семи участниках платят
-  одно место, а на трёхстах — сорок.
+  Скорость турнира — это **длительность уровня**, а не номиналы: гипер
+  играет вдвое быстрее классики на той же лесенке блайндов, и стек тает
+  относительно них вдвое быстрее.
+
+  ## Правила, вшитые в сетку
+
+    * **вход всегда открыт и всегда неограничен.** Ре-энтри без счётчика,
+      пока его разрешает уровень: час игры у гипера, два часа у долгих.
+      Дальше стартовый стек перестаёт быть игровым, и возвращаться некуда;
+    * **аддона нет нигде.** Докупка на перерыве меняет расклад сил
+      в середине турнира, и рум её не продаёт;
+    * **комиссия не входит во взнос.** `$1` в названии — это `0.90$`
+      в фонд и `0.10$` руму;
+    * **голова берётся из взноса**, а не сверх него: в баунти-семействах
+      половина взноса становится ценой головы и делится пополам — деньги
+      убийце и прирост его собственной головы (PKO);
+    * **финальный стол выглядит одинаково везде** — тёмное золото. Это
+      признак стадии, а не семейства: игрок обязан узнавать финалку
+      по цвету, за каким бы турниром он ни сидел.
 
   ## Правило выплат
 
@@ -27,60 +43,221 @@ defmodule BlockPoker.Tournaments.Grid do
 
   alias BlockPoker.Tournaments
 
+  # Стартовый стек и лесенка подобраны так, чтобы первый уровень давал
+  # ровно сто больших блайндов: это точка отсчёта, по которой игрок
+  # читает структуру.
+  @starting_stack 10_000
+
+  # Одна лесенка на все семейства. Анте — примерно десятая часть большого
+  # блайнда: достаточно, чтобы борьба за мёртвые деньги началась сразу,
+  # и мало, чтобы не съедать короткие стеки на первых уровнях.
+  @ladder [
+    {50, 100, 10},
+    {75, 150, 15},
+    {100, 200, 25},
+    {150, 300, 35},
+    {200, 400, 50},
+    {300, 600, 75},
+    {400, 800, 100},
+    {500, 1000, 125},
+    {700, 1400, 175},
+    {1000, 2000, 250},
+    {1500, 3000, 350},
+    {2000, 4000, 500},
+    {3000, 6000, 750},
+    {4000, 8000, 1000},
+    {5000, 10_000, 1250},
+    {7000, 14_000, 1750},
+    {10_000, 20_000, 2500},
+    {15_000, 30_000, 3500},
+    {20_000, 40_000, 5000},
+    {30_000, 60_000, 7500},
+    {40_000, 80_000, 10_000},
+    {60_000, 120_000, 15_000},
+    {80_000, 160_000, 20_000},
+    {120_000, 240_000, 30_000}
+  ]
+
+  # Структура — это длительность уровня и окно входа. Окно задано
+  # временем, а не числом уровней: «час игры» одинаково читается
+  # и в гипере, и в долгом, а сколько это уровней — арифметика.
+  @structures %{
+    hyper: %{duration: 300, reentry_window: 3600},
+    classic: %{duration: 600, reentry_window: 7200},
+    short: %{duration: 420, reentry_window: 7200},
+    deep: %{duration: 900, reentry_window: 7200},
+    dev: %{duration: 120, reentry_window: 600}
+  }
+
+  # Цены: взнос и комиссия раздельно. Доля комиссии падает с ростом
+  # входа — так устроен любой рум: обслуживание дорогого турнира стоит
+  # столько же, сколько дешёвого.
+  @prices %{
+    1 => {90, 10},
+    3 => {270, 30},
+    10 => {900, 100},
+    30 => {2700, 300},
+    50 => {4550, 450},
+    80 => {7440, 560},
+    100 => {9300, 700},
+    250 => {23_750, 1250},
+    400 => {38_000, 2000},
+    800 => {76_000, 4000},
+    1500 => {142_500, 7500}
+  }
+
+  @visuals %{
+    green: {"#1F6F4A", "#10241C"},
+    red: {"#6E2C2C", "#1E0F0F"},
+    purple: {"#3F2A63", "#150E22"}
+  }
+
+  # Финальный стол — тёмное золото, одинаково у всех семейств.
+  @final_visual {"#6B5518", "#191206"}
+
+  @templates [
+    %{
+      name: "Hyper For Us",
+      description: "Гипер: уровень пять минут, старт каждые полчаса",
+      game_type: :texas_holdem,
+      structure: :hyper,
+      visual: :green,
+      schedule: {:every, 30},
+      prices: [1, 3, 10, 30, 50],
+      bounty: false
+    },
+    %{
+      name: "Classic",
+      description: "Классическая структура: уровень десять минут",
+      game_type: :texas_holdem,
+      structure: :classic,
+      visual: :red,
+      schedule: {:every, 60},
+      prices: [1, 3, 10, 30, 50, 80, 100],
+      bounty: false
+    },
+    %{
+      name: "High Roller Classic",
+      description: "Классическая структура для крупных ставок",
+      game_type: :texas_holdem,
+      structure: :classic,
+      visual: :purple,
+      schedule: {:every, 180},
+      prices: [250, 400, 800],
+      bounty: false
+    },
+    %{
+      name: "Bounty Hunter Classic",
+      description: "Прогрессивный нокаут: половина взноса — голова",
+      game_type: :texas_holdem,
+      structure: :classic,
+      visual: :green,
+      schedule: {:every, 60},
+      prices: [1, 3, 10, 30, 50],
+      bounty: true
+    },
+    %{
+      name: "Bounty Hunter - Hyper For Us",
+      description: "Прогрессивный нокаут на гипер-структуре",
+      game_type: :texas_holdem,
+      structure: :hyper,
+      visual: :green,
+      schedule: {:every, 60},
+      prices: [1, 3, 10, 30, 50, 80, 100],
+      bounty: true
+    },
+    %{
+      name: "Fewer Cards, More Action - ShortDeck",
+      description: "Короткая колода, уровень семь минут",
+      game_type: :short_deck,
+      structure: :short,
+      visual: :red,
+      schedule: {:every, 60},
+      prices: [1, 3, 10, 30, 50, 80, 100],
+      bounty: false
+    },
+    %{
+      name: "Big High Roller",
+      description: "Главный турнир недели: уровень пятнадцать минут",
+      game_type: :texas_holdem,
+      structure: :deep,
+      visual: :purple,
+      # Суббота, 01:00 по времени рума.
+      schedule: {:weekly, 6, ~T[01:00:00]},
+      prices: [1500],
+      bounty: false
+    }
+  ]
+
+  # Тестовые семейства: игровые фишки, старт от трёх человек и запуск
+  # каждую минуту. Живут в той же сетке, а не в фикстурах, потому что
+  # разработчику нужен турнир на живом руме, а не в песочнице.
+  @dev_templates [
+    %{
+      name: "Develop for us - Holdem 6-Max",
+      description: "Тестовый: старт от трёх, запуск каждую минуту",
+      game_type: :texas_holdem,
+      table_size: 6,
+      bounty: false
+    },
+    %{
+      name: "Develop for us - Holdem 6-Max PKO",
+      description: "Тестовый баунти: старт от трёх, запуск каждую минуту",
+      game_type: :texas_holdem,
+      table_size: 6,
+      bounty: true
+    },
+    %{
+      name: "Develop for us - Heads-Up",
+      description: "Тестовый хедз-ап: запуск каждую минуту",
+      game_type: :texas_holdem,
+      table_size: 2,
+      bounty: false
+    },
+    %{
+      name: "Develop for us - ShortDeck",
+      description: "Тестовая короткая колода: запуск каждую минуту",
+      game_type: :short_deck,
+      table_size: 6,
+      bounty: false
+    }
+  ]
+
   @doc """
-  Структура уровней.
+  Структура уровней семейства.
 
-  Три семейства, и различаются они только длительностью уровня:
-  обычный турнир — десять минут, турбо — пять, гипер — три. Номиналы
-  одни и те же: скорость турнира задаётся тем, как быстро стек тает
-  относительно блайндов, а не самими блайндами.
+  Короткая колода играется на анте вместо блайндов (`Variant.ShortDeck`
+  ставит `BettingStructure.ButtonAnte`), поэтому у неё та же лесенка
+  записана одной колонкой.
 
-  Ребайные уровни — первые четыре: поздняя регистрация и ре-энтри живут
-  ровно столько, сколько стартовый стек остаётся игровым. Аддон — на
-  последнем ребайном.
+  Ребайные уровни считаются из окна входа: `rebuy_allowed` стоит там,
+  куда турнир успевает дойти за час (гипер) или за два (долгие
+  структуры).
   """
-  @spec blind_levels(atom()) :: [map()]
-  def blind_levels(speed) do
-    duration = duration_of(speed)
+  @spec blind_levels(atom(), atom()) :: [map()]
+  def blind_levels(structure, game_type \\ :texas_holdem) do
+    %{duration: duration, reentry_window: window} = Map.fetch!(@structures, structure)
 
-    [
-      {25, 50, 0},
-      {50, 100, 0},
-      {75, 150, 25},
-      {100, 200, 25},
-      {150, 300, 50},
-      {200, 400, 50},
-      {300, 600, 75},
-      {400, 800, 100},
-      {600, 1200, 150},
-      {800, 1600, 200},
-      {1200, 2400, 300},
-      {1600, 3200, 400},
-      {2400, 4800, 600},
-      {3200, 6400, 800},
-      {5000, 10_000, 1000}
-    ]
+    open_until = div(window, duration)
+
+    @ladder
     |> Enum.with_index(1)
-    |> Enum.map(fn {{small, big, ante}, level} ->
-      %{
-        level: level,
-        small_blind: small,
-        big_blind: big,
-        ante: ante,
-        duration_seconds: duration,
-        # Вход открыт, пока стартовый стек остаётся игровым: к пятому
-        # уровню он перестаёт им быть, и поздняя регистрация теряет смысл.
-        rebuy_allowed: level <= 4,
-        # Аддон берётся на перерыве внутри последнего ребайного уровня —
-        # на пересечении двух правил, а не на своём поле.
-        addon_allowed: level == 4
-      }
+    |> Enum.map(fn {limits, level} ->
+      Map.merge(
+        %{
+          level: level,
+          duration_seconds: duration,
+          rebuy_allowed: level <= open_until,
+          # Аддона нет ни в одном турнире рума.
+          addon_allowed: false
+        },
+        limits(game_type, limits)
+      )
     end)
   end
 
-  defp duration_of(:hyper), do: 180
-  defp duration_of(:turbo), do: 300
-  defp duration_of(_regular), do: 600
+  defp limits(:short_deck, {_small, big, _ante}), do: %{small_blind: 0, big_blind: 0, ante: big}
+  defp limits(_holdem, {small, big, ante}), do: %{small_blind: small, big_blind: big, ante: ante}
 
   @doc """
   Сетка выплат: доли по диапазонам явки.
@@ -137,95 +314,129 @@ defmodule BlockPoker.Tournaments.Grid do
   end
 
   @doc """
-  Шаблоны стандартной сетки.
+  Шаблоны сетки: по одному на каждую цену каждого семейства.
 
-  Цены — в минимальных единицах: `1100` это доллар взноса и десять
-  центов комиссии. Комиссия примерно десятая часть взноса — это и есть
-  доход рума с турнира, потому что рейка с банка здесь нет и быть не
-  может.
+  `only: :main | :play_money` сужает набор до боевых или тестовых.
   """
   @spec rows(keyword()) :: [map()]
   def rows(opts \\ []) do
-    for currency <- currencies(opts[:currency]),
-        {buy_in, fee} <- prices(currency),
-        speed <- speeds(opts[:speed]),
-        game_type <- game_types(opts[:game_type]) do
-      row(currency, buy_in, fee, speed, game_type)
+    case Keyword.get(opts, :only) do
+      :main -> main_rows()
+      :play_money -> dev_rows()
+      nil -> main_rows() ++ dev_rows()
     end
   end
 
-  defp row(currency, buy_in, fee, speed, game_type) do
-    %{
-      attrs: %{
-        name: name(currency, buy_in, fee, speed, game_type),
-        description: description(speed),
-        game_type: game_type,
-        currency: currency,
+  defp main_rows do
+    for template <- @templates, price <- template.prices do
+      {buy_in, fee} = Map.fetch!(@prices, price)
+
+      row(template, %{
+        name: "#{template.name} $#{price}",
+        currency: :main,
         buy_in: buy_in,
         entry_fee: fee,
-        starting_stack: 5000,
         table_size: 6,
-        min_players: 2,
-        max_players: 1000,
-        rebuy_allowed: true,
-        max_rebuys: 2,
-        addon_cost: div(buy_in, 2),
-        addon_stack: 5000,
-        registration_opens_before: 3600,
-        cancel_refund_grace_seconds: 300,
-        sort_order: sort_order(currency, buy_in)
-      },
-      levels: blind_levels(speed),
+        min_players: 6,
+        structure: template.structure,
+        schedules: schedules(template.schedule),
+        registration_opens_before: opens_before(template.structure),
+        sort_order: price
+      })
+    end
+  end
+
+  defp dev_rows do
+    for template <- @dev_templates do
+      row(template, %{
+        name: template.name,
+        currency: :play_money,
+        buy_in: 100,
+        entry_fee: 10,
+        table_size: template.table_size,
+        # Тестовый турнир обязан стартовать втроём: собрать шестерых
+        # разработчиков к каждой минуте невозможно.
+        min_players: 3,
+        structure: :dev,
+        schedules: schedules({:every, 1}),
+        registration_opens_before: 120,
+        sort_order: 0
+      })
+    end
+  end
+
+  defp row(template, params) do
+    %{
+      attrs:
+        Map.merge(
+          %{
+            name: params.name,
+            description: template.description,
+            game_type: template.game_type,
+            currency: params.currency,
+            buy_in: params.buy_in,
+            entry_fee: params.entry_fee,
+            starting_stack: @starting_stack,
+            table_size: params.table_size,
+            min_players: params.min_players,
+            max_players: 10_000,
+            # Ре-энтри без счётчика: ограничивает их уровень, а не лимит.
+            rebuy_allowed: true,
+            max_rebuys: nil,
+            # Аддона нет: нулевая цена и есть его отсутствие.
+            addon_cost: 0,
+            addon_stack: 0,
+            bounty_part: bounty_part(template, params.buy_in),
+            bounty_progressive: template.bounty,
+            registration_opens_before: params.registration_opens_before,
+            cancel_refund_grace_seconds: 300,
+            sort_order: params.sort_order
+          },
+          colors(template)
+        ),
+      levels: blind_levels(params.structure, template.game_type),
       payouts: payouts(),
-      schedules: schedules(speed)
+      schedules: params.schedules
     }
   end
 
-  # Расписание задаёт лицо рума: обычные турниры вечером, турбо чаще,
-  # гипер — каждый час, потому что он длится сорок минут.
-  defp schedules(:hyper), do: [%{start_time: ~T[20:00:00], repeat: true}]
-  defp schedules(:turbo), do: [%{start_time: ~T[21:00:00], repeat: true}]
-  defp schedules(_regular), do: [%{start_time: ~T[21:30:00], repeat: true}]
+  # Половина взноса становится головой. Делится она пополам (умолчание
+  # `bounty_split_ppm`): половина деньгами убийце, половина в его
+  # собственную голову — это и есть PKO.
+  defp bounty_part(%{bounty: true}, buy_in), do: div(buy_in, 2)
+  defp bounty_part(_template, _buy_in), do: 0
 
-  defp name(currency, buy_in, fee, speed, game_type) do
-    "#{discipline_label(game_type)} #{speed_label(speed)} #{price_label(currency, buy_in + fee)}"
+  # У тестовых семейств своего цвета нет: они инструмент, а не витрина.
+  defp colors(template) do
+    {felt, background} = Map.fetch!(@visuals, Map.get(template, :visual, :green))
+    {final_felt, final_background} = @final_visual
+
+    %{
+      felt_color: felt,
+      background_color: background,
+      final_felt_color: final_felt,
+      final_background_color: final_background
+    }
   end
 
-  defp description(:hyper), do: "Уровень три минуты: турнир на один вечер"
-  defp description(:turbo), do: "Уровень пять минут"
-  defp description(_regular), do: "Классическая структура, уровень десять минут"
+  # Запуск каждые N минут разворачивается в строки расписания: одна
+  # строка — одно время суток. Отдельного «интервала» в схеме нет
+  # намеренно, иначе о том, когда стартует турнир, знали бы два поля.
+  defp schedules({:every, minutes}) do
+    for minute <- 0..(1440 - 1)//minutes do
+      %{start_time: Time.new!(div(minute, 60), rem(minute, 60), 0), repeat: true}
+    end
+  end
 
-  defp discipline_label(:short_deck), do: "Short Deck"
-  defp discipline_label(_holdem), do: "Hold'em"
+  defp schedules({:weekly, weekday, time}) do
+    [%{start_time: time, weekday: weekday, repeat: true}]
+  end
 
-  defp speed_label(:hyper), do: "Hyper"
-  defp speed_label(:turbo), do: "Turbo"
-  defp speed_label(_regular), do: "Regular"
-
-  # Цена печатается так, как её видит игрок: доллары для реальных денег,
-  # целые фишки для игровых.
-  defp price_label(:main, price), do: "$#{div(price, 100)}.#{pad(rem(price, 100))}"
-  defp price_label(:play_money, price), do: "#{price}"
-
-  defp pad(cents), do: String.pad_leading(Integer.to_string(cents), 2, "0")
-
-  # Порядок витрины внутри валюты — по цене входа: дешёвые выше.
-  defp sort_order(:main, buy_in), do: div(buy_in, 100)
-  defp sort_order(:play_money, buy_in), do: div(buy_in, 1000)
-
-  # Взнос и комиссия. Комиссия — примерно десятая часть, округлённая
-  # к привычной глазу цифре.
-  defp prices(:main), do: [{100, 10}, {500, 50}, {2000, 200}, {10_000, 900}]
-  defp prices(:play_money), do: [{10_000, 1000}, {50_000, 5000}, {200_000, 18_000}]
-
-  defp currencies(nil), do: [:main, :play_money]
-  defp currencies(currency), do: [currency]
-
-  defp speeds(nil), do: [:regular, :turbo, :hyper]
-  defp speeds(speed), do: [speed]
-
-  defp game_types(nil), do: [:texas_holdem]
-  defp game_types(game_type), do: [game_type]
+  # Регистрация открывается не раньше, чем стартовал предыдущий запуск
+  # того же семейства: иначе витрина показывает три одинаковых турнира,
+  # и игрок не понимает, в какой из них он вошёл.
+  defp opens_before(:hyper), do: 1800
+  defp opens_before(_structure), do: 3600
 
   @doc """
   Разворачивает сетку в БД. Идемпотентно: шаблон с тем же естественным

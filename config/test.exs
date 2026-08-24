@@ -43,3 +43,7 @@ config :phoenix, :plug_init_mode, :runtime
 # Sort query params output of verified routes for robust url comparisons
 config :phoenix,
   sort_verified_routes_query_params: true
+
+# Процессы турниров в тестах поднимает сам тест: ему нужны инжектированные
+# часы и доступ к песочнице БД, а регистрация в контексте про это не знает.
+config :block_poker, :tournament_autostart, false

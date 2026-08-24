@@ -27,6 +27,8 @@ defmodule BlockPoker.Tournaments do
   `idempotency_key` в `wallet_entries`.
   """
 
+  require Logger
+
   import Ecto.Query
 
   alias BlockPoker.Engine.{BlindSchedule, Bounty, TournamentPayout}
@@ -43,7 +45,9 @@ defmodule BlockPoker.Tournaments do
     Schedule,
     SeatSnapshot,
     Tournament,
-    TournamentSetting
+    TournamentServer,
+    TournamentSetting,
+    TournamentSupervisor
   }
 
   alias BlockPoker.Wallet
@@ -144,6 +148,22 @@ defmodule BlockPoker.Tournaments do
       {:ok, %{setting: setting}} -> get_setting(setting.id)
       {:error, _step, reason, _changes} -> {:error, reason}
     end
+  end
+
+  @doc """
+  Сносит всю турнирную сетку: шаблоны, их уровни, выплаты, расписание
+  и поднятые по расписанию инстансы.
+
+  Существует ради `mix tournament.seed --reset`. Инстансы уезжают вместе
+  с шаблонами не по небрежности, а потому что турнир без шаблона
+  недоигрываем: структуру и сетку выплат он читает из него.
+  """
+  @spec delete_all_settings() :: %{settings: non_neg_integer(), tournaments: non_neg_integer()}
+  def delete_all_settings do
+    {tournaments, _returned} = Repo.delete_all(Tournament)
+    {settings, _returned} = Repo.delete_all(TournamentSetting)
+
+    %{settings: settings, tournaments: tournaments}
   end
 
   @doc """
@@ -460,6 +480,7 @@ defmodule BlockPoker.Tournaments do
     |> case do
       {:ok, %{entry: entry, payment: payment}} ->
         Enum.each(payment.entries, &Wallet.publish(user_id, &1))
+        ensure_server(entry.tournament_id)
         announce_tournament(entry.tournament_id)
         {:ok, entry}
 
@@ -1464,6 +1485,35 @@ defmodule BlockPoker.Tournaments do
   # Наружу ядро говорит фактом, а кто на него подписан — его не касается
   # (§3 CLAUDE.md). Событие несёт только идентификатор: подписчик читает
   # состояние сам и не зависит от того, что мы решили в него положить.
+  # Процесс инстанса поднимается **первой регистрацией**, а не открытием
+  # регистрации по расписанию.
+  #
+  # Причина арифметическая: рум запускает турниры каждые полчаса, и
+  # инстансов в сутки выходит под тысячу. Держать под каждый из них
+  # процесс с открытия регистрации значило бы держать сотни процессов,
+  # подавляющее большинство которых не увидит ни одного игрока и
+  # отменится по недобору. Пустому турниру процесс не нужен: витрине
+  # хватает строки в БД, а старту — планировщика, который поднимет
+  # процесс сам.
+  #
+  # Повторный вызов безвреден, а неудача не отменяет регистрацию: деньги
+  # уже в ledger, и процесс всё равно поднимет планировщик на старте.
+  defp ensure_server(tournament_id) do
+    if autostart?() and TournamentServer.whereis(tournament_id) == nil do
+      case TournamentSupervisor.start_tournament(tournament_id: tournament_id) do
+        {:ok, _pid} -> :ok
+        {:error, {:already_started, _pid}} -> :ok
+        {:error, reason} -> Logger.error("не поднялся турнир: #{inspect(reason)}")
+      end
+    end
+
+    :ok
+  end
+
+  # В тестах процессы поднимает сам тест: `start_supervised!` даёт ему
+  # и контроль над часами, и доступ к песочнице БД.
+  defp autostart?, do: Application.get_env(:block_poker, :tournament_autostart, true)
+
   defp announce_tournament(tournament_id) do
     PubSub.broadcast(@pubsub, lobby_topic(), {:tournament_updated, tournament_id})
     PubSub.broadcast(@pubsub, topic(tournament_id), {:tournament_updated, tournament_id})

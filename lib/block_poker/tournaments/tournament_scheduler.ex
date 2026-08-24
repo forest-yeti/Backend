@@ -148,7 +148,9 @@ defmodule BlockPoker.Tournaments.TournamentScheduler do
     for tournament <- due_to_open(now) do
       case Tournaments.open_registration(tournament) do
         {:ok, opened} ->
-          ensure_server(opened)
+          # Процесс инстанса здесь **не** поднимается: пустому турниру он
+          # не нужен, а рум анонсирует их сотнями в сутки. Поднимет его
+          # первая регистрация (см. `Tournaments`) или старт ниже.
           schedule_cancel(opened)
 
         {:error, reason} ->
@@ -210,8 +212,9 @@ defmodule BlockPoker.Tournaments.TournamentScheduler do
 
   # --- Процессы ------------------------------------------------------------
 
-  # Инстанс поднимается в момент открытия регистрации и живёт до конца
-  # турнира. Повторный вызов безвреден: процесс уже есть.
+  # Инстанс поднимается первой регистрацией и живёт до конца турнира;
+  # здесь он подстраховывается на старте. Повторный вызов безвреден:
+  # процесс уже есть.
   defp ensure_server(%Tournament{} = tournament) do
     if TournamentServer.whereis(tournament.id) do
       :ok
