@@ -55,6 +55,11 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
   @pubsub BlockPoker.PubSub
 
+  # Сколько стол ещё стоит после итога, прежде чем `TableSupervisor` его
+  # остановит. Как в Sit & Go (`TableServer.maybe_settle/1`): игрок должен
+  # успеть увидеть результат в своём канале, а не наткнуться на тишину.
+  @tables_close_ms 15_000
+
   defmodule Player do
     @moduledoc """
     Участник глазами турнира: вход, место за столом и цена головы.
@@ -103,6 +108,11 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       # но ещё не присвоено. `%{entry_id => %{place, user_id, timer}}`.
       pending_reentries: %{},
       status: :registering,
+      # Конец позднего входа стенными часами — то же значение, что
+      # проставлено на инстансе и что видит клиент (`LobbyEntry`).
+      # Считается один раз на старте и дальше не двигается: см.
+      # `late_reg_open?/1`.
+      late_reg_until: nil,
       # Места присваиваются с конца: первый вылетевший получает номер,
       # равный числу живых плюс один.
       results: [],
@@ -273,6 +283,12 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
   def handle_info(:break_over, state), do: {:noreply, end_break(state)}
 
+  # Пауза после итога вышла: столы, которые турнир ещё держит, можно
+  # останавливать — победитель уже получил результат в свой канал.
+  def handle_info(:close_finished_tables, state) do
+    {:noreply, close_tables(state, Map.keys(state.tables))}
+  end
+
   # Окно ре-энтри истекло: место присвоено, игрок в результатах.
   def handle_info({:reentry_expired, entry_id}, state) do
     case Map.fetch(state.pending_reentries, entry_id) do
@@ -307,10 +323,11 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     if length(entries) < state.setting.min_players do
       {:reply, {:error, :not_enough_players}, state}
     else
-      {:ok, _tournament} = Tournaments.start(tournament, late_reg_until(state))
+      until = late_reg_until(state)
+      {:ok, _tournament} = Tournaments.start(tournament, until)
 
       state =
-        %{state | status: :running}
+        %{state | status: :running, late_reg_until: until}
         |> seat_all(entries)
         |> mark_seated_playing()
         |> arm_level()
@@ -977,19 +994,23 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     }
   end
 
-  # Вход открыт, пока его разрешает **текущий уровень**: одно правило и
-  # для поздней регистрации, и для возврата выбывшего.
+  # Вход открыт, пока не закрылась поздняя регистрация. Проверяем по
+  # `late_reg_until`, а не по флагу текущего уровня: у уровня часы стоят
+  # на перерыве (`TournamentBreak`), и после перерыва он ещё разрешал бы
+  # вход, когда по стенным часам окно уже закрыто, — игрок получил бы
+  # предложение, которое на оплате тут же отклонит `Tournaments.reenter/2`,
+  # а турнир до этого отказа не считался бы закончившимся.
   defp reentry_open?(state, entry_id) do
     player = Map.get(state.players, entry_id)
 
     player != nil and state.snapshot["rebuy_allowed"] == true and
-      level_allows_reentry?(state) and reentries_left(state, player.user_id) > 0
+      late_reg_open?(state) and reentries_left(state, player.user_id) > 0
   end
 
-  defp level_allows_reentry?(state) do
-    (state.snapshot["levels"] || [])
-    |> Enum.find(%{}, &(&1["level"] == state.level))
-    |> Map.get("rebuy_allowed", false)
+  defp late_reg_open?(%State{late_reg_until: nil}), do: false
+
+  defp late_reg_open?(%State{late_reg_until: until} = state) do
+    DateTime.compare(state.wall.(), until) == :lt
   end
 
   # Сколько повторных входов осталось **этому человеку**. `nil` в
@@ -1109,6 +1130,19 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     end
   end
 
+  # Рассылка в канал стола, а не турнира: игрок за столом на топик
+  # турнира не подписан (это топик окна лобби), только на топик своей
+  # комнаты — тот же, что слушает `Socket.TableChannel`.
+  defp notify_tables(state, event, payload) do
+    Enum.each(state.tables, fn {table_id, _pid} ->
+      PubSub.broadcast(
+        @pubsub,
+        TableServer.topic(table_id),
+        {:table_event, event, Map.put(payload, :room_id, table_id)}
+      )
+    end)
+  end
+
   defp close_tables(state, table_ids) do
     Enum.reduce(table_ids, state, fn table_id, acc ->
       case Map.pop(acc.tables, table_id) do
@@ -1172,9 +1206,17 @@ defmodule BlockPoker.Tournaments.TournamentServer do
         {:ok, tournament} = ensure_pool_fixed(tournament)
         {:ok, payouts} = Tournaments.settle(tournament, results)
 
-        broadcast(state, "tournament_finished", %{results: results, payouts: payouts})
+        payload = %{results: results, payouts: payouts}
 
-        state = close_tables(state, Map.keys(state.tables))
+        broadcast(state, "tournament_finished", payload)
+
+        # Победитель сидит в канале своего стола, а не турнира — сам он
+        # на `Tournaments.topic/1` не подписан. Без этого сообщения его
+        # канал молча замолчит: `TableChannel` процесс стола не
+        # мониторит, и `close_finished_tables` ниже для него неотличим
+        # от обрыва связи.
+        notify_tables(state, "tournament_finished", payload)
+        schedule(:close_finished_tables, @tables_close_ms)
 
         %{state | status: :finished, results: results}
 

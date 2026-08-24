@@ -74,14 +74,13 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
     wallet.amount
   end
 
-  defp start_server(tournament_id) do
+  defp start_server(tournament_id, opts \\ []) do
     # Столы с ручными таймерами: пауза между раздачами в тестах не
     # отсчитывается реальным временем (§11 CLAUDE.md).
-    pid =
-      start_supervised!(
-        {TournamentServer, tournament_id: tournament_id, room_opts: [timers: :manual]},
-        id: {TournamentServer, tournament_id}
-      )
+    args =
+      Keyword.merge([tournament_id: tournament_id, room_opts: [timers: :manual]], opts)
+
+    pid = start_supervised!({TournamentServer, args}, id: {TournamentServer, tournament_id})
 
     Sandbox.allow(BlockPoker.Repo, self(), pid)
     pid
@@ -217,6 +216,24 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
 
       assert chips_at(ctx.table) == before
       assert before == 2 * 5000
+    end
+
+    test "финальный стол узнаёт об итоге в своём канале, а не только в турнирном", ctx do
+      # Победитель сидит в топике стола (`table:<id>`), а не турнира: без
+      # отдельного броадкаста туда его канал не узнал бы, что игра
+      # кончилась, и молча ждал бы дальше — `TableSupervisor.stop_room/1`
+      # его процесс не мониторит.
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, TableServer.topic(ctx.table_id))
+
+      assert play_until_finished(ctx.pid, ctx.table) == :finished
+
+      assert_received {:table_event, "tournament_finished", payload}
+      assert payload.room_id == ctx.table_id
+      assert length(payload.results) == 2
+
+      # Стол не пропадает в ту же секунду — победитель успевает увидеть
+      # итог, прежде чем комнату остановят.
+      assert Process.alive?(ctx.table)
     end
 
     test "турнир доигрывается до победителя и платит", ctx do
@@ -368,6 +385,38 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(tournament.id))
 
       :finished = play_until_finished(pid, table)
+
+      refute_received {:tournament_event, "reentry_offer", _offer}
+      assert_received {:tournament_event, "player_busted", _busted}
+    end
+
+    test "поздняя регистрация закрыта по часам — ре-энтри не предлагается, даже если уровень ещё разрешает" do
+      # Уровень остаётся первым (ребайным) весь тест: `rebuy_allowed`
+      # там `true`. Часы турнира при этом уводим за `late_reg_until` —
+      # ровно так выглядит стол после перерыва, где счётчик уровня стоял,
+      # а стенные часы продолжали идти (см. `TournamentBreak`).
+      setting = fast_setting(%{rebuy_allowed: true, max_rebuys: 1})
+      tournament = tournament_fixture(setting)
+
+      one = user_fixture()
+      two = user_fixture()
+
+      {:ok, _first} = Tournaments.register(tournament.id, one.id)
+      {:ok, _second} = Tournaments.register(tournament.id, two.id)
+
+      {:ok, clock} = Agent.start_link(fn -> DateTime.utc_now() end)
+      wall = fn -> Agent.get(clock, & &1) end
+
+      pid = start_server(tournament.id, wall: wall)
+      :ok = TournamentServer.start_tournament(pid)
+      [{_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(tournament.id))
+
+      # Уровень 1 длится 600 секунд — уводим часы на 601-ю.
+      Agent.update(clock, &DateTime.add(&1, 601, :second))
+
+      play_until_bust(pid, table)
 
       refute_received {:tournament_event, "reentry_offer", _offer}
       assert_received {:tournament_event, "player_busted", _busted}
