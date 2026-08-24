@@ -119,6 +119,7 @@ defmodule Socket.Views.TournamentView do
   @spec state(map()) :: map()
   def state(state) do
     %{
+      tournament_id: state.tournament_id,
       status: state.status,
       level: state.level,
       small_blind: state.limits.small_blind,
@@ -128,6 +129,10 @@ defmodule Socket.Views.TournamentView do
       entries: state.entries,
       tables: state.tables,
       on_break: state.on_break,
+      # Игра «рука в руку» на пузыре: пока флаг поднят, столы ждут друг
+      # друга, и пауза между раздачами — это не подвисший стол.
+      hand_for_hand: state.hand_for_hand,
+      next_payout_place: state.next_payout_place,
       final_table: state.final_table
     }
   end
