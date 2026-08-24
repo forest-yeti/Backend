@@ -94,6 +94,20 @@ defmodule Api.HistoryControllerTest do
       # содержимое OFC-истории.
       assert by_seat[1]["box"] != nil
     end
+
+    test "у участников реплея есть ники", %{conn: conn, owner: owner, opponent: opponent} do
+      rows = holdem_rows(%{users: [opponent.id, owner.id]})
+      History.write(rows)
+
+      conn = get(authed(conn, owner), "/api/history/hands/#{rows.hand.id}")
+      body = json_response(conn, 200)
+
+      # Место в разных раздачах занимают разные люди: без ников реплей —
+      # таблица номеров мест, и разобрать по ней раздачу нельзя.
+      names = Enum.map(body["players"], & &1["name"])
+      assert opponent.name in names
+      assert owner.name in names
+    end
   end
 
   describe "GET /api/history/hands" do

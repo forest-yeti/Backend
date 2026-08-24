@@ -167,7 +167,13 @@ defmodule BlockPoker.History.Queries do
 
   defp holdem_replay(user_id, hand_id) do
     with %HandRecord{} = hand <- Repo.get(HandRecord, hand_id),
-         players = Repo.all(from p in HandPlayer, where: p.hand_id == ^hand_id, order_by: p.seat),
+         players =
+           Repo.all(
+             from p in HandPlayer,
+               where: p.hand_id == ^hand_id,
+               order_by: p.seat,
+               preload: [:user]
+           ),
          true <- Enum.any?(players, &(&1.user_id == user_id)) do
       actions =
         Repo.all(from a in HandAction, where: a.hand_id == ^hand_id, order_by: a.seq)
@@ -193,6 +199,10 @@ defmodule BlockPoker.History.Queries do
     %{
       seat: player.seat,
       user_id: player.user_id,
+      # Ник участника: реплей без имён — таблица номеров мест. Место в
+      # разных раздачах занимают разные люди, и по одному номеру раздачу
+      # не разобрать.
+      name: player_name(player),
       position: player.position,
       starting_stack: player.starting_stack,
       hole_cards: if(hidden?, do: [], else: player.hole_cards),
@@ -209,7 +219,12 @@ defmodule BlockPoker.History.Queries do
   defp ofc_replay(user_id, hand_id) do
     with %OfcHand{} = hand <- Repo.get(OfcHand, hand_id),
          players =
-           Repo.all(from p in OfcHandPlayer, where: p.ofc_hand_id == ^hand_id, order_by: p.seat),
+           Repo.all(
+             from p in OfcHandPlayer,
+               where: p.ofc_hand_id == ^hand_id,
+               order_by: p.seat,
+               preload: [:user]
+           ),
          true <- Enum.any?(players, &(&1.user_id == user_id)) do
       {:ok,
        %{
@@ -228,6 +243,7 @@ defmodule BlockPoker.History.Queries do
     %{
       seat: player.seat,
       user_id: player.user_id,
+      name: player_name(player),
       box: player.box,
       discards: if(player.user_id == user_id, do: player.discards, else: []),
       foul: player.foul,
@@ -300,6 +316,12 @@ defmodule BlockPoker.History.Queries do
       :auto
     ])
   end
+
+  # Ник берётся из связи, а не из копии в раздаче: смена ника должна быть
+  # видна и в старых раздачах — это тот же человек. Незагруженная связь
+  # даёт `nil`, и клиент рисует место без имени.
+  defp player_name(%{user: %{name: name}}) when is_binary(name), do: name
+  defp player_name(_player), do: nil
 
   # --- сводка и график -------------------------------------------------------
 
