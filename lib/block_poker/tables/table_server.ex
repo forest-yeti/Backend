@@ -1675,6 +1675,11 @@ defmodule BlockPoker.Tables.TableServer do
     meta = %{
       game_mode: room.mode.game_mode_id(),
       setting_id: Map.get(room.setting, :id),
+      # Валюта берётся у лимита, а не у режима: и кэш, и турниры бывают
+      # и денежными, и на игровые фишки. У турнирного стола её в лимите
+      # нет — и не нужно: за столом там играют турнирными фишками, а
+      # деньги турнира живут в его результате.
+      currency: Map.get(room.setting, :currency) || :main,
       tournament_id: Map.get(room.setting, :tournament_id),
       level_number: room.tournament && room.tournament.level,
       hand_number: room.hands_played + 1,

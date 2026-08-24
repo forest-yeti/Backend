@@ -69,6 +69,13 @@ defmodule BlockPoker.History.PlayerStatsDaily do
     field :game_mode, Ecto.Enum, values: [:cash, :sit_and_go, :mtt, :ofc_cash], primary_key: true
     field :setting_id, :binary_id, primary_key: true
 
+    # Валюта в ключе по той же причине, что и режим: строки разных
+    # валют складывать нечем — центы и игровые фишки не одна шкала.
+    field :currency, Ecto.Enum,
+      values: [:main, :play_money],
+      primary_key: true,
+      default: :main
+
     for counter <- @counters do
       field counter, :integer, default: 0
     end

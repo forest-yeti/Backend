@@ -27,6 +27,7 @@ defmodule BlockPoker.HistoryFixtures do
         room_id: Map.get(overrides, :room_id, Ecto.UUID.generate()),
         game_mode: mode,
         setting_id: setting_id,
+        currency: Map.get(overrides, :currency, :main),
         tournament_id: overrides[:tournament_id],
         level_number: overrides[:level_number],
         hand_number: Map.get(overrides, :hand_number, 1),
@@ -69,8 +70,20 @@ defmodule BlockPoker.HistoryFixtures do
         action_row(hand_id, 3, :fold, 2, 0)
       ],
       stats: [
-        stats_row(winner, day, mode, setting_id, %{net: 150, invested: 150, won: 300, bb_sum: 100}),
-        stats_row(loser, day, mode, setting_id, %{net: -150, invested: 150, won: 0, bb_sum: 100})
+        stats_row(winner, day, mode, setting_id, %{
+          net: 150,
+          invested: 150,
+          won: 300,
+          bb_sum: 100,
+          currency: Map.get(overrides, :currency, :main)
+        }),
+        stats_row(loser, day, mode, setting_id, %{
+          net: -150,
+          invested: 150,
+          won: 0,
+          bb_sum: 100,
+          currency: Map.get(overrides, :currency, :main)
+        })
       ]
     }
   end

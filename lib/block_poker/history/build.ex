@@ -58,6 +58,7 @@ defmodule BlockPoker.History.Build do
         room_id: report.room_id,
         game_mode: report.game_mode,
         setting_id: report.setting_id,
+        currency: report.currency || :main,
         tournament_id: report.tournament_id,
         level_number: report.level_number,
         hand_number: report.hand_number,
@@ -357,6 +358,7 @@ defmodule BlockPoker.History.Build do
         room_id: report.room_id,
         game_mode: report.game_mode,
         setting_id: report.setting_id,
+        currency: report.currency || :main,
         hand_number: report.hand_number,
         variant: to_string(Ofc.Hand.id()),
         button_seat: report.button_seat,
@@ -451,7 +453,8 @@ defmodule BlockPoker.History.Build do
         user_id: player.user_id,
         day: day,
         game_mode: report.game_mode,
-        setting_id: setting_id
+        setting_id: setting_id,
+        currency: report.currency || :main
       }
       |> Map.merge(counters(report, player))
     end)

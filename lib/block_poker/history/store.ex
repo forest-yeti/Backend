@@ -34,7 +34,7 @@ defmodule BlockPoker.History.Store do
   alias BlockPoker.Repo
   alias Ecto.Multi
 
-  @stat_keys [:user_id, :day, :game_mode, :setting_id]
+  @stat_keys [:user_id, :day, :game_mode, :setting_id, :currency]
 
   @doc """
   Записать собранную раздачу. Повтор той же раздачи — no-op, а не вторая
@@ -179,7 +179,9 @@ defmodule BlockPoker.History.Store do
       Ecto.UUID.dump!(row.user_id),
       row.day,
       to_string(row.game_mode),
-      Ecto.UUID.dump!(row.setting_id)
+      Ecto.UUID.dump!(row.setting_id),
+      # Валюта в ключе: строка дня своя у каждой шкалы сумм.
+      row |> Map.get(:currency, :main) |> to_string()
     ] ++ Enum.map(counters, &Map.get(row, &1, 0)) ++ [now, now]
   end
 end

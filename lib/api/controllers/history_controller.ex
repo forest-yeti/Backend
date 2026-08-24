@@ -40,10 +40,17 @@ defmodule Api.HistoryController do
 
   def stats(conn, params) do
     with {:ok, opts} <- HistoryParams.period(params) do
-      render(conn, :stats,
-        stats: History.stats(conn.assigns.user_id, opts),
-        tournaments: History.tournament_summary(conn.assigns.user_id, opts)
-      )
+      stats = History.stats(conn.assigns.user_id, opts)
+
+      # Турнирная сводка считается в той же валюте, что и режимы: иначе
+      # ROI сложил бы центы с игровыми фишками.
+      tournaments =
+        History.tournament_summary(
+          conn.assigns.user_id,
+          Map.put(opts, :currency, stats.currency)
+        )
+
+      render(conn, :stats, stats: stats, tournaments: tournaments)
     end
   end
 

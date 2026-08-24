@@ -17,6 +17,8 @@ defmodule BlockPoker.History.HandRecord do
   @type t :: %__MODULE__{}
 
   @modes [:cash, :sit_and_go, :mtt]
+  # Масштаб сумм раздачи: центы у `main`, целые фишки у `play_money`.
+  @currencies [:main, :play_money]
 
   @primary_key {:id, :binary_id, autogenerate: false}
   @foreign_key_type :binary_id
@@ -24,6 +26,7 @@ defmodule BlockPoker.History.HandRecord do
     field :room_id, :binary_id
     field :game_mode, Ecto.Enum, values: @modes
     field :setting_id, :binary_id
+    field :currency, Ecto.Enum, values: @currencies, default: :main
     field :tournament_id, :binary_id
 
     # Номер уровня хранится **вместе** с фактическими номиналами, а не
@@ -68,6 +71,7 @@ defmodule BlockPoker.History.HandRecord do
       :room_id,
       :game_mode,
       :setting_id,
+      :currency,
       :tournament_id,
       :level_number,
       :hand_number,

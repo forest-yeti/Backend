@@ -1676,6 +1676,7 @@ defmodule BlockPoker.Tournaments do
         title: setting.name,
         tournament_setting_id: setting.id,
         format: :mtt,
+        currency: setting.currency,
         bounty: setting.bounty_part > 0,
         entry_kind: if(entry.entry_number > 1, do: :reentry, else: :initial),
         entry_index: entry.entry_number - 1,

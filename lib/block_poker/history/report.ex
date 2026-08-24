@@ -31,6 +31,9 @@ defmodule BlockPoker.History.Report do
     :room_id,
     :game_mode,
     :setting_id,
+    # Масштаб сумм раздачи. Без неё `1700` не значит ничего:
+    # `main` считается в центах, `play_money` — в целых фишках.
+    :currency,
     :tournament_id,
     :level_number,
     :button_seat,

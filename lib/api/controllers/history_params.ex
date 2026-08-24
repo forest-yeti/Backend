@@ -15,6 +15,7 @@ defmodule Api.HistoryParams do
   alias BlockPoker.History.PlayerStatsDaily
 
   @modes ~w(cash sit_and_go mtt ofc_cash)
+  @currencies ~w(main play_money)
   @formats ~w(sit_and_go mtt)
 
   @doc "Параметры страницы списка раздач."
@@ -48,8 +49,9 @@ defmodule Api.HistoryParams do
     with {:ok, from} <- datetime(params["from"]),
          {:ok, to} <- datetime(params["to"]),
          {:ok, modes} <- modes(params["game_mode"]),
+         {:ok, currency} <- currency(params["currency"]),
          {:ok, setting_id} <- uuid(params["setting_id"]) do
-      {:ok, %{from: from, to: to, game_mode: modes, setting_id: setting_id}}
+      {:ok, %{from: from, to: to, game_mode: modes, currency: currency, setting_id: setting_id}}
     end
   end
 
@@ -112,6 +114,21 @@ defmodule Api.HistoryParams do
   end
 
   defp modes(_value), do: {:error, :validation_failed}
+
+  # Валюта задаёт масштаб сумм, а не оформление: центы и игровые фишки
+  # нельзя ни складывать, ни рисовать одной шкалой.
+  defp currency(nil), do: {:ok, nil}
+  defp currency(""), do: {:ok, nil}
+
+  defp currency(value) when is_binary(value) do
+    if value in @currencies do
+      {:ok, String.to_existing_atom(value)}
+    else
+      {:error, :validation_failed}
+    end
+  end
+
+  defp currency(_value), do: {:error, :validation_failed}
 
   defp formats(nil), do: {:ok, nil}
   defp formats(value) when is_binary(value), do: formats(String.split(value, ","))

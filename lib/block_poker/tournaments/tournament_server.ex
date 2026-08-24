@@ -1112,6 +1112,8 @@ defmodule BlockPoker.Tournaments.TournamentServer do
         title: state.setting.name,
         tournament_setting_id: state.setting.id,
         format: :mtt,
+        # Масштаб взносов и призов: без него история покажет центы фишками.
+        currency: state.setting.currency,
         bounty: state.setting.bounty_part > 0,
         entry_kind: if(entry.entry_number > 1, do: :reentry, else: :initial),
         # Нумерация входов с нуля: `entry_number` в рабочей таблице

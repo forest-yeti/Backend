@@ -25,6 +25,7 @@ defmodule BlockPoker.History.OfcHand do
     field :room_id, :binary_id
     field :game_mode, Ecto.Enum, values: [:ofc_cash]
     field :setting_id, :binary_id
+    field :currency, Ecto.Enum, values: [:main, :play_money], default: :main
     field :hand_number, :integer, default: 0
     field :variant, :string
 
@@ -47,6 +48,7 @@ defmodule BlockPoker.History.OfcHand do
       :room_id,
       :game_mode,
       :setting_id,
+      :currency,
       :hand_number,
       :variant,
       :button_seat,

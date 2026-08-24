@@ -180,6 +180,39 @@ defmodule Api.HistoryControllerTest do
       refute Map.has_key?(body["modes"]["mtt"], "net")
       assert body["modes"]["mtt"]["hands"] == 1
     end
+
+    test "валюта приходит рядом с числами и не смешивается",
+         %{conn: conn, owner: owner, opponent: opponent} do
+      History.write(holdem_rows(%{users: [owner.id, opponent.id]}))
+
+      History.write(
+        holdem_rows(%{
+          users: [owner.id, opponent.id],
+          hand_number: 2,
+          currency: :play_money
+        })
+      )
+
+      body = json_response(get(authed(conn, owner), "/api/history/stats"), 200)
+
+      # Центы и игровые фишки — разные шкалы: одной цифрой их не покажешь,
+      # и клиент обязан знать, в какой шкале ему пришли суммы.
+      assert body["currency"] in ["main", "play_money"]
+      assert Enum.sort(body["currencies"]) == ["main", "play_money"]
+      assert body["modes"]["cash"]["hands"] == 1
+
+      other = if body["currency"] == "main", do: "play_money", else: "main"
+
+      switched =
+        json_response(get(authed(conn, owner), "/api/history/stats?currency=#{other}"), 200)
+
+      assert switched["currency"] == other
+      assert switched["modes"]["cash"]["hands"] == 1
+    end
+
+    test "неизвестная валюта — 422", %{conn: conn, owner: owner} do
+      assert json_response(get(authed(conn, owner), "/api/history/stats?currency=euro"), 422)
+    end
   end
 
   describe "GET /api/history/tournaments/:id" do

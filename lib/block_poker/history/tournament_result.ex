@@ -43,6 +43,8 @@ defmodule BlockPoker.History.TournamentResult do
     field :title, :string
     field :tournament_setting_id, :binary_id
     field :format, Ecto.Enum, values: @formats
+    # Масштаб взносов и призов этого входа.
+    field :currency, Ecto.Enum, values: [:main, :play_money], default: :main
     field :bounty, :boolean, default: false
 
     field :entry_kind, Ecto.Enum, values: @kinds, default: :initial
@@ -98,6 +100,7 @@ defmodule BlockPoker.History.TournamentResult do
       :title,
       :tournament_setting_id,
       :format,
+      :currency,
       :bounty,
       :entry_kind,
       :entry_index,

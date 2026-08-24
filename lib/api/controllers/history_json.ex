@@ -25,7 +25,15 @@ defmodule Api.HistoryJSON do
   def hand(%{replay: replay}), do: replay
 
   def stats(%{stats: stats, tournaments: tournaments}) do
-    %{modes: stats, tournaments: tournaments}
+    # Валюта отдаётся рядом с числами, а не подразумевается: клиент обязан
+    # знать, в какой шкале ему пришли суммы, а `currencies` говорит, есть
+    # ли ему из чего выбирать.
+    %{
+      modes: stats.modes,
+      tournaments: tournaments,
+      currency: stats.currency,
+      currencies: stats.currencies
+    }
   end
 
   def graph(%{points: points}), do: %{points: points}

@@ -69,6 +69,7 @@ defmodule BlockPoker.History.Queries do
     |> where([p], p.user_id == ^user_id)
     |> filter_modes(opts[:game_mode])
     |> filter_setting(opts[:setting_id])
+    |> filter_currency(opts[:currency])
     |> filter_period(opts)
     |> filter_won(opts[:only_won])
     |> apply_cursor(opts[:cursor])
@@ -84,6 +85,7 @@ defmodule BlockPoker.History.Queries do
     |> join(:inner, [p], h in OfcHand, on: h.id == p.ofc_hand_id)
     |> where([p], p.user_id == ^user_id)
     |> filter_setting(opts[:setting_id])
+    |> filter_currency(opts[:currency])
     |> filter_period(opts)
     |> filter_won(opts[:only_won])
     |> apply_cursor(opts[:cursor])
@@ -103,6 +105,8 @@ defmodule BlockPoker.History.Queries do
       ended_at: hand.ended_at,
       game_mode: hand.game_mode,
       setting_id: hand.setting_id,
+      # Масштаб сумм строки: без него `1700` не значит ни центов, ни фишек.
+      currency: hand.currency,
       tournament_id: hand.tournament_id,
       level_number: hand.level_number,
       hand_number: hand.hand_number,
@@ -133,6 +137,7 @@ defmodule BlockPoker.History.Queries do
       ended_at: hand.ended_at,
       game_mode: hand.game_mode,
       setting_id: hand.setting_id,
+      currency: hand.currency,
       hand_number: hand.hand_number,
       variant: hand.variant,
       point_value: hand.point_value,
@@ -267,6 +272,7 @@ defmodule BlockPoker.History.Queries do
       :room_id,
       :game_mode,
       :setting_id,
+      :currency,
       :tournament_id,
       :level_number,
       :hand_number,
@@ -293,6 +299,7 @@ defmodule BlockPoker.History.Queries do
       :room_id,
       :game_mode,
       :setting_id,
+      :currency,
       :hand_number,
       :variant,
       :button_seat,
@@ -330,13 +337,49 @@ defmodule BlockPoker.History.Queries do
   работает одинаково и за вчера, и за год, и не зависит от того, живы ли
   ещё сами раздачи.
   """
-  @spec stats(Ecto.UUID.t(), map()) :: %{atom() => map()}
+  @spec stats(Ecto.UUID.t(), map()) :: %{
+          modes: %{atom() => map()},
+          currency: atom(),
+          currencies: [atom()]
+        }
   def stats(user_id, opts \\ %{}) do
+    currencies = currencies(user_id, opts)
+    currency = opts[:currency] || List.first(currencies) || :main
+
+    %{
+      modes: stat_modes(user_id, Map.put(opts, :currency, currency)),
+      currency: currency,
+      # Какие валюты у игрока вообще есть за период: переключатель нужен
+      # клиенту ровно тогда, когда их больше одной.
+      currencies: currencies
+    }
+  end
+
+  @doc """
+  Валюты, в которых у игрока есть сыгранное за период. Порядок — по
+  объёму: первой идёт та, в которой он играет, а не та, что раньше в
+  алфавите.
+  """
+  @spec currencies(Ecto.UUID.t(), map()) :: [atom()]
+  def currencies(user_id, opts \\ %{}) do
     PlayerStatsDaily
     |> where([s], s.user_id == ^user_id)
     |> filter_days(opts)
     |> filter_stat_modes(opts[:game_mode])
     |> filter_stat_setting(opts[:setting_id])
+    |> group_by([s], s.currency)
+    |> order_by([s], desc: sum(s.hands))
+    |> select([s], s.currency)
+    |> Repo.all()
+  end
+
+  defp stat_modes(user_id, opts) do
+    PlayerStatsDaily
+    |> where([s], s.user_id == ^user_id)
+    |> filter_days(opts)
+    |> filter_stat_modes(opts[:game_mode])
+    |> filter_stat_setting(opts[:setting_id])
+    |> filter_stat_currency(opts[:currency])
     |> group_by([s], s.game_mode)
     |> select(
       [s],
@@ -384,6 +427,7 @@ defmodule BlockPoker.History.Queries do
     |> filter_days(opts)
     |> filter_stat_modes(opts[:game_mode])
     |> filter_stat_setting(opts[:setting_id])
+    |> filter_stat_currency(opts[:currency])
     |> group_by([s], s.day)
     |> order_by([s], asc: s.day)
     |> select([s], %{
@@ -422,6 +466,7 @@ defmodule BlockPoker.History.Queries do
       TournamentResult
       |> where([r], r.user_id == ^user_id)
       |> filter_format(opts[:format])
+      |> filter_result_currency(opts[:currency])
       |> filter_finished(opts)
       |> tournament_cursor(opts[:cursor])
       |> order_by([r], desc: r.finished_at, desc: r.id)
@@ -483,6 +528,7 @@ defmodule BlockPoker.History.Queries do
       TournamentResult
       |> where([r], r.user_id == ^user_id)
       |> filter_format(opts[:format])
+      |> filter_result_currency(opts[:currency])
       |> filter_finished(opts)
       |> Repo.all()
 
@@ -549,6 +595,7 @@ defmodule BlockPoker.History.Queries do
       :tournament_id,
       :title,
       :format,
+      :currency,
       :bounty,
       :entry_kind,
       :entry_index,
@@ -579,6 +626,17 @@ defmodule BlockPoker.History.Queries do
 
   defp filter_setting(query, nil), do: query
   defp filter_setting(query, id), do: where(query, [p, h], h.setting_id == ^id)
+
+  # Валюта — не косметика фильтра, а условие сравнимости: центы и игровые
+  # фишки в одной ленте не складываются и одной шкалой не рисуются.
+  defp filter_currency(query, nil), do: query
+  defp filter_currency(query, currency), do: where(query, [p, h], h.currency == ^currency)
+
+  defp filter_stat_currency(query, nil), do: query
+  defp filter_stat_currency(query, currency), do: where(query, [s], s.currency == ^currency)
+
+  defp filter_result_currency(query, nil), do: query
+  defp filter_result_currency(query, currency), do: where(query, [r], r.currency == ^currency)
 
   defp filter_period(query, opts) do
     query
