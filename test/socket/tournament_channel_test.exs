@@ -15,6 +15,8 @@ defmodule Socket.Channels.TournamentChannelTest do
   import BlockPoker.TournamentsFixtures
 
   alias BlockPoker.Tournaments
+  alias BlockPoker.Tournaments.TournamentServer
+  alias Ecto.Adapters.SQL.Sandbox
   alias Socket.UserSocket
 
   defp connect_as(user) do
@@ -196,6 +198,36 @@ defmodule Socket.Channels.TournamentChannelTest do
 
       assert card.payouts == []
       assert card.chip_counts.entries == []
+    end
+
+    test "чипсчёт идущего турнира несёт стек и стол", ctx do
+      # Столы и турнир — отдельные процессы, и все они ходят в БД.
+      Sandbox.mode(BlockPoker.Repo, {:shared, self()})
+      on_exit(fn -> Sandbox.mode(BlockPoker.Repo, :manual) end)
+
+      {:ok, _entry} = Tournaments.register(ctx.tournament.id, ctx.user.id)
+      {:ok, _entry} = Tournaments.register(ctx.tournament.id, user_fixture().id)
+
+      pid =
+        start_supervised!({TournamentServer, tournament_id: ctx.tournament.id},
+          id: {TournamentServer, ctx.tournament.id}
+        )
+
+      Sandbox.allow(BlockPoker.Repo, self(), pid)
+      :ok = TournamentServer.start_tournament(pid)
+
+      {:ok, _reply, channel} = join_lobby(ctx.user)
+
+      ref = push(channel, "tournament_card", %{"tournament_id" => ctx.tournament.id})
+      assert_reply ref, :ok, card
+
+      assert [row | _rest] = card.chip_counts.entries
+
+      # Стек живёт только в процессе турнира, а без стола клиенту нечего
+      # открывать по строке чипсчёта.
+      assert row.stack > 0
+      assert row.table_id != nil
+      assert row.user_id != nil
     end
 
     test "несуществующий турнир — ошибка, а не падение", ctx do

@@ -156,9 +156,18 @@ defmodule Socket.Views.TournamentView do
   defp chip_row(entry, rank) do
     %{
       rank: rank,
-      name: entry.user && entry.user.name,
+      entry_id: entry.entry_id,
+      # Кто это: клиент отличает по нему себя в чипсчёте, а по столу
+      # открывает окно с этим игроком.
+      user_id: entry.user_id,
+      name: entry.name,
       entry_number: entry.entry_number,
       status: entry.status,
+      # Фишки, а не деньги: складывать со взносом нельзя.
+      stack: entry.stack,
+      # Стол этого входа. `nil` — турнир не начался или вход вылетел.
+      table_id: entry.table_id,
+      seat: entry.seat,
       # Цена головы публична: без неё PKO не играется — решение о колле
       # зависит от того, сколько стоит соперник.
       bounty: entry.bounty,

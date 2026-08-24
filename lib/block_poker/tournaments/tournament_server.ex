@@ -150,6 +150,18 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   @spec start_tournament(Ecto.UUID.t() | pid()) :: :ok | {:error, atom()}
   def start_tournament(tournament), do: GenServer.call(server(tournament), :start)
 
+  @doc """
+  Живые данные участников: стек, стол и место каждого входа.
+
+  В снимок турнира этот список не входит и входить не будет (§5 задачи
+  30): триста строк на каждый вылет каждому подписчику — квадратичный
+  трафик. Здесь он отдаётся точечно, по запросу карточки: чипсчёт из БД
+  знает про вход всё, кроме двух вещей — сколько у него фишек и за каким
+  столом он сидит, а они живут только в процессе.
+  """
+  @spec players(Ecto.UUID.t() | pid()) :: [Player.t()]
+  def players(tournament), do: GenServer.call(server(tournament), :players)
+
   @doc "Сажает вход за стол: поздняя регистрация и ре-энтри приходят сюда."
   @spec seat_entry(Ecto.UUID.t() | pid(), map()) :: :ok | {:error, atom()}
   def seat_entry(tournament, entry), do: GenServer.call(server(tournament), {:seat, entry})
@@ -203,6 +215,8 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
   @impl true
   def handle_call(:state, _from, state), do: {:reply, snapshot(state), state}
+
+  def handle_call(:players, _from, state), do: {:reply, Map.values(state.players), state}
 
   def handle_call(:start, _from, %State{status: status} = state)
       when status in [:running, :late_reg_closed, :finishing, :finished] do

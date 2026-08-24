@@ -278,6 +278,11 @@ defmodule BlockPoker.Tournaments do
 
   # Чипсчёт с пагинацией: страницами, а не целиком, потому что при
   # трёхстах участниках целиком — это триста строк на каждое открытие.
+  #
+  # Стек и стол в БД не лежат: они живут в процессе турнира и переживают
+  # его только снимком рассадки. Поэтому у идущего турнира страница
+  # собирается в памяти — иначе порядок «по стеку» пришлось бы считать
+  # запросом к тому, чего в таблице нет.
   defp chip_counts(tournament, limit, offset) do
     query =
       Entry
@@ -287,14 +292,68 @@ defmodule BlockPoker.Tournaments do
     total = Repo.aggregate(query, :count)
 
     rows =
-      query
-      |> order_by([e], desc: e.status == :playing, asc: e.place, asc: e.entry_number)
-      |> limit(^limit)
-      |> offset(^offset)
-      |> Repo.all()
+      case live_players(tournament.id) do
+        nil ->
+          query |> page(limit, offset) |> Repo.all() |> Enum.map(&row(&1, nil))
+
+        players ->
+          query |> Repo.all() |> rank_by_stack(players) |> Enum.slice(offset, limit)
+      end
 
     %{entries: rows, total: total, limit: limit, offset: offset}
   end
+
+  defp page(query, limit, offset) do
+    query
+    |> order_by([e], desc: e.status == :playing, asc: e.place, asc: e.entry_number)
+    |> limit(^limit)
+    |> offset(^offset)
+  end
+
+  # `nil` — процесс турнира не поднят: стеков ещё (или уже) нет, и
+  # выдумывать их клиенту нечем.
+  defp live_players(tournament_id) do
+    case TournamentServer.whereis(tournament_id) do
+      nil -> nil
+      pid -> Map.new(TournamentServer.players(pid), &{&1.entry_id, &1})
+    end
+  end
+
+  # Живой первым и с большим стеком выше: ранг в чипсчёте — это место по
+  # фишкам, а не порядок регистрации. Вылетевшие уходят вниз в порядке
+  # занятых мест.
+  defp rank_by_stack(entries, players) do
+    entries
+    |> Enum.map(fn entry -> {entry, Map.get(players, entry.id)} end)
+    |> Enum.sort_by(fn {entry, player} ->
+      {entry.status != :playing, -stack_of(player), entry.place || 0, entry.entry_number}
+    end)
+    |> Enum.map(fn {entry, player} -> row(entry, player) end)
+  end
+
+  # Строка чипсчёта — обычная карта, а не запись: стек и стол в схеме
+  # входа не живут, и подмешивать их в структуру значило бы получить
+  # запись, которой в БД не существует.
+  defp row(entry, player) do
+    %{
+      entry_id: entry.id,
+      user_id: entry.user_id,
+      name: entry.user && entry.user.name,
+      entry_number: entry.entry_number,
+      status: entry.status,
+      bounty: entry.bounty,
+      place: entry.place,
+      prize: entry.prize,
+      stack: stack_of(player),
+      # `nil` — турнир ещё не начался либо вход уже вылетел: открывать
+      # нечего, и клиент гасит кнопку «Открыть стол».
+      table_id: player && player.table_id,
+      seat: player && player.seat
+    }
+  end
+
+  defp stack_of(nil), do: 0
+  defp stack_of(player), do: player.stack || 0
 
   @spec get_tournament(Ecto.UUID.t()) :: {:ok, Tournament.t()} | {:error, :not_found}
   def get_tournament(id) do
