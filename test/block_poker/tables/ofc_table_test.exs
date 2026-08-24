@@ -107,9 +107,15 @@ defmodule BlockPoker.Tables.OfcTableTest do
       assert Map.has_key?(snapshot.hand.seats[1], :rows)
       assert Map.has_key?(snapshot.you, :rows)
 
-      # Ни чужой руки, ни чьих-либо сбросов в снапшоте не существует как
-      # поля: их не приходится вырезать, потому что их туда не кладут.
-      refute raw =~ "discards"
+      # Сбросы видит только их владелец: в публичной части раздачи такого
+      # поля нет вовсе — его не приходится вырезать, потому что его туда
+      # не кладут. Своё же уходит владельцу, и в сыром payload слово
+      # встречается ровно один раз — в личной части.
+      assert Map.has_key?(snapshot.you, :discards)
+      refute Map.has_key?(snapshot.hand.seats[1], :discards)
+      refute Map.has_key?(snapshot.hand.seats[2], :discards)
+      assert length(String.split(raw, "discards")) - 1 == 1
+
       refute Map.has_key?(snapshot.hand.seats[2], :deal)
 
       # Механик холдема у дисциплины нет — и стол их не выдумывает.
