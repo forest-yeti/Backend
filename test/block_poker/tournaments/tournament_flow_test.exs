@@ -79,7 +79,8 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
     # отсчитывается реальным временем (§11 CLAUDE.md).
     pid =
       start_supervised!(
-        {TournamentServer, tournament_id: tournament_id, room_opts: [timers: :manual]}
+        {TournamentServer, tournament_id: tournament_id, room_opts: [timers: :manual]},
+        id: {TournamentServer, tournament_id}
       )
 
     Sandbox.allow(BlockPoker.Repo, self(), pid)
@@ -94,6 +95,20 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
     if room.phase == :button_draw, do: TableServer.fire_timer(table, :button_draw)
 
     if TableServer.state(table).hand == nil, do: TableServer.fire_timer(table, :next_hand)
+  end
+
+  # Играет, пока кто-то не вылетит: нужен тестам ре-энтри, где важен
+  # именно момент вылета, а не конец турнира.
+  defp play_until_bust(pid, table, limit \\ 30) do
+    Enum.reduce_while(1..limit, :playing, fn _index, _acc ->
+      if TournamentServer.state(pid).players_left < 2 do
+        {:halt, :busted}
+      else
+        deal_hand(table)
+        play_hand(table)
+        {:cont, :playing}
+      end
+    end)
   end
 
   # Играет раздачи, пока турнир не кончится. Пауза между раздачами
@@ -273,6 +288,194 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
 
       entries = Tournaments.list_entries(tournament.id)
       assert Enum.all?(entries, &(&1.status == :paid))
+    end
+  end
+
+  describe "ре-энтри" do
+    setup do
+      setting = fast_setting(%{rebuy_allowed: true, max_rebuys: 1})
+      tournament = tournament_fixture(setting)
+
+      one = user_fixture()
+      two = user_fixture()
+
+      {:ok, _first} = Tournaments.register(tournament.id, one.id)
+      {:ok, _second} = Tournaments.register(tournament.id, two.id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      [{_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(tournament.id))
+
+      %{tournament: tournament, users: [one, two], pid: pid, table: table}
+    end
+
+    test "вылет на ребайном уровне предлагает войти заново, а не присваивает место", ctx do
+      play_until_bust(ctx.pid, ctx.table)
+
+      assert_received {:tournament_event, "reentry_offer", offer}
+
+      assert offer.cost == 1100
+      assert offer.stack == 5000
+      assert offer.left == 1
+
+      # Место ещё не присвоено: вылет не окончателен, пока идёт окно.
+      entry = Repo.get!(Entry, offer.entry_id)
+      assert entry.place == nil
+      assert entry.status == :busted
+    end
+
+    test "вход заново сажает игрока обратно и не присваивает места", ctx do
+      play_until_bust(ctx.pid, ctx.table)
+
+      assert_received {:tournament_event, "reentry_offer", offer}
+
+      assert {:ok, entry} = TournamentServer.reenter(ctx.pid, offer.user_id)
+      assert entry.entry_number == 2
+
+      # Живых снова двое, мест не присвоено никому.
+      assert TournamentServer.state(ctx.pid).players_left == 2
+      assert Repo.get!(Entry, offer.entry_id).place == nil
+    end
+
+    test "истёкшее окно присваивает место", ctx do
+      play_until_bust(ctx.pid, ctx.table)
+
+      assert_received {:tournament_event, "reentry_offer", offer}
+
+      send(ctx.pid, {:reentry_expired, offer.entry_id})
+      _sync = TournamentServer.state(ctx.pid)
+
+      entry = Repo.get!(Entry, offer.entry_id)
+      assert entry.place == 2
+      assert entry.status in [:busted, :paid]
+    end
+
+    test "исчерпанный лимит вылетает сразу, без предложения" do
+      setting = fast_setting(%{rebuy_allowed: true, max_rebuys: 0})
+      tournament = tournament_fixture(setting)
+
+      for _index <- 1..2 do
+        {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+      end
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+      [{_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(tournament.id))
+
+      :finished = play_until_finished(pid, table)
+
+      refute_received {:tournament_event, "reentry_offer", _offer}
+      assert_received {:tournament_event, "player_busted", _busted}
+    end
+  end
+
+  describe "аддон" do
+    setup do
+      # Аддон разрешён на первом уровне, и он же ребайный.
+      levels = [
+        %{
+          level: 1,
+          small_blind: 1000,
+          big_blind: 2000,
+          ante: 0,
+          duration_seconds: 600,
+          rebuy_allowed: true,
+          addon_allowed: true
+        },
+        %{
+          level: 2,
+          small_blind: 2000,
+          big_blind: 4000,
+          ante: 0,
+          duration_seconds: 600,
+          rebuy_allowed: false,
+          addon_allowed: false
+        }
+      ]
+
+      setting =
+        setting_fixture(
+          %{
+            table_size: 6,
+            min_players: 2,
+            starting_stack: 5000,
+            addon_cost: 500,
+            addon_stack: 3000
+          },
+          levels
+        )
+
+      tournament = tournament_fixture(setting)
+
+      one = user_fixture()
+      {:ok, _first} = Tournaments.register(tournament.id, one.id)
+      {:ok, _second} = Tournaments.register(tournament.id, user_fixture().id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      [{_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      %{tournament: tournament, user: one, pid: pid, table: table}
+    end
+
+    test "вне перерыва аддон недоступен", ctx do
+      assert {:error, :addon_not_allowed} = TournamentServer.addon(ctx.pid, ctx.user.id)
+    end
+
+    test "на перерыве аддон кладёт фишки за столом", ctx do
+      :ok = TournamentServer.fire(ctx.pid, :break)
+
+      assert {:ok, %{stack: stack}} = TournamentServer.addon(ctx.pid, ctx.user.id)
+
+      # Стартовые пять тысяч плюс три тысячи аддона — минус блайнды,
+      # если они успели уйти.
+      assert stack >= 5000
+
+      seat = ctx.table |> TableServer.state() |> RoomState.find_seat(ctx.user.id)
+      assert seat.stack == stack
+    end
+
+    test "аддон идёт в фонд и списывает деньги", ctx do
+      before = balance(ctx.user)
+
+      :ok = TournamentServer.fire(ctx.pid, :break)
+      {:ok, _result} = TournamentServer.addon(ctx.pid, ctx.user.id)
+
+      assert balance(ctx.user) == before - 500
+
+      {:ok, reloaded} = Tournaments.get_tournament(ctx.tournament.id)
+      assert reloaded.addons_count == 1
+    end
+
+    test "на финальном столе аддона нет ни на каком уровне", ctx do
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(ctx.tournament.id))
+
+      [{table_id, _pid}] = Map.to_list(:sys.get_state(ctx.pid).tables)
+      :sys.replace_state(ctx.pid, &%{&1 | final_table: table_id})
+
+      :ok = TournamentServer.fire(ctx.pid, :break)
+
+      # Все оставшиеся уже в деньгах: докупка меняла бы расклад сил
+      # после пузыря, поэтому окна нет и запрос отвергается.
+      refute_received {:tournament_event, "addon_offer", _offer}
+      assert {:error, :addon_not_allowed} = TournamentServer.addon(ctx.pid, ctx.user.id)
+    end
+
+    test "перерыв объявляет окно аддона", ctx do
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(ctx.tournament.id))
+
+      :ok = TournamentServer.fire(ctx.pid, :break)
+
+      assert_received {:tournament_event, "addon_offer", offer}
+      assert offer.cost == 500
+      assert offer.stack == 3000
+      assert offer.deadline_ms == 300_000
     end
   end
 

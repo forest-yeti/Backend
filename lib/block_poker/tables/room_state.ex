@@ -1650,6 +1650,27 @@ defmodule BlockPoker.Tables.RoomState do
     }
   end
 
+  @doc """
+  Кладёт игроку фишки поверх текущего стека — аддон турнира.
+
+  Публичная функция, а не `put_seat/2` наружу: менять место целиком
+  извне комнаты нельзя, а прибавить фишки по указанию турнира — можно,
+  и ровно это здесь и разрешено.
+  """
+  @spec add_chips(t(), Ecto.UUID.t(), non_neg_integer()) ::
+          {:ok, t(), Seat.t()} | {:error, :not_seated}
+  def add_chips(%__MODULE__{} = state, user_id, amount) do
+    case find_seat(state, user_id) do
+      nil ->
+        {:error, :not_seated}
+
+      seat ->
+        seat = %{seat | stack: seat.stack + amount}
+
+        {:ok, put_seat(state, seat), seat}
+    end
+  end
+
   defp put_seat(state, seat), do: %{state | seats: Map.put(state.seats, seat.number, seat)}
 
   defp fetch_seat(state, number) do

@@ -248,6 +248,23 @@ defmodule BlockPoker.Tables.TableServer do
   def close_if_idle(room), do: GenServer.call(room, :close_if_idle)
 
   @doc """
+  Кладёт игроку фишки по требованию турнира — аддон.
+
+  Отдельно от докупки намеренно: докупка в турнире запрещена
+  (`GameMode.Mtt.max_add_chips/2` возвращает ноль), потому что сам себе
+  стек за турнирным столом никто не увеличивает. Здесь распоряжается
+  турнир, деньги он уже взял, и стол только кладёт фишки.
+
+  Возвращает новый стек: турнир держит свою копию и разойтись с ней
+  не должен.
+  """
+  @spec grant_chips(GenServer.server(), Ecto.UUID.t(), non_neg_integer()) ::
+          {:ok, non_neg_integer()} | {:error, atom()}
+  def grant_chips(room, user_id, amount) do
+    GenServer.call(room, {:grant_chips, user_id, amount})
+  end
+
+  @doc """
   Снимает игрока со стола по требованию турнира — это пересадка, а не
   выход.
 
@@ -492,6 +509,21 @@ defmodule BlockPoker.Tables.TableServer do
     state = put_room(state, RoomState.release(state.room, reservation_id))
     announce(state)
     {:reply, :ok, state}
+  end
+
+  def handle_call({:grant_chips, user_id, amount}, _from, state) do
+    case RoomState.add_chips(state.room, user_id, amount) do
+      {:ok, room, seat} ->
+        state = put_room(state, room)
+
+        announce(state)
+        broadcast(state, "chips_added", %{seat: seat.number, stack: seat.stack})
+
+        {:reply, {:ok, seat.stack}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:pull_seat, user_id}, _from, state) do

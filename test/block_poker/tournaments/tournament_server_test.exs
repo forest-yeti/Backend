@@ -201,6 +201,27 @@ defmodule BlockPoker.Tournaments.TournamentServerTest do
     end
   end
 
+  describe "hand-for-hand на баббле" do
+    # Сетка на два места: баббл наступает, когда живых трое.
+    test "снапшот сообщает, идёт ли синхронный круг", ctx do
+      %{pid: pid} = start_tournament(ctx.setting, 4)
+      :ok = TournamentServer.start_tournament(pid)
+
+      state = TournamentServer.state(pid)
+
+      # Живых четверо, платят двоих — до баббла ещё один вылет.
+      refute state.hand_for_hand
+      assert state.next_payout_place == 2
+    end
+
+    test "число оплачиваемых мест считается по сетке при текущей явке", ctx do
+      %{pid: pid} = start_tournament(ctx.setting, 4)
+      :ok = TournamentServer.start_tournament(pid)
+
+      assert TournamentServer.state(pid).next_payout_place == 2
+    end
+  end
+
   describe "снапшот" do
     test "несёт счётчики, а не список участников", ctx do
       %{pid: pid} = start_tournament(ctx.setting, 4)

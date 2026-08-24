@@ -22,6 +22,7 @@ defmodule Socket.Channels.TournamentChannel do
 
   alias BlockPoker.Tables.LobbyQuery
   alias BlockPoker.Tournaments
+  alias BlockPoker.Tournaments.TournamentServer
   alias Socket.Protocol.Message
   alias Socket.Views.TournamentView
 
@@ -161,7 +162,7 @@ defmodule Socket.Channels.TournamentChannel do
   def handle_info(_message, socket), do: {:noreply, socket}
 
   defp snapshot(tournament_id) do
-    case BlockPoker.Tournaments.TournamentServer.whereis(tournament_id) do
+    case TournamentServer.whereis(tournament_id) do
       nil ->
         # Процесс ещё не поднят (турнир анонсирован, но регистрация не
         # открыта) — отдаём то, что знает БД.
@@ -170,7 +171,7 @@ defmodule Socket.Channels.TournamentChannel do
         TournamentView.entry(BlockPoker.Tournaments.LobbyEntry.build(tournament))
 
       pid ->
-        TournamentView.state(BlockPoker.Tournaments.TournamentServer.state(pid))
+        TournamentView.state(TournamentServer.state(pid))
     end
   end
 
