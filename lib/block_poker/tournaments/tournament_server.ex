@@ -758,20 +758,10 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
   # Сетка выплат берётся из снапшота инстанса, а не из шаблона: снапшот
   # для того и снят, чтобы правка сетки посреди турнира не сдвинула
-  # баббл под ногами у играющих.
-  defp payout_rows(state) do
-    Enum.map(state.snapshot["payouts"] || [], fn row ->
-      %{
-        entries_from: row["entries_from"],
-        entries_to: row["entries_to"],
-        place_from: row["place_from"],
-        place_to: row["place_to"],
-        share_ppm: row["share_ppm"],
-        ticket_id: row["ticket_id"],
-        ticket_value: row["ticket_value"]
-      }
-    end)
-  end
+  # баббл под ногами у играющих. Разбор снапшота — в контексте, чтобы
+  # призовая граница здесь и сумма вылетевшему (`Tournaments.current_payouts/1`)
+  # читали одну и ту же сетку одним и тем же кодом.
+  defp payout_rows(state), do: Tournaments.snapshot_payout_grid(state.snapshot)
 
   # На баббле столы играют **синхронно**: доигравший стоит и ждёт
   # остальных, и новый круг начинается у всех сразу.

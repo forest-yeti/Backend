@@ -886,6 +886,35 @@ defmodule BlockPoker.TournamentsTest do
       assert Enum.map(payouts, & &1.amount) == [1300, 700]
     end
 
+    test "правка сетки шаблона не сдвигает сумму идущего турнира", ctx do
+      # Снапшот снят при открытии регистрации — с него и считается всё,
+      # что относится к идущему инстансу. Иначе правка `tournament_payouts`
+      # развела бы две цифры, которые обязаны сходиться: призовую границу
+      # на баббле (её `TournamentServer` считает по снапшоту) и сумму,
+      # объявленную вылетевшему в `player_busted`.
+      {:ok, before} = Tournaments.current_payouts(ctx.tournament)
+      assert Enum.map(before, & &1.amount) == [1300, 700]
+
+      # Ровно то, что делает админ рума: правит строки сетки прямо в БД
+      # (§6 CLAUDE.md), не трогая идущие инстансы.
+      setting_id = ctx.tournament.tournament_setting_id
+
+      {2, _} =
+        BlockPoker.Tournaments.PayoutRow
+        |> where([row], row.tournament_setting_id == ^setting_id)
+        |> Repo.update_all(set: [share_ppm: 500_000])
+
+      {:ok, reloaded} = Tournaments.get_tournament(ctx.tournament.id)
+
+      # Шаблон уже другой, инстанс — прежний.
+      assert Tournaments.payout_grid(reloaded.setting) |> Enum.map(& &1.share_ppm) == [
+               500_000,
+               500_000
+             ]
+
+      assert {:ok, ^before} = Tournaments.current_payouts(reloaded)
+    end
+
     test "сетка пустого турнира не роняет карточку" do
       setting = setting_fixture()
       tournament = tournament_fixture(setting)

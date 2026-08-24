@@ -123,6 +123,38 @@ defmodule BlockPoker.Tournaments do
   end
 
   @doc """
+  Сетка выплат **инстанса** — из его снапшота, а не из живого шаблона.
+
+  Снапшот для того и снят при открытии регистрации: правка
+  `tournament_payouts` посреди турнира не должна сдвигать ни призовую
+  границу под ногами у играющих, ни сумму, уже объявленную вылетевшему.
+  Поэтому всё, что считается по **идущему** инстансу, берёт сетку здесь;
+  `payout_grid/1` остаётся для шаблона, у которого инстанса ещё нет.
+
+  Пустой список — снапшота ещё нет (инстанс до открытия регистрации).
+  `Engine.TournamentPayout.compute/4` на нём вернёт пустые выплаты, а не
+  упадёт: «сетки пока нет» — это состояние, а не ошибка.
+  """
+  @spec snapshot_payout_grid(map() | nil) :: [TournamentPayout.row()]
+  def snapshot_payout_grid(nil), do: []
+
+  def snapshot_payout_grid(snapshot) when is_map(snapshot) do
+    # Ключи строковые: снапшот — это JSON из БД, а не структура Elixir
+    # (см. `build_snapshot/1`).
+    Enum.map(snapshot["payouts"] || [], fn row ->
+      %{
+        entries_from: row["entries_from"],
+        entries_to: row["entries_to"],
+        place_from: row["place_from"],
+        place_to: row["place_to"],
+        share_ppm: row["share_ppm"],
+        ticket_id: row["ticket_id"],
+        ticket_value: row["ticket_value"]
+      }
+    end)
+  end
+
+  @doc """
   Создаёт шаблон вместе с уровнями, сеткой выплат и расписанием — одной
   транзакцией.
 
@@ -1149,6 +1181,17 @@ defmodule BlockPoker.Tournaments do
   `collected` — того же живого счётчика, из которого `close_late_reg/1`
   сам фонд и фиксирует, — поэтому после фиксации результат совпадает
   с `payouts/1` ровно: `collected` дальше не меняется по построению.
+
+  Сетка берётся из **снапшота инстанса** (`snapshot_payout_grid/1`), а не
+  из шаблона: турнир уже идёт, и правка `tournament_payouts` не должна
+  сдвигать сумму, объявленную вылетевшему. Тем же снапшотом считается
+  призовая граница на баббле (`TournamentServer`), и обе цифры обязаны
+  сходиться — иначе игрок услышит одну границу на баббле и другую при
+  вылете.
+
+  Гарантия при этом читается из шаблона: от неё зависит фонд, который
+  `close_late_reg/1` фиксирует **тем же** способом, и разойтись с
+  итоговым `entry.prize` здесь нельзя.
   """
   @spec current_payouts(Tournament.t()) :: {:ok, [TournamentPayout.payout()]} | {:error, term()}
   def current_payouts(%Tournament{} = tournament) do
@@ -1157,7 +1200,7 @@ defmodule BlockPoker.Tournaments do
 
       {:ok,
        TournamentPayout.compute(
-         payout_grid(setting),
+         snapshot_payout_grid(tournament.snapshot),
          tournament.entries_count,
          tournament.players_count,
          pool
