@@ -339,6 +339,10 @@ defmodule BlockPoker.Engine.Ofc.Hand do
     results = %{
       showdown: showdown,
       scores: Map.new(scores, fn {seat, entry} -> {seat, entry.total} end),
+      # Попарные разности целиком: по ним история строит счёт против
+      # каждого соперника и считает скупы. Сумма и так лежит рядом, но по
+      # ней ни того, ни другого не восстановить.
+      against: Map.new(scores, fn {seat, entry} -> {seat, entry.against} end),
       transfers: transfers,
       deltas: deltas,
       # Кому фантазия достаётся в следующей раздаче. Решает дисциплина, а

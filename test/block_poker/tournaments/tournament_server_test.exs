@@ -127,6 +127,23 @@ defmodule BlockPoker.Tournaments.TournamentServerTest do
       assert Enum.all?(card.chip_counts.entries, &(&1.table_id != nil))
     end
 
+    test "карточка показывает призовые до закрытия поздней регистрации", ctx do
+      %{pid: pid, tournament: tournament} = start_tournament(ctx.setting, 3)
+
+      # До старта фонд ещё не зафиксирован (`prize_pool` = 0), но взносы
+      # собраны — сетка обязана считаться по ним, а не показывать нули.
+      {:ok, before} = Tournaments.card(tournament.id)
+
+      assert before.payouts != []
+      assert Enum.all?(before.payouts, &(&1.amount > 0 or &1.ticket_value > 0))
+
+      :ok = TournamentServer.start_tournament(pid)
+
+      {:ok, running} = Tournaments.card(tournament.id)
+
+      assert Enum.map(running.payouts, & &1.amount) == Enum.map(before.payouts, & &1.amount)
+    end
+
     test "поздняя регистрация закрывается концом ребайных уровней", ctx do
       %{pid: pid, tournament: tournament} = start_tournament(ctx.setting, 3)
 

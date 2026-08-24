@@ -48,6 +48,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     TournamentPayout
   }
 
+  alias BlockPoker.History
   alias BlockPoker.Tables.{TableRegistry, TableServer, TableSupervisor}
   alias BlockPoker.Tournaments
   alias BlockPoker.Tournaments.{TableSetting, Tournament}
@@ -172,9 +173,37 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   @spec players(Ecto.UUID.t() | pid()) :: [Player.t()]
   def players(tournament), do: GenServer.call(server(tournament), :players)
 
+  @doc """
+  Рассадка **до** старта: столы поднимаются и игроки садятся за минуту до
+  начала, а раздача не идёт.
+
+  Смысл — в окне стола у игрока. Пока рассадка случалась ровно в момент
+  старта, окно стола открывалось после первой раздачи: игрок либо успевал
+  нажать «Занять место», либо пропускал руку. Столы, поднятые заранее,
+  стоят на паузе (`tournament_paused`) и ждут `start_tournament/1` — до
+  него ни одна карта не сдаётся.
+
+  Идемпотентна: повторный вызов на уже подготовленном турнире ничего не
+  делает. Планировщик зовёт её каждый тик, и второго набора столов от
+  этого появиться не должно.
+  """
+  @spec prepare(Ecto.UUID.t() | pid()) :: :ok | {:error, atom()}
+  def prepare(tournament), do: GenServer.call(server(tournament), :prepare)
+
   @doc "Сажает вход за стол: поздняя регистрация и ре-энтри приходят сюда."
   @spec seat_entry(Ecto.UUID.t() | pid(), map()) :: :ok | {:error, atom()}
   def seat_entry(tournament, entry), do: GenServer.call(server(tournament), {:seat, entry})
+
+  @doc """
+  Убирает вход со стола: игрок отписался после подготовительной рассадки.
+
+  Безвредна, если игрок ещё не сидит: до старта отписаться можно в любой
+  момент, а сидит он или нет — знает только турнир.
+  """
+  @spec drop_entry(Ecto.UUID.t() | pid(), Ecto.UUID.t()) :: :ok
+  def drop_entry(tournament, entry_id) do
+    GenServer.call(server(tournament), {:drop_entry, entry_id})
+  end
 
   @doc """
   Повторный вход после вылета: оплата и посадка одним вызовом.
@@ -238,6 +267,55 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       {:ok, tournament} -> do_start(state, tournament)
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
+  end
+
+  # Подготовка не меняет статус инстанса в БД: турнир всё ещё
+  # `registering`, регистрация открыта, отписаться можно (`drop_entry/2`
+  # уберёт такого со стола).
+  def handle_call(:prepare, _from, %State{status: status} = state)
+      when status not in [:announced, :registering] do
+    {:reply, {:error, :tournament_started}, state}
+  end
+
+  def handle_call(:prepare, _from, %State{tables: tables} = state) when map_size(tables) > 0 do
+    {:reply, :ok, state}
+  end
+
+  def handle_call(:prepare, _from, state) do
+    entries = Tournaments.list_seated(state.tournament_id)
+
+    if length(entries) < state.setting.min_players do
+      {:reply, {:error, :not_enough_players}, state}
+    else
+      state = state |> seat_all(entries) |> mark_seated_playing() |> pause_tables()
+
+      broadcast(state, "tables_ready", %{tables: Map.keys(state.tables)})
+
+      {:reply, :ok, state}
+    end
+  end
+
+  # Снимает вход со стола: игрок отписался в последнюю минуту, когда
+  # рассадка уже сделана. До старта это законно, и место обязано
+  # освободиться — иначе за столом сидит игрок, которому вернули взнос.
+  def handle_call({:drop_entry, entry_id}, _from, state) do
+    case Map.fetch(state.players, entry_id) do
+      {:ok, _player} ->
+        state = release_seat(state, entry_id)
+
+        {:reply, :ok, %{state | players: Map.delete(state.players, entry_id)}}
+
+      :error ->
+        {:reply, :ok, state}
+    end
+  end
+
+  # Столов ещё нет — турнир не подготовлен и не стартовал. Сажать некуда,
+  # и поднимать стол на одну регистрацию нельзя: стартовая рассадка
+  # прочитает вход из БД и раздаст его вместе со всеми.
+  def handle_call({:seat, _entry}, _from, %State{tables: tables} = state)
+      when map_size(tables) == 0 do
+    {:reply, :ok, state}
   end
 
   def handle_call({:seat, entry}, _from, state) do
@@ -328,8 +406,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
       state =
         %{state | status: :running, late_reg_until: until}
-        |> seat_all(entries)
-        |> mark_seated_playing()
+        |> seat_prepared(entries)
         |> arm_level()
         |> arm_break()
 
@@ -357,6 +434,23 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   defp level_flags(state) do
     (state.snapshot["levels"] || [])
     |> Map.new(fn level -> {level["level"], level["rebuy_allowed"]} end)
+  end
+
+  # Рассадку мог уже сделать `prepare/1` за минуту до старта: тогда
+  # столы стоят на паузе и остаётся их отпустить. Заново сажать нельзя —
+  # игроки уже за столами.
+  defp seat_prepared(%State{tables: tables} = state, _entries) when map_size(tables) > 0 do
+    resume_tables(state)
+    state
+  end
+
+  defp seat_prepared(state, entries) do
+    state |> seat_all(entries) |> mark_seated_playing()
+  end
+
+  defp pause_tables(state) do
+    Enum.each(state.tables, fn {_id, pid} -> send(pid, {:tournament_paused, true}) end)
+    state
   end
 
   # Столов ровно столько, сколько нужно на явку, и заполняются они
@@ -675,7 +769,9 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     end
 
     # Столы, где раздача не идёт, готовы сразу: ждать от них нечего.
-    Enum.reduce(waiting, state, fn table_id, acc -> table_ready(acc, table_id) end)
+    waiting
+    |> Enum.reject(&busy?(state, &1))
+    |> Enum.reduce(state, fn table_id, acc -> table_ready(acc, table_id) end)
   end
 
   # Стол доиграл. Пять минут отсчитываются от **последнего** — перерыв не
@@ -731,7 +827,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   defp after_hand(state, table_id) do
     cond do
       state.break -> table_ready(state, table_id)
-      bubble?(state) -> hand_for_hand(state, table_id)
+      bubble?(state) and split_field?(state) -> hand_for_hand(state, table_id)
       true -> state |> stop_hand_for_hand() |> rebalance(table_id)
     end
   end
@@ -748,6 +844,17 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   defp bubble?(state) do
     alive_count(state) == paid_places(state) + 1
   end
+
+  # Синхронный круг нужен, только пока раздают **несколько** столов.
+  #
+  # Hand-for-hand защищает от информационного преимущества: за медленным
+  # столом игрок иначе узнал бы, что где-то уже вылетели, и доиграл бы
+  # свою раздачу, зная, что деньги у него в кармане. Когда стол один,
+  # узнавать не у кого и синхронизировать нечего — а пауза после каждой
+  # раздачи есть. На малой явке (тот же 2-Max втроём) баббл наступает
+  # с первой раздачи, и без этой оговорки турнир весь свой путь до
+  # финала шёл бы в режиме hand-for-hand.
+  defp split_field?(state), do: MapSet.size(dealing_tables(state)) > 1
 
   defp paid_places(state) do
     entries = map_size(state.players)
@@ -785,7 +892,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       # Круг закончили все — начинаем следующий одновременно.
       resume_tables(state)
 
-      %{state | hand_for_hand: %{waiting: all_tables(state)}}
+      %{state | hand_for_hand: %{waiting: dealing_tables(state)}}
     else
       %{state | hand_for_hand: %{waiting: waiting}}
     end
@@ -794,7 +901,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   defp start_hand_for_hand(%State{hand_for_hand: nil} = state) do
     broadcast(state, "hand_for_hand", %{active: true, places: paid_places(state)})
 
-    %{state | hand_for_hand: %{waiting: all_tables(state)}}
+    %{state | hand_for_hand: %{waiting: dealing_tables(state)}}
   end
 
   defp start_hand_for_hand(state), do: state
@@ -810,7 +917,19 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     %{state | hand_for_hand: nil}
   end
 
-  defp all_tables(state), do: MapSet.new(Map.keys(state.tables))
+  # Столы, которые в этом круге раздают.
+  #
+  # Стол, за которым меньше двух игроков, карт не сдаст и `hand_summary`
+  # не пришлёт. Включённый в ожидание hand-for-hand, он остановил бы
+  # турнир навсегда: остальные столы доиграли, встали на паузу и ждут
+  # круга от того, кто раздать не может. На 2-Max с нечётной явкой это
+  # случается с первой же раздачи — один игрок всегда сидит один.
+  defp dealing_tables(state) do
+    state.tables
+    |> Map.keys()
+    |> Enum.filter(&(occupancy(state, &1) >= 2))
+    |> MapSet.new()
+  end
 
   defp pause_table(state, table_id) do
     case Map.fetch(state.tables, table_id) do
@@ -944,6 +1063,25 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
   defp finalize_bust(state, entry_id, place) do
     {:ok, entry} = Tournaments.bust(entry_id, place)
+    prize = prize_for_place(state, place)
+    bounty_paid = bounty_earned_by(state, entry)
+
+    # История пишется **в момент вылета каждого**, а не батчем в конце.
+    # Турнир идёт часами, процесс может упасть или быть перезапущен
+    # деплоем, и батч в конце — единственная точка, потеря которой стирает
+    # результаты всех участников сразу. Дорога та же, что у раздач: `cast`
+    # в Writer, потому что вылет — это ещё и пересадка, и проверка конца
+    # уровня, и они не имеют права стоять в очереди за коннектом.
+    History.persist_tournament_result_async(
+      history_snapshot(state, entry, %{
+        outcome: :busted,
+        place: place,
+        prize: prize,
+        bounty_paid: bounty_paid,
+        itm: prize > 0,
+        finished_at: entry.busted_at || DateTime.utc_now()
+      })
+    )
 
     broadcast(state, "player_busted", %{
       entry_id: entry_id,
@@ -952,13 +1090,79 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       # турнира (`SettleTournament`), а вылетевший видит экран сразу.
       # Поэтому здесь — та же сетка «при текущей явке», что и в карточке
       # турнира (§3 задачи 30): не кэшируется, для мест вне призов — 0.
-      prize: prize_for_place(state, place),
-      bounty_earned: bounty_earned_by(state, entry)
+      prize: prize,
+      bounty_earned: bounty_paid
     })
 
     state
     |> cancel_reentry_timer(entry_id)
     |> Map.update!(:results, &[%{entry_id: entry_id, place: place} | &1])
+  end
+
+  # Снимок входа для истории. Снимок, а не ссылка на `tournament_entries`:
+  # та таблица принадлежит контексту `Tournaments`, будет меняться вместе
+  # с механикой, и делать её вечным архивом значило бы запретить её
+  # когда-либо чистить.
+  defp history_snapshot(state, entry, attrs) do
+    Map.merge(
+      %{
+        entry_id: entry.id,
+        tournament_id: state.tournament_id,
+        user_id: entry.user_id,
+        title: state.setting.name,
+        tournament_setting_id: state.setting.id,
+        format: :mtt,
+        bounty: state.setting.bounty_part > 0,
+        entry_kind: if(entry.entry_number > 1, do: :reentry, else: :initial),
+        # Нумерация входов с нуля: `entry_number` в рабочей таблице
+        # считается с единицы, а средняя финишная позиция берётся по
+        # максимальному индексу, и смещение обязано быть одним и тем же.
+        entry_index: entry.entry_number - 1,
+        buy_in: state.setting.buy_in,
+        entry_fee: state.setting.entry_fee,
+        addons_count: entry.addons_count,
+        addons_cost: entry.addons_count * (state.setting.addon_cost || 0),
+        # Цена собственной головы справочно: в ROI она не входит — это не
+        # полученные деньги.
+        bounty_final: entry.bounty,
+        prize: 0,
+        bounty_paid: 0,
+        refund: 0,
+        place: nil,
+        # Без числа входов место не значит ничего: пятое из девяти и
+        # пятое из девяноста — разные достижения.
+        entrants: map_size(state.players),
+        itm: false,
+        hands_played: state.hands_played,
+        started_at: entry.inserted_at,
+        finished_at: DateTime.utc_now()
+      },
+      attrs
+    )
+  end
+
+  defp record_winner(state, winner, payouts) do
+    prize =
+      case Enum.find(payouts, &(&1.place == 1)) do
+        %{amount: amount} -> amount
+        _none -> 0
+      end
+
+    case Tournaments.get_entry(winner.entry_id) do
+      {:ok, entry} ->
+        History.persist_tournament_result_async(
+          history_snapshot(state, entry, %{
+            outcome: :won,
+            place: 1,
+            prize: prize,
+            bounty_paid: bounty_earned_by(state, entry),
+            itm: prize > 0
+          })
+        )
+
+      _error ->
+        :ok
+    end
   end
 
   # Сумма за место на момент вылета — по текущей явке, не по итогу
@@ -1230,6 +1434,12 @@ defmodule BlockPoker.Tournaments.TournamentServer do
         {:ok, payouts} = Tournaments.settle(tournament, results)
 
         payload = %{results: results, payouts: payouts}
+
+        # Победитель не вылетает, и `finalize_bust` для него не
+        # вызывается — строку истории ему пишет завершение турнира.
+        # Дозапись идемпотентна по `entry_id`: у вылетевших строки уже
+        # есть, и вторых не появится.
+        record_winner(state, winner, payouts)
 
         broadcast(state, "tournament_finished", payload)
 

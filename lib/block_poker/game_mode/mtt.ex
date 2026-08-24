@@ -64,6 +64,9 @@ defmodule BlockPoker.GameMode.Mtt do
   сетке выплат, а не разыгрывается за этим столом.
   """
   @impl true
+  def game_mode_id, do: :mtt
+
+  @impl true
   def prize_table(%RoomState{}), do: nil
 
   @impl true
@@ -153,7 +156,11 @@ defmodule BlockPoker.GameMode.Mtt do
     %{
       big_blind: (level && level.big_blind) || 0,
       allow_post_blind?: false,
-      dodge_window_hands: 0
+      dodge_window_hands: 0,
+      # Севший играет ближайшую раздачу: место дал турнир, а не игрок его
+      # выбрал. Ждать большого блайнда после поздней регистрации,
+      # ре-энтри или пересадки значило бы сидеть без карт целый круг.
+      immediate_entry?: true
     }
   end
 

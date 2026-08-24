@@ -83,6 +83,7 @@ defmodule BlockPoker.Tables.RoomState do
           bomb_pot_rolled?: boolean(),
           rabbit: rabbit() | nil,
           reveal: reveal() | nil,
+          hand_log: hand_log() | nil,
           tournament: tournament() | nil
         }
 
@@ -102,7 +103,27 @@ defmodule BlockPoker.Tables.RoomState do
           cards: %{pos_integer() => [map()]},
           users: %{pos_integer() => Ecto.UUID.t()},
           shown: %{pos_integer() => [non_neg_integer()]},
-          expires_at: integer()
+          expires_at: integer(),
+          by_rules: [pos_integer()],
+          hand_id: Ecto.UUID.t() | nil
+        }
+
+  @typedoc """
+  Лог идущей раздачи: то, из чего собирается её история.
+
+  Идентификатор заводится **при старте** раздачи, а не при записи: на нём
+  держится идемпотентность повторной задачи. Номиналы снимаются тогда же —
+  в турнире уровень растёт, и брать их по концу раздачи значило бы
+  приписать ей блайнды следующего уровня.
+
+  События хранятся в обратном порядке: список только растёт с головы, а
+  разворачивается один раз, при выдаче.
+  """
+  @type hand_log :: %{
+          id: Ecto.UUID.t(),
+          started_at: DateTime.t(),
+          meta: map(),
+          events: [%{event: tuple(), at: integer(), auto?: boolean()}]
         }
 
   @typedoc """
@@ -228,6 +249,10 @@ defmodule BlockPoker.Tables.RoomState do
     # переигрывается (кнопка, ожидающие блайнда, окно страддла), а бросков
     # на раздачу должно быть ровно ноль или один.
     bomb_pot_rolled?: false,
+    # Лог идущей раздачи для истории: идентификатор, заведённый при её
+    # старте, номиналы на этот момент и события в порядке возникновения.
+    # Живёт ровно раздачу и уезжает наружу копией по её концу.
+    hand_log: nil,
     # Турнирное состояние либо `nil` — см. `t:tournament/0`.
     tournament: nil
   ]
@@ -803,10 +828,74 @@ defmodule BlockPoker.Tables.RoomState do
 
           {seat, open}
         end),
-      expires_at: expires_at
+      expires_at: expires_at,
+      # Кто открылся **по правилам вскрытия**. Нужен, чтобы отличить их от
+      # открывшихся добровольно: в истории это разные значения видимости,
+      # и вывести одно из другого по составу `shown` уже нельзя.
+      by_rules: for({seat, :show} <- decision, do: seat),
+      # Раздача, которой окно принадлежит: по закрытии окна история
+      # получает по нему второй, маленький апдейт видимости карт.
+      hand_id: state.hand_log && state.hand_log.id
     }
 
     %{state | reveal: reveal}
+  end
+
+  @doc """
+  Завести лог раздачи: идентификатор, время старта и номиналы на этот
+  момент. Зовётся ровно там, где раздача началась.
+  """
+  @spec open_hand_log(t(), Ecto.UUID.t(), DateTime.t(), map()) :: t()
+  def open_hand_log(%__MODULE__{} = state, hand_id, started_at, meta) do
+    %{state | hand_log: %{id: hand_id, started_at: started_at, meta: meta, events: []}}
+  end
+
+  @doc """
+  Дописать в лог события раздачи вместе с монотонной меткой и признаком
+  «ход сделан не игроком».
+
+  Метка нужна не отладке: по ней считается время на решение, а оно —
+  материал тайминг-теллов и будущей античит-аналитики. Восстановить его
+  позже невозможно.
+  """
+  @spec log_events(t(), [tuple()], integer(), boolean()) :: t()
+  def log_events(%__MODULE__{hand_log: nil} = state, _events, _at, _auto?), do: state
+
+  def log_events(%__MODULE__{hand_log: log} = state, events, at, auto?) do
+    entries = Enum.reduce(events, log.events, &[%{event: &1, at: at, auto?: auto?} | &2])
+    %{state | hand_log: %{log | events: entries}}
+  end
+
+  @doc "События лога в порядке возникновения."
+  @spec hand_log_events(t()) :: [%{event: tuple(), at: integer(), auto?: boolean()}]
+  def hand_log_events(%__MODULE__{hand_log: nil}), do: []
+  def hand_log_events(%__MODULE__{hand_log: log}), do: Enum.reverse(log.events)
+
+  @doc "Закрыть лог: раздача записана, держать его больше незачем."
+  @spec close_hand_log(t()) :: t()
+  def close_hand_log(%__MODULE__{} = state), do: %{state | hand_log: nil}
+
+  @doc """
+  Кто открыл карты **сам**, а не по правилам вскрытия: раздача и список
+  игроков. `nil` — окна нет или добровольных показов не было.
+
+  Существует ради второго апдейта видимости: показ бывает после записи
+  раздачи, и ждать окно запись не имеет права.
+  """
+  @spec voluntary_reveals(t()) :: {Ecto.UUID.t(), [Ecto.UUID.t()]} | nil
+  def voluntary_reveals(%__MODULE__{reveal: nil}), do: nil
+  def voluntary_reveals(%__MODULE__{reveal: %{hand_id: nil}}), do: nil
+
+  def voluntary_reveals(%__MODULE__{reveal: reveal}) do
+    users =
+      for {seat, shown} <- reveal.shown,
+          shown != [],
+          seat not in reveal.by_rules,
+          user_id = Map.get(reveal.users, seat),
+          user_id != nil,
+          do: user_id
+
+    if users == [], do: nil, else: {reveal.hand_id, Enum.uniq(users)}
   end
 
   @doc """
@@ -1686,7 +1775,20 @@ defmodule BlockPoker.Tables.RoomState do
   # а купленные в этот момент фишки исчезают вместе с ним.
   # Правила входа принадлежат структуре ставок: там, где платят все и каждую
   # раздачу, ждать нечего и взнос брать не за что.
-  defp entry_rules(%__MODULE__{setting: setting}) do
+  # Турнир — исключение из правил структуры: садит игрока не он сам, а
+  # турнир (стартовая рассадка, поздний вход, ре-энтри, балансировка), и
+  # уклониться от блайнда, не имея права встать, невозможно. Ожидание
+  # большого блайнда там означало бы, что посаженный турниром игрок
+  # просто не получает карт круг за кругом.
+  defp entry_rules(%__MODULE__{mode: mode} = state) do
+    if Map.get(mode.entry_policy(state), :immediate_entry?, false) do
+      EntryRules.Immediate
+    else
+      structure_entry_rules(state)
+    end
+  end
+
+  defp structure_entry_rules(%__MODULE__{setting: setting}) do
     setting.game_type
     |> VariantRegistry.fetch!()
     |> then(& &1.betting_structure())

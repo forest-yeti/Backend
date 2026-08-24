@@ -50,6 +50,9 @@ defmodule BlockPoker.GameMode.Cash do
 
   @doc "Призового фонда в кэше нет: игрок забирает выигранное со стола."
   @impl true
+  def game_mode_id, do: :cash
+
+  @impl true
   def prize_table(%RoomState{}), do: nil
 
   @doc """
@@ -77,7 +80,8 @@ defmodule BlockPoker.GameMode.Cash do
     %{
       big_blind: setting.big_blind,
       allow_post_blind?: setting.allow_post_blind,
-      dodge_window_hands: setting.blind_dodge_window_hands
+      dodge_window_hands: setting.blind_dodge_window_hands,
+      immediate_entry?: false
     }
   end
 

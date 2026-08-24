@@ -42,14 +42,21 @@ config :block_poker, Oban,
   engine: Oban.Engines.Dolphin,
   notifier: Oban.Notifiers.PG,
   peer: Oban.Peers.Database,
-  queues: [tournaments: 10, tickets: 5],
+  queues: [tournaments: 10, tickets: 5, history: 20],
   plugins: [
     {Oban.Plugins.Pruner, max_age: 60 * 60 * 24 * 7},
     {Oban.Plugins.Cron,
      crontab: [
-       {"*/10 * * * *", BlockPoker.Tournaments.Workers.ExpireTickets}
+       {"*/10 * * * *", BlockPoker.Tournaments.Workers.ExpireTickets},
+       # Чистка раздач — раз в сутки и ночью: удаление идёт пачками и
+       # соревнуется за те же таблицы, в которые пишется живая игра.
+       {"20 4 * * *", BlockPoker.History.Workers.Prune}
      ]}
   ]
+
+# Сколько дней живут раздачи. Агрегаты и турнирные результаты не чистятся
+# никогда, поэтому срок относится только к `hands` и `ofc_hands`.
+config :block_poker, :history_retention_days, 90
 
 # Контекст подписи токенов (`Phoenix.Token`). Вынесен в конфиг, чтобы ядро
 # не зависело от транспорта на этапе компиляции.

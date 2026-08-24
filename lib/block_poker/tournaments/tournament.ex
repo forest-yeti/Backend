@@ -115,6 +115,7 @@ defmodule BlockPoker.Tournaments.Tournament do
   @spec registering?(t()) :: boolean()
   def registering?(%__MODULE__{status: :registering}), do: true
   def registering?(%__MODULE__{status: :running}), do: true
+
   # Финальный стол вход не закрывает. В турнире на сотню он наступает,
   # когда поздняя регистрация давно позади, но в турнире на шестерых —
   # с первой же раздачи, и отказывать по нему значило бы запретить

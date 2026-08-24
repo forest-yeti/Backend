@@ -48,6 +48,9 @@ defmodule BlockPoker.GameMode.Tournament do
   end
 
   @impl true
+  def game_mode_id, do: :sit_and_go
+
+  @impl true
   def prize_table(%RoomState{setting: setting}), do: SitAndGo.prize_table(setting)
 
   @impl true
@@ -182,7 +185,8 @@ defmodule BlockPoker.GameMode.Tournament do
       # право войти.
       big_blind: (level && level.big_blind) || 0,
       allow_post_blind?: false,
-      dodge_window_hands: 0
+      dodge_window_hands: 0,
+      immediate_entry?: true
     }
   end
 

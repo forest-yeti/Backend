@@ -5,6 +5,7 @@ defmodule BlockPoker.Application do
 
   use Application
 
+  alias BlockPoker.History.Writer, as: HistoryWriter
   alias BlockPoker.Tables.{Lobby, SitAndGoLobby, TableRegistry, TableSupervisor}
   alias BlockPoker.Tournaments.{TournamentScheduler, TournamentSupervisor}
 
@@ -26,6 +27,10 @@ defmodule BlockPoker.Application do
       # между анонсом и стартом, — таймер процесса этого не переживёт,
       # а строка в `oban_jobs` переживёт.
       {Oban, Application.fetch_env!(:block_poker, Oban)},
+      # Между столом и Oban обязан стоять отдельный процесс: постановка
+      # Oban-задачи — это `Repo.insert`, то есть взятие коннекта из пула
+      # синхронно, в вызывающем процессе. Стол делает `cast` и
+      # возвращается к игре, коннект ждёт Writer (§6 задачи 6).
       # Start a worker by calling: BlockPoker.Worker.start_link(arg)
       # {BlockPoker.Worker, arg},
       # Start to serve requests, typically the last entry
@@ -35,7 +40,7 @@ defmodule BlockPoker.Application do
     # Лобби поднимается последним и не поднимается в тестах: при старте оно
     # читает шаблоны из БД, а в тестах база живёт под Sandbox и принадлежит
     # тест-процессу. Тесты пула запускают своё лобби явно.
-    children = children ++ lobby_children() ++ scheduler_children()
+    children = children ++ lobby_children() ++ scheduler_children() ++ history_children()
 
     # See https://elixir.hexdocs.pm/Supervisor.html
     # for other strategies and supported options
@@ -61,6 +66,22 @@ defmodule BlockPoker.Application do
   defp scheduler_children do
     if Application.get_env(:block_poker, :start_tournament_scheduler, true) do
       [TournamentScheduler]
+    else
+      []
+    end
+  end
+
+  # Между столом и Oban обязан стоять отдельный процесс: постановка
+  # Oban-задачи — это `Repo.insert`, то есть взятие коннекта из пула
+  # синхронно, в вызывающем процессе. Стол делает `cast` и возвращается
+  # к игре, коннект ждёт Writer (§6 задачи 6).
+  #
+  # В тестах не поднимается по той же причине, что лобби и планировщик:
+  # он пишет в БД из своего процесса, а она под Sandbox принадлежит
+  # тест-процессу. Тесты истории поднимают его явно.
+  defp history_children do
+    if Application.get_env(:block_poker, :start_history_writer, true) do
+      [HistoryWriter]
     else
       []
     end

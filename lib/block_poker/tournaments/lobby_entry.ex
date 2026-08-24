@@ -77,6 +77,24 @@ defmodule BlockPoker.Tournaments.LobbyEntry do
   end
 
   @doc """
+  Призовой фонд, каким игрок видит его **сейчас**.
+
+  `tournament.prize_pool` заполняется только при закрытии поздней
+  регистрации (`Tournaments.close_late_reg/1`): до того он ноль, и
+  показывать его значило бы объявлять пустой фонд весь час, пока идёт
+  запись. Живая величина — собранное со входов, но не ниже гарантии:
+  тем же способом фонд потом и фиксируется, поэтому после фиксации
+  цифра не дёргается.
+  """
+  @spec prize_pool(t()) :: non_neg_integer()
+  def prize_pool(%{setting: setting, tournament: tournament}) do
+    %{prize_pool: pool} =
+      BlockPoker.Engine.TournamentPayout.pool(tournament.collected, setting.guarantee)
+
+    max(tournament.prize_pool, pool)
+  end
+
+  @doc """
   Число оплачиваемых мест при текущей явке — то, что игрок видит как
   «до денег осталось N».
 

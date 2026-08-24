@@ -110,6 +110,23 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
     end)
   end
 
+  # То же, но турнир идёт на нескольких столах: состав столов меняется
+  # балансировкой, поэтому список читается заново на каждом круге.
+  defp play_tables_until_finished(pid) do
+    Enum.reduce_while(1..80, :playing, fn _index, _acc ->
+      if TournamentServer.state(pid).status == :finished do
+        {:halt, :finished}
+      else
+        for {_id, table} <- :sys.get_state(pid).tables do
+          deal_hand(table)
+          play_hand(table)
+        end
+
+        {:cont, :playing}
+      end
+    end)
+  end
+
   # Играет раздачи, пока турнир не кончится. Пауза между раздачами
   # прогоняется вручную, а не ожиданием.
   defp play_until_finished(pid, table, limit \\ 60) do
@@ -407,6 +424,44 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       assert Repo.get!(Entry, offer.entry_id).place == nil
     end
 
+    test "вошедший заново сидит за столом и играет", ctx do
+      play_until_bust(ctx.pid, ctx.table)
+
+      assert_received {:tournament_event, "reentry_offer", offer}
+      assert {:ok, _entry} = TournamentServer.reenter(ctx.pid, offer.user_id)
+
+      room = TableServer.state(ctx.table)
+      seat = RoomState.find_seat(room, offer.user_id)
+
+      assert seat != nil
+      assert seat.stack == 5000
+      refute seat.waiting_for_bb
+
+      # Игроков снова двое — стол разыгрывает кнопку и сдаёт: вошедший
+      # заново играет, а не сидит перед пустым столом.
+      deal_hand(ctx.table)
+
+      assert TableServer.state(ctx.table).hand != nil
+    end
+
+    test "вошедший заново не двоится в чипсчёте", ctx do
+      play_until_bust(ctx.pid, ctx.table)
+
+      assert_received {:tournament_event, "reentry_offer", offer}
+      assert {:ok, _entry} = TournamentServer.reenter(ctx.pid, offer.user_id)
+
+      {:ok, card} = Tournaments.card(ctx.tournament.id)
+      rows = card.chip_counts.entries
+
+      # Отменённый ре-энтри вход из списка ушёл: игрок один, со стеком.
+      assert card.chip_counts.total == 2
+      assert length(rows) == 2
+
+      assert [row] = Enum.filter(rows, &(&1.user_id == offer.user_id))
+      assert row.entry_number == 2
+      assert row.stack == 5000
+    end
+
     test "истёкшее окно присваивает место", ctx do
       play_until_bust(ctx.pid, ctx.table)
 
@@ -592,7 +647,8 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       latecomer = user_fixture()
       {:ok, entry} = Tournaments.register(tournament.id, latecomer.id)
 
-      assert :ok = TournamentServer.seat_entry(pid, entry)
+      # Сажает сама регистрация: отдельного вызова со стороны клиента нет.
+      assert {:error, :already_seated} = TournamentServer.seat_entry(pid, entry)
 
       assert TournamentServer.state(pid).players_left == 3
 
@@ -602,6 +658,140 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       seat = table |> TableServer.state() |> RoomState.find_seat(latecomer.id)
 
       assert seat.stack == 5000
+    end
+
+    test "вошедший после старта играет ближайшую раздачу, а не ждёт блайнда", ctx do
+      tournament = tournament_fixture(ctx.setting)
+
+      for _index <- 1..3 do
+        {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+      end
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      latecomer = user_fixture()
+      {:ok, _entry} = Tournaments.register(tournament.id, latecomer.id)
+
+      [{_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+      seat = table |> TableServer.state() |> RoomState.find_seat(latecomer.id)
+
+      refute seat.waiting_for_bb
+      refute seat.post_required
+    end
+  end
+
+  describe "нечётная явка на 2-Max" do
+    test "двое играют, третий ждёт", _ctx do
+      setting = fast_setting(%{table_size: 2, min_players: 2})
+      tournament = tournament_fixture(setting)
+
+      for _index <- 1..3,
+          do: {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      tables = Map.values(:sys.get_state(pid).tables)
+      for table <- tables, do: deal_hand(table)
+
+      rooms = Enum.map(tables, &TableServer.state/1)
+
+      # Пара играет, третий сидит один и ждёт: сажать его не с кем, но
+      # и держать из-за него остальных турнир не имеет права.
+      assert Enum.count(rooms, &(&1.hand != nil)) == 1
+      assert Enum.map(rooms, &length(RoomState.players(&1))) |> Enum.sort() == [1, 2]
+    end
+
+    test "с одним раздающим столом hand-for-hand не включается", _ctx do
+      setting = fast_setting(%{table_size: 2, min_players: 2})
+      tournament = tournament_fixture(setting)
+
+      for _index <- 1..3,
+          do: {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(tournament.id))
+
+      # Втроём при двух оплачиваемых местах баббл — с первой же раздачи,
+      # но раздаёт один стол: синхронизировать не с кем.
+      for {_id, table} <- :sys.get_state(pid).tables do
+        deal_hand(table)
+        play_hand(table)
+      end
+
+      refute_received {:tournament_event, "hand_for_hand", %{active: true}}
+    end
+
+    test "турнир на 2-Max доигрывается до победителя", _ctx do
+      setting = fast_setting(%{table_size: 2, min_players: 2})
+      tournament = tournament_fixture(setting)
+
+      for _index <- 1..3,
+          do: {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      assert :finished = play_tables_until_finished(pid)
+
+      entries = Tournaments.list_entries(tournament.id)
+      assert Enum.map(entries, & &1.place) |> Enum.sort() == [1, 2, 3]
+    end
+  end
+
+  describe "подготовка до старта" do
+    test "за минуту до старта игроки уже за столом, но карт нет", ctx do
+      tournament = tournament_fixture(ctx.setting)
+
+      users = for _index <- 1..2, do: user_fixture()
+      for user <- users, do: {:ok, _entry} = Tournaments.register(tournament.id, user.id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.prepare(pid)
+
+      [{_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+      state = TableServer.state(table)
+
+      # Места розданы...
+      for user <- users, do: assert(RoomState.find_seat(state, user.id).stack == 5000)
+      # ...а раздача не идёт: турнир ещё не начался.
+      assert state.hand == nil
+
+      # Повторная подготовка второго набора столов не поднимает.
+      :ok = TournamentServer.prepare(pid)
+      assert map_size(:sys.get_state(pid).tables) == 1
+
+      :ok = TournamentServer.start_tournament(pid)
+      assert TournamentServer.state(pid).players_left == 2
+
+      # Отпущенный стол играет как обычный: кнопка разыгрывается, раздачи
+      # идут одна за другой — не одна-единственная.
+      deal_hand(table)
+      assert TableServer.state(table).hand != nil
+
+      play_hand(table)
+      deal_hand(table)
+      assert TableServer.state(table).hand != nil
+    end
+
+    test "отписавшийся после подготовки освобождает место", ctx do
+      tournament = tournament_fixture(ctx.setting)
+
+      users = for _index <- 1..3, do: user_fixture()
+      for user <- users, do: {:ok, _entry} = Tournaments.register(tournament.id, user.id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.prepare(pid)
+
+      quitter = List.last(users)
+      :ok = Tournaments.unregister(tournament.id, quitter.id)
+
+      [{_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      assert table |> TableServer.state() |> RoomState.find_seat(quitter.id) == nil
     end
   end
 end

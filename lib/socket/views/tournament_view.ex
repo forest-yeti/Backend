@@ -52,7 +52,9 @@ defmodule Socket.Views.TournamentView do
       # считается фонд, по людям — сколько человек играет.
       entries_count: tournament.entries_count,
       players_count: tournament.players_count,
-      prize_pool: max(tournament.prize_pool, tournament.collected),
+      # Живой фонд, а не поле инстанса: оно заполняется лишь при закрытии
+      # поздней регистрации (см. `LobbyEntry.prize_pool/1`).
+      prize_pool: LobbyEntry.prize_pool(entry),
       kinds: entry.kinds,
       registered: entry.registered,
       has_ticket: entry.has_ticket,

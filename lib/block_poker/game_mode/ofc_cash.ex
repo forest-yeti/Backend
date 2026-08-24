@@ -72,6 +72,9 @@ defmodule BlockPoker.GameMode.OfcCash do
   def init_room(%RoomState{} = state), do: state
 
   @impl true
+  def game_mode_id, do: :ofc_cash
+
+  @impl true
   def prize_table(%RoomState{}), do: nil
 
   @impl true
@@ -93,7 +96,7 @@ defmodule BlockPoker.GameMode.OfcCash do
   """
   @impl true
   def entry_policy(%RoomState{}) do
-    %{big_blind: 0, allow_post_blind?: false, dodge_window_hands: 0}
+    %{big_blind: 0, allow_post_blind?: false, dodge_window_hands: 0, immediate_entry?: true}
   end
 
   @doc "Базовая единица стола — стоимость очка: от неё считаются бай-ин и лимит."

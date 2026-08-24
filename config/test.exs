@@ -29,6 +29,11 @@ config :block_poker, start_lobby: false
 # и прогоняют тик руками, а не ожиданием.
 config :block_poker, start_tournament_scheduler: false
 
+# Writer пишет в БД из своего процесса, а она под Sandbox принадлежит
+# тест-процессу. Тесты истории поднимают его явно, остальным он не нужен:
+# без него `persist_async` — no-op, и игра от этого не меняется ничем.
+config :block_poker, start_history_writer: false
+
 # Oban в тестах не выполняет джобы фоном: очередь без воркеров означает,
 # что джоба доступна для `Oban.Testing`, но не стартует сама и не лезет
 # в чужую транзакцию.

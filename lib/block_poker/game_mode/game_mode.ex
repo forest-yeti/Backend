@@ -32,7 +32,8 @@ defmodule BlockPoker.GameMode do
   @type entry_policy :: %{
           big_blind: non_neg_integer(),
           allow_post_blind?: boolean(),
-          dodge_window_hands: non_neg_integer()
+          dodge_window_hands: non_neg_integer(),
+          immediate_entry?: boolean()
         }
 
   @doc """
@@ -43,6 +44,16 @@ defmodule BlockPoker.GameMode do
   уровней. Ветвление по режиму остаётся ровно там, где выбирается модуль.
   """
   @callback init_room(RoomState.t()) :: RoomState.t()
+
+  @doc """
+  Как режим называется в истории и статистике.
+
+  Атом, а не строка и не вывод по имени модуля: по нему разрезаются
+  агрегаты, и складывать строки разных режимов нечем — в кэше `net`
+  измеряется деньгами, в турнире турнирными фишками. Ветвление по режиму
+  остаётся ровно там, где выбирается модуль.
+  """
+  @callback game_mode_id() :: :cash | :sit_and_go | :mtt | :ofc_cash
 
   @doc """
   Таблица призовых тиров либо `nil`, если призового фонда у режима нет.

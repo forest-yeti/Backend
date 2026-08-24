@@ -32,6 +32,8 @@ defmodule BlockPoker.Tables.TableServer do
   }
 
   alias BlockPoker.Engine.Straddle
+  alias BlockPoker.History
+  alias BlockPoker.History.Report
   alias BlockPoker.Engine.Variant.Registry, as: VariantRegistry
   alias BlockPoker.Tables.{RoomState, Seat, TableRegistry}
   alias Phoenix.PubSub
@@ -794,10 +796,15 @@ defmodule BlockPoker.Tables.TableServer do
   def handle_info({:tournament_paused, paused?}, state) do
     state = put_room(state, %{state.room | draining?: paused?})
 
+    # Снятие паузы идёт через общий вход в игру, а не прямо в раздачу:
+    # стол мог ещё ни разу не раздавать (рассадка до старта турнира), и
+    # тогда сперва разыгрывается кнопка. Иначе первая раздача пошла бы
+    # без неё, а `game_started?` остался бы ложным — стол сыграл бы одну
+    # руку и встал.
     state =
       if paused?,
         do: cancel_timer(state, :next_hand),
-        else: schedule(state, :next_hand, 0)
+        else: maybe_start_game(state)
 
     {:noreply, state}
   end
@@ -962,7 +969,7 @@ defmodule BlockPoker.Tables.TableServer do
 
   defp force_action(state, hand) do
     case discipline(state).timeout(hand) do
-      {:ok, hand, events} -> apply_hand(state, hand, events)
+      {:ok, hand, events} -> apply_hand(state, hand, events, true)
       {:error, _reason} -> state
     end
   end
@@ -1166,6 +1173,11 @@ defmodule BlockPoker.Tables.TableServer do
         {hand, events} = discipline(state).start(setup, state.rng, rake: rake_fun(state))
         room = RoomState.clear_posts(state.room, Map.keys(discipline(state).players(hand)))
 
+        # Прошлая раздача закрывается вместе со своим окном показа: кто
+        # открылся за паузу, доезжает в историю вторым апдейтом, а кто нет
+        # — остаётся закрытым навсегда.
+        flush_reveals(state)
+
         state =
           put_room(state, %{
             RoomState.reset_straddle_window(room)
@@ -1178,6 +1190,11 @@ defmodule BlockPoker.Tables.TableServer do
               # не открыли за паузу, остаются закрытыми навсегда.
               reveal: nil
           })
+
+        # Идентификатор заводится **здесь**, а не при записи: на нём держится
+        # идемпотентность повторной задачи, а повтор случается как раз тогда,
+        # когда раздачи в памяти уже нет.
+        state = put_room(state, open_hand_log(state.room, setup))
 
         broadcast(state, "hand_started", %{
           button_seat: setup.button_seat,
@@ -1244,8 +1261,12 @@ defmodule BlockPoker.Tables.TableServer do
 
   # Пока раздача идёт, источник правды по стекам — она: комната только
   # зеркалит их, чтобы снапшот и лобби не разъезжались с движком.
-  defp apply_hand(state, hand, events) do
+  defp apply_hand(state, hand, events, auto? \\ false) do
     room = %{state.room | hand: hand, hand_stats: track_stats(state.room.hand_stats, events)}
+
+    # Тот же список фактов уходит в broadcast и в историю (§7 CLAUDE.md).
+    # Второго способа узнать, что игрок коллировал, в проекте нет.
+    room = RoomState.log_events(room, events, now_ms(state), auto?)
     state = put_room(state, sync_seats(room, hand))
     state = Enum.reduce(events, state, &emit/2)
     state = clear_preselects_on_new_street(state, events)
@@ -1310,7 +1331,7 @@ defmodule BlockPoker.Tables.TableServer do
     private(state, seat.user_id, "preselect_applied", %{seat: seat.number, action: action})
 
     case discipline(state).act(hand, seat.number, action, nil) do
-      {:ok, hand, events} -> apply_hand(state, hand, events)
+      {:ok, hand, events} -> apply_hand(state, hand, events, true)
       # Выбор не подошёл к обстановке — решает игрок, а не стол.
       {:error, _reason} -> arm_action_timer(state, hand)
     end
@@ -1436,6 +1457,13 @@ defmodule BlockPoker.Tables.TableServer do
 
       state.payout.(room, results)
 
+      # Sit & Go — единственный турнир без `tournament_entries`: стол здесь
+      # и есть турнир, входа как записи не существует. Строку истории всё
+      # равно получают все — иначе ROI не посчитать, — а идентификатор
+      # входа выводится из комнаты и игрока, чтобы повтор при рестарте не
+      # создал второй строки.
+      record_sit_and_go_results(state, room, results)
+
       # Стол не исчезает в ту же секунду: игроки должны увидеть итоговую
       # таблицу. По истечении паузы места освобождаются и комната уходит
       # в drain — без этого доигранный турнир не опустеет никогда,
@@ -1493,7 +1521,11 @@ defmodule BlockPoker.Tables.TableServer do
   defp finish_hand(state, hand) do
     state = state |> cancel_timer(:action) |> cancel_timer(:runout) |> cancel_timer(:rit)
 
-    state = record_stats(state, hand)
+    # Прибавка показателей считается один раз: её ждут и сессия за столом,
+    # и дневной агрегат истории. Второй проход по событиям ради тех же
+    # чисел не нужен.
+    deltas = HandStats.finish(state.room.hand_stats, hand)
+    state = record_stats(state, hand, deltas)
 
     room =
       %{
@@ -1517,6 +1549,13 @@ defmodule BlockPoker.Tables.TableServer do
 
     # Окно показа живёт ту же паузу, что и стол стоит после раздачи.
     room = RoomState.put_reveal(room, hand, now_ms(state) + @next_hand_ms)
+
+    # Наружу уходит **копия** данных, и обратной связи нет: стол про
+    # раздачу забывает и не обязан знать, записалась ли она. Ни `Repo`,
+    # ни `Oban.insert` в этой цепочке нет — оба берут коннект из пула
+    # синхронно, в вызывающем процессе (§11 задачи 6).
+    History.persist_async(hand_report(state, hand, room, deltas))
+    room = RoomState.close_hand_log(room)
 
     # Отчёт о законченной раздаче — **не** то же, что `hand_finished`
     # движка: тот несёт вскрытие и уходит клиенту, этот несёт стеки на
@@ -1571,12 +1610,118 @@ defmodule BlockPoker.Tables.TableServer do
 
   # Показатели сессии обновляются раз в раздачу, и ровно тогда же уходят
   # клиенту: между раздачами меняться им не от чего.
-  defp record_stats(state, hand) do
+  defp record_stats(state, hand, deltas) do
     owners = owners_of(state, hand)
-    deltas = HandStats.finish(state.room.hand_stats, hand)
     state = put_room(state, RoomState.record_stats(state.room, deltas, owners))
     broadcast(state, "stats_update", %{seats: stats_payload(state.room)})
     state
+  end
+
+  # --- история ---------------------------------------------------------------
+
+  defp record_sit_and_go_results(state, room, results) do
+    if room.mode.game_mode_id() == :sit_and_go do
+      entrants = length(results)
+      now = DateTime.utc_now()
+
+      Enum.each(results, fn result ->
+        History.persist_tournament_result_async(%{
+          entry_id: sit_and_go_entry_id(room.room_id, result.user_id),
+          tournament_id: room.room_id,
+          user_id: result.user_id,
+          title: room.mode.display_name(room),
+          tournament_setting_id: room.setting.id,
+          format: :sit_and_go,
+          bounty: false,
+          entry_kind: :initial,
+          entry_index: 0,
+          buy_in: room.setting.buy_in,
+          entry_fee: 0,
+          addons_count: 0,
+          addons_cost: 0,
+          prize: result.amount,
+          bounty_paid: 0,
+          bounty_final: 0,
+          refund: 0,
+          place: result.place,
+          entrants: entrants,
+          itm: result.amount > 0,
+          outcome: if(result.place == 1, do: :won, else: :busted),
+          hands_played: room.hands_played,
+          started_at: state.room.hand_log && state.room.hand_log.started_at,
+          finished_at: now
+        })
+      end)
+    end
+
+    :ok
+  end
+
+  # Детерминированный идентификатор входа: комната плюс игрок. Именно
+  # детерминированный, а не случайный, — на нём держится идемпотентность
+  # записи, и повтор при рестарте обязан упереться в тот же unique-индекс.
+  defp sit_and_go_entry_id(room_id, user_id) do
+    hash = :crypto.hash(:md5, room_id <> user_id)
+    Ecto.UUID.load!(hash)
+  end
+
+  # Номиналы снимаются **на старте** раздачи, а не по её концу: в турнире
+  # уровень растёт, и взять их позже значило бы приписать раздаче блайнды
+  # следующего уровня. Номер уровня хранится вместе с числами, а не вместо
+  # них: числа нужны реплею, номер — человеку.
+  defp open_hand_log(room, setup) do
+    limits = room.mode.limits(room)
+
+    meta = %{
+      game_mode: room.mode.game_mode_id(),
+      setting_id: Map.get(room.setting, :id),
+      tournament_id: Map.get(room.setting, :tournament_id),
+      level_number: room.tournament && room.tournament.level,
+      hand_number: room.hands_played + 1,
+      button_seat: setup.button_seat,
+      bet_unit: room.mode.bet_unit(room),
+      small_blind: limits.small_blind,
+      big_blind: limits.big_blind,
+      ante: limits.ante,
+      point_value: Map.get(limits, :point_value),
+      bomb_pot: setup.bomb_pot && setup.bomb_pot.ante
+    }
+
+    RoomState.open_hand_log(room, Ecto.UUID.generate(), DateTime.utc_now(), meta)
+  end
+
+  # Отчёт о раздаче: копия данных, а не ссылка на состояние комнаты.
+  # Сборкой строк он не занимается — это делает `History.Build` уже в
+  # фоновом процессе.
+  defp hand_report(state, hand, room, deltas) do
+    log = room.hand_log || %{id: Ecto.UUID.generate(), started_at: DateTime.utc_now(), meta: %{}}
+
+    struct!(
+      Report,
+      Map.merge(log.meta, %{
+        hand_id: log.id,
+        room_id: room.room_id,
+        hand: hand,
+        started_at: log.started_at,
+        ended_at: DateTime.utc_now(),
+        log: RoomState.hand_log_events(room),
+        stats: deltas,
+        # Эквити посчитано один раз, при олл-ине, и дожило до конца
+        # раздачи в комнате. Второго расчёта ради истории задача не
+        # вносит — доля игрока просто умножается на слой банка.
+        equity: state.room.showdown && state.room.showdown[:equity]
+      })
+    )
+  end
+
+  # Окно показа закрылось: открывшиеся сами получают в истории видимость
+  # `voluntary`. Запись раздачи этого окна не ждала — иначе следующая
+  # раздача упёрлась бы в предыдущую (§4 задачи 6).
+  defp flush_reveals(state) do
+    case RoomState.voluntary_reveals(state.room) do
+      {hand_id, user_ids} -> History.reveal_cards_async(hand_id, user_ids)
+      nil -> :ok
+    end
   end
 
   # Кто сидел на месте, когда раздача начиналась. Нужен и показателям, и

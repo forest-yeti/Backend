@@ -41,6 +41,9 @@ defmodule BlockPoker.Tournaments.TournamentScheduler do
 
   @default_tick_ms :timer.minutes(1)
 
+  # За сколько до старта поднимаются столы и садятся игроки.
+  @prepare_lead_seconds 60
+
   defmodule State do
     @moduledoc false
     defstruct [:tick_ms, :wall, :timer]
@@ -99,6 +102,7 @@ defmodule BlockPoker.Tournaments.TournamentScheduler do
 
     announce_upcoming(now)
     open_registrations(now)
+    prepare_starting(now)
     start_due(now)
   rescue
     error ->
@@ -180,6 +184,40 @@ defmodule BlockPoker.Tournaments.TournamentScheduler do
       {:ok, _job} -> :ok
       {:error, reason} -> Logger.error("не поставлена отмена: #{inspect(reason)}")
     end
+  end
+
+  # --- Подготовка ----------------------------------------------------------
+
+  # За минуту до старта турнир поднимает столы и сажает записавшихся, но
+  # не раздаёт: игрок видит своё место заранее, а не догоняет уже идущую
+  # раздачу кнопкой «Занять место». Тик идёт раз в минуту, поэтому окно
+  # взято с запасом — повторный `prepare/1` безвреден.
+  defp prepare_starting(now) do
+    for tournament <- due_to_prepare(now) do
+      ensure_server(tournament)
+
+      case TournamentServer.prepare(tournament.id) do
+        :ok ->
+          :ok
+
+        # Минимум не набран — турнир ждёт отмены, столы поднимать не за чем.
+        {:error, :not_enough_players} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.error("турнир #{tournament.id} не подготовлен: #{inspect(reason)}")
+      end
+    end
+  end
+
+  defp due_to_prepare(now) do
+    horizon = DateTime.add(now, @prepare_lead_seconds, :second)
+
+    Tournament
+    |> where([t], t.status == :registering)
+    |> where([t], t.starts_at > ^now and t.starts_at <= ^horizon)
+    |> preload(setting: [:blind_levels, payout_rows: :ticket])
+    |> Repo.all()
   end
 
   # --- Старт ---------------------------------------------------------------

@@ -32,6 +32,7 @@ defmodule BlockPoker.Tournaments do
   import Ecto.Query
 
   alias BlockPoker.Engine.{BlindSchedule, Bounty, TournamentPayout}
+  alias BlockPoker.History
   alias BlockPoker.Repo
   alias BlockPoker.Tables.LobbyQuery
   alias BlockPoker.Tickets
@@ -295,16 +296,40 @@ defmodule BlockPoker.Tournaments do
          entry: LobbyEntry.build(tournament, now: Keyword.get(opts, :now, DateTime.utc_now())),
          levels: blind_schedule(tournament.setting),
          level_flags: level_flags(tournament.setting),
-         payouts: payouts!(tournament),
+         payouts: card_payouts(tournament),
          chip_counts: chip_counts(tournament, limit, offset)
        }}
     end
   end
 
-  defp payouts!(tournament) do
-    case payouts(tournament) do
-      {:ok, payouts} -> payouts
-      {:error, _reason} -> []
+  # Сетка карточки считается по **живому** фонду, а не по
+  # `tournament.prize_pool`: он заполняется только при закрытии поздней
+  # регистрации, а до того равен нулю — и карточка весь час записи
+  # показывала бы «Призовой фонд» с нулями на каждом месте.
+  #
+  # Сетка берётся из снапшота инстанса, пока он есть: турнир уже идёт, и
+  # правка шаблона не должна сдвигать объявленные суммы. У анонса
+  # снапшота ещё нет — там читается шаблон.
+  defp card_payouts(tournament) do
+    case get_setting(tournament.tournament_setting_id) do
+      {:ok, setting} ->
+        %{prize_pool: pool} = TournamentPayout.pool(collected(tournament), setting.guarantee)
+
+        grid =
+          case snapshot_payout_grid(tournament.snapshot) do
+            [] -> payout_grid(setting)
+            rows -> rows
+          end
+
+        TournamentPayout.compute(
+          grid,
+          tournament.entries_count,
+          tournament.players_count,
+          max(tournament.prize_pool, pool)
+        )
+
+      {:error, _reason} ->
+        []
     end
   end
 
@@ -317,8 +342,10 @@ defmodule BlockPoker.Tournaments do
   # запросом к тому, чего в таблице нет.
   defp chip_counts(tournament, limit, offset) do
     query =
-      Entry
+      from(e in Entry, as: :entry)
       |> where([e], e.tournament_id == ^tournament.id)
+      |> where([e], e.status != :refunded)
+      |> reject_superseded()
       |> preload(:user)
 
     total = Repo.aggregate(query, :count)
@@ -333,6 +360,24 @@ defmodule BlockPoker.Tournaments do
       end
 
     %{entries: rows, total: total, limit: limit, offset: offset}
+  end
+
+  # Вход, отменённый ре-энтри, из чипсчёта убирается: вылета не было,
+  # места ему не присвоено, а игрок продолжает играть новым входом.
+  # Оставленный, он висел бы вторым «я» с нулевым стеком — тем самым
+  # дублем, которого в списке игроков быть не должно. Вылет с местом
+  # (`place`) при этом остаётся: это результат, а не отменённая запись.
+  defp reject_superseded(query) do
+    superseded =
+      from(other in Entry,
+        where:
+          other.tournament_id == parent_as(:entry).tournament_id and
+            other.user_id == parent_as(:entry).user_id and
+            other.entry_number > parent_as(:entry).entry_number and
+            other.status != :refunded
+      )
+
+    where(query, [e], e.status != :busted or not is_nil(e.place) or not exists(superseded))
   end
 
   defp page(query, limit, offset) do
@@ -572,6 +617,10 @@ defmodule BlockPoker.Tournaments do
       {:ok, %{entry: entry, payment: payment}} ->
         Enum.each(payment.entries, &Wallet.publish(user_id, &1))
         ensure_server(entry.tournament_id)
+
+        # Ре-энтри сажает сам турнир: он и позвал `enter/4`, и звать его
+        # отсюда значило бы вызов процесса из него самого.
+        if kind == :entry, do: seat_if_running(entry)
         announce_tournament(entry.tournament_id)
         {:ok, entry}
 
@@ -902,8 +951,19 @@ defmodule BlockPoker.Tournaments do
     end)
     |> Repo.transaction()
     |> case do
-      {:ok, %{refund: refund}} ->
+      {:ok, %{refund: refund, entry: entry, setting: setting, tournament: tournament}} ->
         Enum.each(refund, &Wallet.publish(user_id, &1))
+
+        # Строка нулевая по деньгам, но она есть: иначе «сыграно
+        # турниров» и «зарегистрировано» разойдутся необъяснимо.
+        History.persist_tournament_result_async(
+          result_snapshot(tournament, setting, entry, %{
+            outcome: :unregistered,
+            refund: refund_amount(setting, entry)
+          })
+        )
+
+        drop_seat(entry)
         announce_tournament(tournament_id)
         :ok
 
@@ -959,9 +1019,21 @@ defmodule BlockPoker.Tournaments do
     end)
     |> Repo.transaction()
     |> case do
-      {:ok, %{refunds: refunds, entries: entries}} ->
+      {:ok, %{refunds: refunds, entries: entries, setting: setting, tournament: tournament}} ->
         Enum.each(refunds, fn {user_id, written} ->
           Enum.each(written, &Wallet.publish(user_id, &1))
+        end)
+
+        # Дожившие до отмены получают строку истории наравне с
+        # вылетевшими. Без неё ROI врёт: взнос был, а расхода в статистике
+        # нет — и период выглядит прибыльнее, чем он был.
+        Enum.each(entries, fn entry ->
+          History.persist_tournament_result_async(
+            result_snapshot(tournament, setting, entry, %{
+              outcome: :cancelled,
+              refund: refund_amount(setting, entry)
+            })
+          )
         end)
 
         announce_tournament(tournament_id)
@@ -1592,6 +1664,59 @@ defmodule BlockPoker.Tournaments do
     |> Repo.all()
   end
 
+  # Снимок входа для истории: те же поля, что пишет `TournamentServer`
+  # при вылете, но по данным инстанса — здесь турнир кончился, не начавшись,
+  # и процесса, который знал бы явку и число сыгранных раздач, уже нет.
+  defp result_snapshot(%Tournament{} = tournament, %TournamentSetting{} = setting, entry, attrs) do
+    Map.merge(
+      %{
+        entry_id: entry.id,
+        tournament_id: tournament.id,
+        user_id: entry.user_id,
+        title: setting.name,
+        tournament_setting_id: setting.id,
+        format: :mtt,
+        bounty: setting.bounty_part > 0,
+        entry_kind: if(entry.entry_number > 1, do: :reentry, else: :initial),
+        entry_index: entry.entry_number - 1,
+        buy_in: setting.buy_in,
+        entry_fee: setting.entry_fee,
+        addons_count: entry.addons_count,
+        addons_cost: entry.addons_count * (setting.addon_cost || 0),
+        bounty_final: entry.bounty,
+        prize: 0,
+        bounty_paid: 0,
+        refund: 0,
+        # Мест в неначавшемся турнире нет, и `nil` здесь означает именно
+        # это, а не «место неизвестно».
+        place: nil,
+        entrants: tournament.entries_count,
+        itm: false,
+        hands_played: 0,
+        started_at: entry.inserted_at,
+        finished_at: DateTime.utc_now()
+      },
+      attrs
+    )
+  end
+
+  # Вход по билету денег не возвращает — их и не списывали. Возврат
+  # билета деньгами не является и в ROI не входит.
+  defp refund_amount(_setting, %Entry{paid_with_ticket_id: id}) when not is_nil(id), do: 0
+
+  defp refund_amount(setting, %Entry{entry_number: number}) do
+    price_of(setting, if(number == 1, do: :entry, else: :reentry)).total
+  end
+
+  @doc "Один вход по идентификатору."
+  @spec get_entry(Ecto.UUID.t()) :: {:ok, Entry.t()} | {:error, :not_found}
+  def get_entry(entry_id) do
+    case Repo.get(Entry, entry_id) do
+      nil -> {:error, :not_found}
+      entry -> {:ok, entry}
+    end
+  end
+
   @doc "Живые входы: те, что занимают место в рассадке."
   @spec list_seated(Ecto.UUID.t()) :: [Entry.t()]
   def list_seated(tournament_id) do
@@ -1676,6 +1801,34 @@ defmodule BlockPoker.Tournaments do
         {:error, {:already_started, _pid}} -> :ok
         {:error, reason} -> Logger.error("не поднялся турнир: #{inspect(reason)}")
       end
+    end
+
+    :ok
+  end
+
+  # Поздняя регистрация обязана сесть за стол сама: столы уже подняты, и
+  # стартовая рассадка, которая читает входы из БД, давно прошла. Турнир
+  # сам решает, есть ли куда сажать — до старта столов нет, и вход
+  # подберёт стартовая рассадка.
+  defp seat_if_running(%Entry{} = entry) do
+    if TournamentServer.whereis(entry.tournament_id) do
+      case TournamentServer.seat_entry(entry.tournament_id, entry) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.error("вход #{entry.id} не сел за стол: #{inspect(reason)}")
+      end
+    end
+
+    :ok
+  end
+
+  # Отписавшегося убираем со стола: рассадка могла случиться за минуту до
+  # старта, и место обязано освободиться вместе с возвратом взноса.
+  defp drop_seat(%Entry{} = entry) do
+    if TournamentServer.whereis(entry.tournament_id) do
+      TournamentServer.drop_entry(entry.tournament_id, entry.id)
     end
 
     :ok
