@@ -175,7 +175,19 @@ defmodule BlockPoker.Tournaments.GridTest do
       assert length(by_name["High Roller Classic $250"].schedules) == 8
       assert length(by_name["Develop for us - Heads-Up"].schedules) == 1440
 
-      assert [%{start_time: ~T[01:00:00], weekday: 6}] = by_name["Big High Roller $1500"].schedules
+      assert [%{start_time: ~T[01:00:00], weekday: 6}] =
+               by_name["Big High Roller $1500"].schedules
+    end
+
+    test "субботний мейджор появляется за шесть дней, остальные — за час" do
+      by_name = Map.new(Grid.rows(), &{&1.attrs.name, &1.attrs})
+
+      assert by_name["Big High Roller $1500"].registration_opens_before == 518_400
+      assert by_name["Classic $1"].registration_opens_before == 3600
+
+      # Гипер стартует каждые полчаса: окно шире шага запуска показало бы
+      # в витрине два одинаковых турнира подряд.
+      assert by_name["Hyper For Us $1"].registration_opens_before == 1800
     end
 
     test "тестовые шаблоны стартуют втроём и на игровые фишки" do

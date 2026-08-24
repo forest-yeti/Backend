@@ -184,6 +184,12 @@ defmodule BlockPoker.Tournaments.Grid do
       visual: :purple,
       # Суббота, 01:00 по времени рума.
       schedule: {:weekly, 6, ~T[01:00:00]},
+      # Главный турнир недели виден за шесть дней: в него собираются
+      # заранее, и запуск раз в неделю нечем заменить, если игрок его
+      # проспал. Остальные семейства так анонсировать нельзя — они
+      # стартуют каждый час, и витрина превратилась бы в список
+      # одинаковых строк.
+      opens_before: 6 * 24 * 3600,
       prices: [1500],
       bounty: false
     }
@@ -340,7 +346,8 @@ defmodule BlockPoker.Tournaments.Grid do
         min_players: 6,
         structure: template.structure,
         schedules: schedules(template.schedule),
-        registration_opens_before: opens_before(template.structure),
+        registration_opens_before:
+          Map.get(template, :opens_before) || opens_before(template.structure),
         sort_order: price
       })
     end
