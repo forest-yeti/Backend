@@ -27,6 +27,18 @@ defmodule Socket.Channels.TournamentChannelTest do
     user |> connect_as() |> subscribe_and_join("tournaments", payload)
   end
 
+  # Идущий турнир: стартовал в прошлом, поздняя регистрация закрыта.
+  defp running_fixture(setting, starts_at) do
+    tournament = tournament_fixture(setting, %{starts_at: starts_at})
+
+    {:ok, running} =
+      tournament
+      |> Ecto.Changeset.change(status: :running, late_reg_until: starts_at)
+      |> BlockPoker.Repo.update()
+
+    running
+  end
+
   setup do
     setting = setting_fixture(%{table_size: 6, min_players: 2})
 
@@ -108,6 +120,25 @@ defmodule Socket.Channels.TournamentChannelTest do
       {:ok, reply, _channel} = join_lobby(ctx.user)
 
       assert Enum.map(reply.tournaments, & &1.tournament_id) == [ctx.tournament.id, later.id]
+    end
+
+    test "порядок: свои, потом идущие дольше всех, потом ближайшие", ctx do
+      now = DateTime.utc_now()
+
+      # Свой турнир — самый дальний по времени: он всё равно обязан быть
+      # первым, потому что от игрока в нём чего-то ждут.
+      mine = tournament_fixture(ctx.setting, %{starts_at: DateTime.add(now, 10_800)})
+      {:ok, _entry} = Tournaments.register(mine.id, ctx.user.id)
+
+      long = running_fixture(ctx.setting, DateTime.add(now, -7200))
+      short = running_fixture(ctx.setting, DateTime.add(now, -600))
+      later = tournament_fixture(ctx.setting, %{starts_at: DateTime.add(now, 7200)})
+
+      {:ok, reply, _channel} = join_lobby(ctx.user)
+
+      # `ctx.tournament` стартует через час — ближе, чем `later`.
+      assert Enum.map(reply.tournaments, & &1.tournament_id) ==
+               [mine.id, long.id, short.id, ctx.tournament.id, later.id]
     end
 
     test "перечитывает витрину на изменение инстанса", ctx do

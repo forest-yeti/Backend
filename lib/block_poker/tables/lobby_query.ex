@@ -318,12 +318,26 @@ defmodule BlockPoker.Tables.LobbyQuery do
   # Ключ строится так, чтобы `Enum.sort_by/2` оставался стабильным: валюта —
   # всегда первым разрядом, дальше выбранный параметр, дальше — умолчание,
   # разводящее шаблоны с одинаковым лимитом.
-  # Главный порядок турнирной витрины — **ближайший старт**: игрок
-  # выбирает, во что успевает. Валюта по-прежнему первым разрядом: это
-  # разделение витрины, а не сортировка.
+  # Турнирная витрина сортируется по **отношению игрока к турниру**, а не
+  # по свойствам турнира: первым идёт то, что требует его внимания.
+  #
+  #   1. **свои** — где он зарегистрирован, независимо от стадии: это
+  #      единственные строки, где от него чего-то ждут;
+  #   2. **идущие** — от начавшихся раньше к начавшимся позже: чем дольше
+  #      турнир идёт, тем ближе он к деньгам и тем интереснее смотреть;
+  #   3. **будущие** — ближайший старт первым: игрок выбирает, во что
+  #      успевает;
+  #   4. **сыгранные** — в самом низу.
+  #
+  # Внутри группы разряд один и тот же — время старта по возрастанию, — и
+  # он же даёт «дольше всех идёт» во второй группе и «скорее всех
+  # начнётся» в третьей.
+  #
+  # Валюта здесь **не** первым разрядом, в отличие от кэша: турнир, в
+  # который игрок вошёл, не должен уезжать вниз оттого, что он на фишки.
   defp sort_key(%__MODULE__{category: :tournament}, entry) do
-    {currency_rank(entry.setting), DateTime.to_unix(entry.starts_at, :microsecond),
-     entry.entry_price, entry.tournament_id}
+    {stage_rank(entry), currency_rank(entry.setting),
+     DateTime.to_unix(entry.starts_at, :microsecond), entry.entry_price, entry.tournament_id}
   end
 
   defp sort_key(%__MODULE__{sort: nil}, entry), do: default_key(entry)
@@ -337,6 +351,12 @@ defmodule BlockPoker.Tables.LobbyQuery do
   defp sort_key(%__MODULE__{sort: {:occupancy, direction}}, entry) do
     {currency_rank(entry.setting), signed(occupancy(entry), direction), default_key(entry)}
   end
+
+  defp stage_rank(%{registered: true}), do: 0
+
+  defp stage_rank(%{status: status}) when status in [:running, :late_reg], do: 1
+  defp stage_rank(%{status: status}) when status in [:announced, :registering], do: 2
+  defp stage_rank(_entry), do: 3
 
   # Умолчание разводит шаблоны с одинаковым лимитом. Базовая единица и
   # вместимость есть у любого стола; всё, что дальше, — уже частности
