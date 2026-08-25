@@ -59,3 +59,12 @@ config :phoenix, :stacktrace_depth, 20
 
 # Initialize plugs at runtime for faster development compilation
 config :phoenix, :plug_init_mode, :runtime
+
+# Origin'ы панели администратора в dev: vite dev-сервер и `vite preview`.
+# Список явный, `*` плагин не поддерживает (см. Api.Plugs.AdminCors).
+config :block_poker, :admin_origins, [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost:4173",
+  "http://127.0.0.1:4173"
+]
