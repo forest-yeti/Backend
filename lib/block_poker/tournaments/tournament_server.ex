@@ -49,7 +49,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   }
 
   alias BlockPoker.History
-  alias BlockPoker.Tables.{TableRegistry, TableServer, TableSupervisor}
+  alias BlockPoker.Tables.{RoomState, TableRegistry, TableServer, TableSupervisor}
   alias BlockPoker.Tournaments
   alias BlockPoker.Tournaments.{TableSetting, Tournament}
   alias Phoenix.PubSub
@@ -1345,6 +1345,8 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     end)
   end
 
+  defp empty?(pid), do: pid |> TableServer.state() |> RoomState.players() == []
+
   defp busy?(state, table_id) do
     case Map.fetch(state.tables, table_id) do
       {:ok, pid} -> TableServer.state(pid).hand != nil
@@ -1369,27 +1371,58 @@ defmodule BlockPoker.Tournaments.TournamentServer do
          # разойтись они не должны — фишки не могут потеряться между
          # двумя комнатами.
          {:ok, stack} <- TableServer.pull_seat(from, player.user_id) do
-      case TableServer.reserve_seat(to, player.user_id, move.seat, stack) do
-        {:ok, %{reservation_id: reservation, seat: seat}} ->
-          {:ok, _seat} = TableServer.confirm_seat(to, reservation, stack, :wait_bb)
-
-          broadcast(state, "table_changed", %{
-            entry_id: player.entry_id,
-            table_id: move.to,
-            seat: seat
-          })
-
-          update_player(
-            state,
-            player.entry_id,
-            &%{&1 | table_id: move.to, seat: seat, stack: stack}
-          )
-
-        {:error, _reason} ->
-          state
+      case seat_moved(state, to, player, move, stack) do
+        {:ok, state} -> state
+        {:error, reason} -> return_player(state, from, player, stack, reason)
       end
     else
       _other -> state
+    end
+  end
+
+  defp seat_moved(state, to, player, move, stack) do
+    with {:ok, %{reservation_id: reservation, seat: seat}} <-
+           TableServer.reserve_seat(to, player.user_id, move.seat, stack),
+         {:ok, _seat} <- TableServer.confirm_seat(to, reservation, stack, :wait_bb) do
+      broadcast(state, "table_changed", %{
+        entry_id: player.entry_id,
+        table_id: move.to,
+        seat: seat
+      })
+
+      {:ok,
+       update_player(
+         state,
+         player.entry_id,
+         &%{&1 | table_id: move.to, seat: seat, stack: stack}
+       )}
+    end
+  end
+
+  # Между «сняли со стола» и «посадили за другой» фишки не лежат нигде:
+  # они уже вышли из покидаемой комнаты и ещё не вошли в принимающую.
+  # Если посадить не вышло — а это значит, что представление турнира о
+  # свободных местах разошлось с самой комнатой, — игрок возвращается
+  # туда, откуда его сняли. Молча оставить его без стола нельзя: он
+  # числился бы живым со стеком, которого нет ни за одним столом.
+  defp return_player(state, from, player, stack, reason) do
+    Logger.error(
+      "турнир #{state.tournament_id}: пересадка входа #{player.entry_id} не удалась " <>
+        "(#{inspect(reason)}), возвращаем за прежний стол"
+    )
+
+    with {:ok, %{reservation_id: reservation, seat: seat}} <-
+           TableServer.reserve_seat(from, player.user_id, :first_free, stack),
+         {:ok, _seat} <- TableServer.confirm_seat(from, reservation, stack, :wait_bb) do
+      update_player(state, player.entry_id, &%{&1 | seat: seat, stack: stack})
+    else
+      error ->
+        Logger.error(
+          "турнир #{state.tournament_id}: вход #{player.entry_id} остался без стола " <>
+            "со стеком #{stack} — #{inspect(error)}"
+        )
+
+        state
     end
   end
 
@@ -1406,6 +1439,10 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     end)
   end
 
+  # Стол закрывается только **пустым**. План закрытия составлен до
+  # пересадок и исходит из того, что все они прошли; не прошедшая
+  # пересадка оставляет игрока за столом, который план велит закрыть, —
+  # и вместе со столом умерли бы его фишки.
   defp close_tables(state, table_ids) do
     Enum.reduce(table_ids, state, fn table_id, acc ->
       case Map.pop(acc.tables, table_id) do
@@ -1413,9 +1450,17 @@ defmodule BlockPoker.Tournaments.TournamentServer do
           acc
 
         {pid, tables} ->
-          PubSub.unsubscribe(@pubsub, TableServer.topic(table_id))
-          TableSupervisor.stop_room(pid)
-          %{acc | tables: tables}
+          if empty?(pid) do
+            PubSub.unsubscribe(@pubsub, TableServer.topic(table_id))
+            TableSupervisor.stop_room(pid)
+            %{acc | tables: tables}
+          else
+            Logger.error(
+              "турнир #{acc.tournament_id}: стол #{table_id} не закрыт — за ним ещё сидят"
+            )
+
+            acc
+          end
       end
     end)
   end

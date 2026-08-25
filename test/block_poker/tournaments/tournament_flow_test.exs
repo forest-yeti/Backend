@@ -1256,4 +1256,69 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       end
     end
   end
+
+  describe "балансировка" do
+    # Пересадка снимает игрока с одного стола и сажает за другой. Между
+    # этими двумя шагами фишки не лежат нигде — это единственное место в
+    # турнире, где они могут пропасть совсем, и проверяется здесь именно
+    # отказ посадки, а не удачная пересадка (её проверяют сценарии выше).
+    test "неудавшаяся пересадка возвращает игрока за прежний стол, а не теряет фишки", _ctx do
+      setting = fast_setting(%{table_size: 2, min_players: 2})
+      tournament = tournament_fixture(setting)
+
+      for _index <- 1..3,
+          do: {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      # Трое на двухместных столах: пара играет, третий сидит один.
+      tables = :sys.get_state(pid).tables
+      assert map_size(tables) == 2
+
+      {full_id, full} = Enum.find(tables, fn {_id, t} -> occupancy(t) == 2 end)
+      {lonely_id, lonely} = Enum.find(tables, fn {_id, t} -> occupancy(t) == 1 end)
+
+      chips_before = chips_at(full) + chips_at(lonely)
+
+      # Разводим представление турнира с комнатой: турнир перестаёт
+      # видеть одного из сидящих за полным столом и считает, что место
+      # там свободно. Комната при этом полна — и посадка на это место
+      # обязана провалиться.
+      [ghost | _rest] =
+        TournamentServer.players(pid) |> Enum.filter(&(&1.table_id == full_id))
+
+      :sys.replace_state(pid, fn state ->
+        %{state | players: Map.delete(state.players, ghost.entry_id)}
+      end)
+
+      alone = Enum.find(TournamentServer.players(pid), &(&1.table_id == lonely_id))
+      assert alone
+
+      # Конец раздачи — единственный момент, когда турнир пересаживает.
+      send(pid, {:table_event, "hand_summary", hand_summary(lonely_id)})
+      _sync = TournamentServer.state(pid)
+
+      # Игрок вернулся туда, откуда его сняли, со своим стеком...
+      seat = lonely |> TableServer.state() |> RoomState.find_seat(alone.user_id)
+
+      assert seat
+      assert seat.stack == 5000
+
+      # ...и фишек в турнире ровно столько же, сколько было.
+      assert chips_at(full) + chips_at(lonely) == chips_before
+
+      # Турнир знает, за каким столом игрок сидит на самом деле.
+      assert Enum.find(TournamentServer.players(pid), &(&1.entry_id == alone.entry_id)).table_id ==
+               lonely_id
+    end
+
+    defp occupancy(table), do: table |> TableServer.state() |> RoomState.players() |> length()
+
+    # Пустой отчёт о конце раздачи: вылетевших нет, банков нет. Нужен,
+    # чтобы турнир принял решение о рассадке, не играя раздачу.
+    defp hand_summary(room_id) do
+      %{room_id: room_id, busted: [], pots: [], button_seat: 1, stacks: %{}}
+    end
+  end
 end
