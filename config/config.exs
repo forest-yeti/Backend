@@ -27,6 +27,16 @@ config :block_poker, Socket.Endpoint,
 # переходе на летнее время турнир обязан остаться в 21:30 по его часам.
 config :block_poker, :room_timezone, "Europe/Moscow"
 
+# Автообновление клиента (задача 34). Значения по умолчанию намеренно
+# «пропускают всех»: `minimum: "0.0.0"` не отсекает ни одну сборку, включая
+# те, что про `client_vsn` ещё не знают. Реальные границы приходят из
+# окружения — их поднимают без передеплоя кода.
+config :block_poker, :client_release,
+  current: "0.0.0",
+  minimum: "0.0.0",
+  feed_url: nil,
+  dir: nil
+
 # База часовых поясов. `tz` компилирует данные IANA в модули на сборке:
 # в рантайме нет ни сетевых загрузок, ни фонового процесса обновления.
 config :elixir, :time_zone_database, Tz.TimeZoneDatabase

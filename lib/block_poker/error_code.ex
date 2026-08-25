@@ -16,6 +16,7 @@ defmodule BlockPoker.ErrorCode do
           | :token_reused
           | :rate_limited
           | :unsupported_protocol_version
+          | :client_too_old
           | :insufficient_funds
           | :seat_taken
           | :already_seated
@@ -86,6 +87,10 @@ defmodule BlockPoker.ErrorCode do
     token_reused: {401, "Повторное использование отозванного токена"},
     rate_limited: {429, "Слишком много запросов, попробуйте позже"},
     unsupported_protocol_version: {426, "Версия протокола не поддерживается"},
+    # Сборка клиента ниже минимально поддерживаемой. Отдельный код, а не
+    # `unsupported_protocol_version`: там клиент не понимает формат сообщений,
+    # здесь — понимает, но устарел, и лечится это обновлением приложения.
+    client_too_old: {426, "Версия приложения устарела, требуется обновление"},
     insufficient_funds: {422, "Недостаточно средств"},
     seat_taken: {409, "Место уже занято"},
     already_seated: {409, "Вы уже сидите за этим столом"},

@@ -24,6 +24,10 @@ defmodule Socket.Endpoint do
     plug Phoenix.Ecto.CheckRepoStatus, otp_app: :block_poker
   end
 
+  # Файлы автообновления клиента — до парсеров и роутера: это статика,
+  # и разбирать её тело как JSON незачем (§3 задачи 34).
+  plug Api.Plugs.ClientUpdates
+
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 

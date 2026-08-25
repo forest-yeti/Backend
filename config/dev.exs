@@ -68,3 +68,16 @@ config :block_poker, :admin_origins, [
   "http://localhost:4173",
   "http://127.0.0.1:4173"
 ]
+
+# God-mode наблюдения за столами в dev: без него панель не показывает карты
+# и вкладки стола у неё нет вовсе. В прод этот флаг не переносится.
+config :block_poker, :admin_observer, enabled: true
+
+# Автообновление клиента. В dev файлы лежат в репозитории, а фид смотрит на
+# сам же dev-сервер: клиент читает его как обычную внешнюю статику и про то,
+# что раздаёт её Phoenix, не знает.
+config :block_poker, :client_release,
+  current: "0.0.0",
+  minimum: "0.0.0",
+  feed_url: "http://localhost:4000/client-updates",
+  dir: "priv/client_updates"

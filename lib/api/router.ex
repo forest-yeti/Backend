@@ -43,6 +43,14 @@ defmodule Api.Router do
     get "/health", HealthController, :show
   end
 
+  # Версия клиента — публично и без токена: её спрашивают до логина и до
+  # сокета, в том числе сборкой, которую в игру уже не пускают (§1 задачи 34).
+  scope "/api", Api do
+    pipe_through :api
+
+    get "/client/version", ClientController, :show
+  end
+
   scope "/api", Api do
     pipe_through [:api, :auth_rate_limit]
 

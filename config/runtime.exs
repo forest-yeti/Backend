@@ -71,6 +71,19 @@ if config_env() == :prod do
 
   config :block_poker, :admin_origins, admin_origins
 
+  # Автообновление клиента (задача 34). Обе границы — переменными окружения,
+  # потому что поднимать их приходится чаще, чем деплоить код: выкатили
+  # сборку — подняли `CLIENT_CURRENT_VSN`, нашли несовместимость — подняли
+  # `CLIENT_MIN_VSN`, и старые клиенты перестают пускаться в игру.
+  #
+  # Пустой `CLIENT_UPDATES_DIR` означает «файлы раздаёт кто-то другой»
+  # (nginx, CDN) — бэкенд тогда только сообщает версии и адрес фида.
+  config :block_poker, :client_release,
+    current: System.get_env("CLIENT_CURRENT_VSN", "0.0.0"),
+    minimum: System.get_env("CLIENT_MIN_VSN", "0.0.0"),
+    feed_url: System.get_env("CLIENT_FEED_URL"),
+    dir: System.get_env("CLIENT_UPDATES_DIR")
+
   config :block_poker, Socket.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [
