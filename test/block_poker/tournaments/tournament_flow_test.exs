@@ -1321,4 +1321,58 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       %{room_id: room_id, busted: [], pots: [], button_seat: 1, stacks: %{}}
     end
   end
+
+  describe "падение стола" do
+    # Комната `:temporary`: сама она не поднимется, и турнир обязан
+    # пережить её падение — иначе один упавший стол уносит рассадку
+    # всего турнира.
+    test "турнир поднимает стол заново и сажает игроков с их стеками", _ctx do
+      setting = fast_setting(%{table_size: 6, min_players: 2})
+      tournament = tournament_fixture(setting)
+
+      users = for _index <- 1..3, do: user_fixture()
+      for user <- users, do: {:ok, _entry} = Tournaments.register(tournament.id, user.id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(tournament.id))
+
+      [{dead_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      # Раздача сыграна: стеки разошлись, и именно их турнир обязан
+      # перенести на новый стол.
+      deal_hand(table)
+      play_hand(table)
+      sync_tournament(pid)
+
+      stacks = Map.new(TournamentServer.players(pid), &{&1.user_id, &1.stack})
+
+      Process.exit(table, :kill)
+
+      # Падение доезжает до турнира сообщением `:DOWN` — его, в отличие
+      # от таймеров, вручную не прогнать, поэтому здесь единственное
+      # ожидание в наборе, и оно на сообщение, а не на сон.
+      assert_receive {:tournament_event, "table_recovered", %{table_id: ^dead_id}}
+
+      # Турнир жив.
+      assert Process.alive?(pid)
+      _sync = TournamentServer.state(pid)
+
+      [{new_id, new_table}] = Map.to_list(:sys.get_state(pid).tables)
+      refute new_id == dead_id
+
+      room = TableServer.state(new_table)
+
+      for user <- users do
+        seat = RoomState.find_seat(room, user.id)
+
+        assert seat, "игрок #{user.id} не сел за поднятый стол"
+        assert seat.stack == Map.fetch!(stacks, user.id)
+      end
+
+      # И турнир доигрывается: поднятый стол — обычный стол.
+      assert :finished = play_until_finished(pid, new_table)
+    end
+  end
 end

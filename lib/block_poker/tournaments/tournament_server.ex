@@ -391,6 +391,16 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
   def handle_info({:tournament_updated, _id}, state), do: {:noreply, state}
 
+  # Стол упал. Комната не перезапускается сама (`restart: :temporary`),
+  # и её падение — не повод терять турнир: рассадку и стеки турнир знает
+  # сам, они у него в `players`.
+  def handle_info({:DOWN, _ref, :process, pid, reason}, state) do
+    case Enum.find(state.tables, fn {_id, table_pid} -> table_pid == pid end) do
+      nil -> {:noreply, state}
+      {table_id, _pid} -> {:noreply, recover_table(state, table_id, reason)}
+    end
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
 
   # --- Старт ---------------------------------------------------------------
@@ -499,6 +509,11 @@ defmodule BlockPoker.Tournaments.TournamentServer do
         # Турнир слушает свои столы: конец раздачи — единственный момент,
         # когда он вправе что-то менять в рассадке.
         :ok = PubSub.subscribe(@pubsub, TableServer.topic(room_id))
+
+        # И следит за тем, что они живы: комната `:temporary`, сама она
+        # не поднимется, а её падение иначе унесло бы весь турнир — на
+        # первом же вызове к мёртвому процессу.
+        Process.monitor(pid)
 
         %{state | tables: Map.put(state.tables, room_id, pid)}
 
@@ -1345,6 +1360,18 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     end)
   end
 
+  defp close_table(state, table_id, pid, tables) do
+    if empty?(pid) do
+      PubSub.unsubscribe(@pubsub, TableServer.topic(table_id))
+      TableSupervisor.stop_room(pid)
+      %{state | tables: tables}
+    else
+      Logger.error("турнир #{state.tournament_id}: стол #{table_id} не закрыт — за ним ещё сидят")
+
+      state
+    end
+  end
+
   defp empty?(pid), do: pid |> TableServer.state() |> RoomState.players() == []
 
   defp busy?(state, table_id) do
@@ -1450,19 +1477,64 @@ defmodule BlockPoker.Tournaments.TournamentServer do
           acc
 
         {pid, tables} ->
-          if empty?(pid) do
-            PubSub.unsubscribe(@pubsub, TableServer.topic(table_id))
-            TableSupervisor.stop_room(pid)
-            %{acc | tables: tables}
-          else
-            Logger.error(
-              "турнир #{acc.tournament_id}: стол #{table_id} не закрыт — за ним ещё сидят"
-            )
-
-            acc
-          end
+          close_table(acc, table_id, pid, tables)
       end
     end)
+  end
+
+  # --- Падение стола -------------------------------------------------------
+
+  # Игроки упавшего стола пересаживаются за новый со стеками **на конец
+  # последней раздачи**: именно они лежат в `players` и обновляются
+  # после каждой раздачи. Незавершённая раздача при этом аннулируется, и
+  # вложенное в неё возвращается игрокам — то же правило, что у кэш-стола
+  # (§8 CLAUDE.md).
+  defp recover_table(state, table_id, reason) do
+    Logger.error(
+      "турнир #{state.tournament_id}: упал стол #{table_id} (#{inspect(reason)}) — поднимаем заново"
+    )
+
+    PubSub.unsubscribe(@pubsub, TableServer.topic(table_id))
+
+    orphans =
+      state.players
+      |> Map.values()
+      |> Enum.filter(&(&1.alive? and &1.table_id == table_id))
+
+    state = %{state | tables: Map.delete(state.tables, table_id)}
+    state = if state.final_table == table_id, do: %{state | final_table: nil}, else: state
+
+    state = Enum.reduce(orphans, state, &reseat_orphan(&2, &1))
+
+    broadcast(state, "table_recovered", %{table_id: table_id})
+
+    state
+  end
+
+  defp reseat_orphan(state, player) do
+    state = if least_filled_table(state) == nil, do: open_table(state), else: state
+
+    with table_id when table_id != nil <- least_filled_table(state),
+         {:ok, pid} <- Map.fetch(state.tables, table_id),
+         {:ok, %{reservation_id: reservation, seat: seat}} <-
+           TableServer.reserve_seat(pid, player.user_id, :first_free, player.stack),
+         {:ok, _seat} <- TableServer.confirm_seat(pid, reservation, player.stack, :wait_bb) do
+      broadcast(state, "table_changed", %{
+        entry_id: player.entry_id,
+        table_id: table_id,
+        seat: seat
+      })
+
+      update_player(state, player.entry_id, &%{&1 | table_id: table_id, seat: seat})
+    else
+      error ->
+        Logger.error(
+          "турнир #{state.tournament_id}: вход #{player.entry_id} не сел после падения стола " <>
+            "— #{inspect(error)}"
+        )
+
+        state
+    end
   end
 
   # --- Финал ---------------------------------------------------------------
