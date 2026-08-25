@@ -1375,4 +1375,33 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       assert :finished = play_until_finished(pid, new_table)
     end
   end
+
+  describe "чужой за турнирным столом" do
+    test "посторонний не может сесть за стол турнира через общий вход", _ctx do
+      setting = fast_setting(%{table_size: 6, min_players: 2})
+      tournament = tournament_fixture(setting)
+
+      for _index <- 1..2,
+          do: {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      [{room_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      stranger = user_fixture()
+      before = chips_at(table)
+
+      # Место за турнирным столом продаётся регистрацией, а не посадкой:
+      # общий вход в комнату обязан отказать, иначе посторонний садится
+      # в идущий турнир с фишками, которых никто не покупал.
+      assert {:error, _reason} =
+               BlockPoker.Tables.join_seat(room_id, stranger.id, :first_free, 100_000)
+
+      room = TableServer.state(table)
+
+      assert RoomState.find_seat(room, stranger.id) == nil
+      assert chips_at(table) == before
+    end
+  end
 end
