@@ -803,6 +803,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     state =
       %{state | break: nil, break_timer: nil}
       |> catch_up_seating()
+      |> maybe_final_table()
 
     resume_tables(state)
 

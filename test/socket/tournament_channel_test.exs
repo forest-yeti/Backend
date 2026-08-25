@@ -476,9 +476,13 @@ defmodule Socket.Channels.TournamentChannelTest do
 
     # Стек равен большому блайнду: первая раздача идёт на всё и кто-то
     # обязательно вылетает.
-    defp bust_one(%{table: table, users: users} = ctx) do
+    defp bust_one(%{table: table, users: users, pid: pid} = ctx) do
       Enum.reduce_while(1..10, nil, fn _hand, _acc ->
         play_one_hand(table)
+
+        # Барьер: место освобождает турнир, получив конец раздачи
+        # сообщением, — до этого вылетевший ещё сидит.
+        _state = TournamentServer.state(pid)
 
         room = TableServer.state(table)
 
@@ -488,7 +492,7 @@ defmodule Socket.Channels.TournamentChannelTest do
         end
       end)
       |> case do
-        nil -> flunk("никто не вылетел: сетап раздачи сломан #{inspect(map_size(ctx))}")
+        nil -> flunk("никто не вылетел: #{inspect(TournamentServer.state(ctx.pid))}")
         busted -> busted
       end
     end
