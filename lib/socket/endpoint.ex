@@ -31,6 +31,13 @@ defmodule Socket.Endpoint do
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
+  # CORS панели — до парсеров и до роутера. До роутера потому, что
+  # предполётный `OPTIONS` маршрута не имеет и в пайплайн не попадает.
+  # До парсеров — потому, что ответ об ошибке разбора тела (например,
+  # слишком большая загрузка) тоже обязан нести эти заголовки: без них
+  # браузер покажет отказ как ошибку CORS и спрячет настоящую причину.
+  plug Api.Plugs.AdminCors
+
   # Загрузка сборки клиента: своё тело, свой предел размера. Стоит до
   # общего парсера и срабатывает ровно на одной ручке (§3 задачи 34).
   plug Api.Plugs.ClientReleaseUpload
@@ -41,10 +48,6 @@ defmodule Socket.Endpoint do
     json_decoder: Phoenix.json_library()
 
   plug Plug.Head
-
-  # CORS панели — до роутера: предполётный `OPTIONS` не имеет маршрута,
-  # и в пайплайне роутера этот плаг для него не выполнялся бы вовсе.
-  plug Api.Plugs.AdminCors
 
   # HTTP-слой намеренно тощий: только то, что нельзя сделать по сокету.
   plug Api.Router

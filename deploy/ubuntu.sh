@@ -537,6 +537,27 @@ server {
         proxy_buffering off;
     }
 
+    # Загрузка сборки клиента — единственная ручка с большим телом.
+    # Общий `client_max_body_size 1m` отвергал бы инсталлятор на сотне
+    # мегабайт, причём ответом `413` без CORS-заголовков: в браузере это
+    # выглядит как ошибка CORS, а не как «файл слишком большой».
+    #
+    # Предел ставит приложение (`Api.Plugs.ClientReleaseUpload`), а не
+    # прокси: держать его в двух местах значит однажды развести их.
+    location /admin/client-releases {
+        proxy_pass http://127.0.0.1:4000;
+        proxy_http_version 1.1;
+        client_max_body_size 0;
+        # Не копим гигабайт на диске прокси: тело едет в приложение потоком.
+        proxy_request_buffering off;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
     # Сокет панели администратора. Отдельный блок, а не общий с игровым:
     # пути разные, и `location /socket/` его не покрывает — без этого
     # `/admin/socket/websocket` уходит в `location /`, где Upgrade-заголовков
