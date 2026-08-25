@@ -59,6 +59,9 @@ defmodule BlockPoker.Tournaments.Tournament do
   # Статусы, в которых турнир идёт. Дальше только конец.
   @live [:running, :late_reg_closed, :finishing]
 
+  # Конечные статусы: из них турнир уже никуда не перейдёт.
+  @over [:finished, :cancelled]
+
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
   schema "tournaments" do
@@ -104,6 +107,16 @@ defmodule BlockPoker.Tournaments.Tournament do
   @doc "Турнир идёт."
   @spec live?(t()) :: boolean()
   def live?(%__MODULE__{status: status}), do: status in @live
+
+  @doc """
+  Турнир кончился — доигран или отменён. Дальше он только читается:
+  ни денег с игрока, ни фишек игроку.
+
+  Не отрицание `live?/1`: между «ещё не начался» и «уже кончился» разница
+  ровно в том, что первое пройдёт само.
+  """
+  @spec over?(t()) :: boolean()
+  def over?(%__MODULE__{status: status}), do: status in @over
 
   @doc """
   Принимает ли турнир вход прямо сейчас — первичный или повторный.

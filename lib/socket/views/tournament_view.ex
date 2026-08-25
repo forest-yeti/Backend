@@ -131,11 +131,26 @@ defmodule Socket.Views.TournamentView do
       entries: state.entries,
       tables: state.tables,
       on_break: state.on_break,
+      # Сколько ещё стоять. `null` при `on_break: true` — столы доигрывают
+      # начатое, и пять минут ещё не пошли: их начало приезжает событием
+      # `break_clock`. Показывать в этот момент полный отсчёт значило бы
+      # объявить конец перерыва раньше, чем он наступит.
+      break_ends_in_ms: state.break_ends_in_ms,
       # Игра «рука в руку» на пузыре: пока флаг поднят, столы ждут друг
       # друга, и пауза между раздачами — это не подвисший стол.
       hand_for_hand: state.hand_for_hand,
-      next_payout_place: state.next_payout_place,
-      final_table: state.final_table
+      # Число оплачиваемых мест при нынешней явке. Не «следующее призовое
+      # место»: следующий вылетевший получает на единицу больше и остаётся
+      # вне денег.
+      paid_places: state.paid_places,
+      final_table: state.final_table,
+      # Остаток уровня, а не момент повышения: часы уровня паузятся на
+      # перерыве, и абсолютного дедлайна у них нет.
+      next_level_in_ms: state.next_level_in_ms,
+      # Структура целиком — она нужна за столом (разбор по наведению на
+      # плашку уровня), а ходить за ней в карточку лобби ради одного
+      # наведения незачем.
+      blind_levels: Enum.map(state.levels, &level(&1, state.level_flags))
     }
   end
 

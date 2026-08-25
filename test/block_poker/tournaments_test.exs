@@ -763,6 +763,131 @@ defmodule BlockPoker.TournamentsTest do
       assert Tournaments.collected(reloaded) == 1500
     end
 
+    test "аддон после фиксации фонда в него всё-таки попадает" do
+      setting = setting_fixture(%{addon_cost: 500, addon_stack: 5000})
+      tournament = tournament_fixture(setting)
+      user = user_fixture()
+
+      {:ok, _entry} = Tournaments.register(tournament.id, user.id)
+      {:ok, _second} = Tournaments.register(tournament.id, user_fixture().id)
+
+      # Окно входа закрывается по стенным часам, а перерыв с аддоном
+      # приходит по часам уровня — те стоят на каждом перерыве. То есть
+      # аддонный перерыв наступает **после** фиксации почти всегда, и
+      # эти деньги не имеют права пропасть.
+      {:ok, tournament} = Tournaments.get_tournament(tournament.id)
+      {:ok, closed} = Tournaments.close_late_reg(tournament)
+      assert closed.prize_pool == 2000
+
+      {:ok, _addon} = Tournaments.addon(tournament.id, user.id)
+
+      {:ok, reloaded} = Tournaments.get_tournament(tournament.id)
+      assert Tournaments.collected(reloaded) == 2500
+      assert reloaded.prize_pool == 2500
+
+      # И сетка выплат считает уже от него: место стоит больше, чем
+      # стоило до аддона.
+      {:ok, payouts} = Tournaments.payouts(reloaded)
+      assert Enum.sum(Enum.map(payouts, & &1.amount)) == 2500
+    end
+
+    test "аддон после фиксации съедает оверлей, а не добавляется к гарантии" do
+      setting = setting_fixture(%{addon_cost: 500, addon_stack: 5000, guarantee: 10_000})
+      tournament = tournament_fixture(setting)
+      user = user_fixture()
+
+      {:ok, _entry} = Tournaments.register(tournament.id, user.id)
+      {:ok, tournament} = Tournaments.get_tournament(tournament.id)
+      {:ok, closed} = Tournaments.close_late_reg(tournament)
+
+      assert closed.prize_pool == 10_000
+      assert closed.overlay == 9000
+
+      {:ok, _addon} = Tournaments.addon(tournament.id, user.id)
+
+      # Фонд держит гарантия, и он не растёт: растёт вклад игроков,
+      # а доля рума на те же 500 уменьшается.
+      {:ok, reloaded} = Tournaments.get_tournament(tournament.id)
+      assert reloaded.prize_pool == 10_000
+      assert reloaded.overlay == 8500
+    end
+
+    test "доигранный турнир аддон не продаёт" do
+      setting = setting_fixture(%{addon_cost: 500, addon_stack: 5000})
+      tournament = tournament_fixture(setting)
+      user = user_fixture()
+
+      {:ok, _entry} = Tournaments.register(tournament.id, user.id)
+
+      {:ok, tournament} = Tournaments.get_tournament(tournament.id)
+
+      {:ok, _finished} =
+        tournament
+        |> Tournament.changeset(%{status: :finished})
+        |> BlockPoker.Repo.update()
+
+      assert {:error, :addon_not_allowed} = Tournaments.addon(tournament.id, user.id)
+    end
+
+    test "откат аддона возвращает и деньги, и фонд" do
+      setting = setting_fixture(%{addon_cost: 500, addon_stack: 5000})
+      tournament = tournament_fixture(setting)
+      user = user_fixture()
+
+      {:ok, _entry} = Tournaments.register(tournament.id, user.id)
+      {:ok, tournament} = Tournaments.get_tournament(tournament.id)
+      {:ok, _closed} = Tournaments.close_late_reg(tournament)
+
+      before = balance(user)
+
+      {:ok, entry} = Tournaments.addon(tournament.id, user.id)
+      assert balance(user) == before - 500
+
+      :ok = Tournaments.refund_addon(tournament.id, entry.id)
+
+      # Всё на месте: кошелёк, счётчик аддонов входа и фонд.
+      assert balance(user) == before
+
+      {:ok, reloaded} = Tournaments.get_tournament(tournament.id)
+      assert Tournaments.collected(reloaded) == 1000
+      assert reloaded.prize_pool == 1000
+      assert reloaded.addons_count == 0
+
+      {:ok, refunded} = Tournaments.get_entry(entry.id)
+      assert refunded.addons_count == 0
+    end
+
+    test "расчёт платит по сетке инстанса, а не по правленому шаблону" do
+      setting = setting_fixture()
+      tournament = tournament_fixture(setting)
+
+      {:ok, _first} = Tournaments.register(tournament.id, user_fixture().id)
+      {:ok, _second} = Tournaments.register(tournament.id, user_fixture().id)
+
+      {:ok, tournament} = Tournaments.get_tournament(tournament.id)
+      {:ok, closed} = Tournaments.close_late_reg(tournament)
+
+      # Сумма, объявленная игроку сейчас: 65% фонда за первое место.
+      {:ok, announced} = Tournaments.current_payouts(closed)
+      assert Enum.find(announced, &(&1.place == 1)).amount == 1300
+
+      # Оператор правит шаблон посреди турнира — так бывает, и снапшот
+      # инстанса существует ровно ради этого.
+      for row <- setting.payout_rows do
+        share = if row.place_from == 1, do: 900_000, else: 100_000
+
+        {:ok, _updated} =
+          row |> BlockPoker.Tournaments.PayoutRow.changeset(%{share_ppm: share}) |> Repo.update()
+      end
+
+      {:ok, reloaded} = Tournaments.get_tournament(tournament.id)
+
+      # По этой функции пишутся деньги. Разойтись с уже объявленной
+      # суммой ей нельзя: игрок обязан получить то, что ему сказали.
+      {:ok, paid} = Tournaments.payouts(reloaded)
+      assert Enum.find(paid, &(&1.place == 1)).amount == 1300
+    end
+
     test "закрытие поздней регистрации фиксирует фонд и оверлей" do
       setting = setting_fixture(%{guarantee: 10_000})
       tournament = tournament_fixture(setting)

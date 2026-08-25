@@ -533,6 +533,11 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       {:ok, entry, state} ->
         {:reply, {:ok, %{entry_id: entry.id, entry_number: entry.entry_number}}, state}
 
+      # Откат посадки возвращает и состояние: окно ре-энтри в нём
+      # восстановлено, и терять его вместе с ошибкой нельзя.
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, state}
+
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
@@ -894,8 +899,11 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   # --- Ре-энтри и аддон ----------------------------------------------------
 
   defp do_reenter(state, user_id) do
-    # Окно ре-энтри снимается **до** оплаты: если игрок платит, вылета
-    # не было, и место, зарезервированное за ним, освобождается.
+    # Окно ищется до оплаты, а снимается после неё. Порядок именно такой:
+    # не прошедший оплату игрок остаётся с открытым окном и дотикает его
+    # до присвоения места, как если бы предложением не воспользовался.
+    # Сними окно раньше — и отказ кошелька оставил бы вылет навсегда
+    # нерешённым: ни места, ни строки в результатах.
     pending = Enum.find(state.pending_reentries, fn {_id, p} -> p.user_id == user_id end)
 
     with {:ok, entry} <- Tournaments.reenter(state.tournament_id, user_id) do
@@ -908,9 +916,56 @@ defmodule BlockPoker.Tournaments.TournamentServer do
           {:ok, entry, state}
 
         {:error, reason} ->
-          {:error, reason}
+          undo_reentry(state, entry, pending, reason)
       end
     end
+  end
+
+  # За стол не сели — значит и денег брать не за что.
+  #
+  # Оставить как есть нельзя вдвойне: игрок заплатил и не сидит, а окно
+  # ре-энтри к этому моменту уже снято (`drop_pending/2` выше), то есть
+  # прежний его вылет так и не станет окончательным — места он не
+  # получит вовсе. Поэтому вход откатывается, а окно возвращается на
+  # место: пусть дотикает и присвоит место, как если бы предложением
+  # не воспользовались.
+  defp undo_reentry(state, entry, pending, reason) do
+    Logger.error(
+      "турнир #{state.tournament_id}: вход #{entry.id} не сел после оплаты " <>
+        "(#{inspect(reason)}), возвращаем взнос"
+    )
+
+    case Tournaments.refund_reentry(state.tournament_id, entry.id) do
+      :ok ->
+        {:error, reason, restore_pending(state, pending)}
+
+      {:error, refund_error} ->
+        {:error, :internal_error, failed_refund(state, entry, refund_error)}
+    end
+  end
+
+  defp failed_refund(state, entry, refund_error) do
+    Logger.error(
+      "турнир #{state.tournament_id}: ре-энтри входа #{entry.id} оплачен, но не посажен " <>
+        "и не возвращён — #{inspect(refund_error)}"
+    )
+
+    state
+  end
+
+  # Окно ре-энтри назад. Таймер заводится новый: прежний снят вместе
+  # с окном, и без него вылет остался бы нерешённым навсегда — турнир
+  # не смог бы закончиться, потому что `maybe_finish/1` ждёт пустого
+  # `pending_reentries`.
+  defp restore_pending(state, nil), do: state
+
+  defp restore_pending(state, {entry_id, pending}) do
+    timer = schedule({:reentry_expired, entry_id}, state.setting.rebuy_prompt_ms)
+
+    %{
+      state
+      | pending_reentries: Map.put(state.pending_reentries, entry_id, %{pending | timer: timer})
+    }
   end
 
   defp drop_pending(state, nil), do: state
@@ -932,7 +987,27 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       state.final_table != nil -> {:error, :addon_not_allowed}
       state.break == nil -> {:error, :addon_not_allowed}
       not level_allows_addon?(state) -> {:error, :addon_not_allowed}
-      true -> charge_addon(state, user_id)
+      true -> charge_addon(state, user_id, seated_table(state, user_id))
+    end
+  end
+
+  # За каким столом сидит игрок — **до** того, как с него возьмут деньги.
+  #
+  # Порядок здесь и есть смысл: `Tournaments.addon/2` проводит платёж
+  # целиком, и отказ после него оставил бы списание без фишек. Вылетевший
+  # с открытым окном ре-энтри — не выдуманный случай: он остаётся в
+  # `players` со снятым местом (`table_id: nil`), и до этой проверки его
+  # запрос доходил до кошелька.
+  defp seated_table(state, user_id) do
+    with player when player != nil <-
+           Enum.find_value(state.players, fn {_id, player} ->
+             if player.alive? and player.user_id == user_id, do: player
+           end),
+         table_id when table_id != nil <- player.table_id,
+         {:ok, pid} <- Map.fetch(state.tables, table_id) do
+      {:ok, pid}
+    else
+      _absent -> {:error, :not_seated}
     end
   end
 
@@ -942,31 +1017,48 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     |> Map.get("addon_allowed", false)
   end
 
-  defp charge_addon(state, user_id) do
-    with {:ok, entry} <- Tournaments.addon(state.tournament_id, user_id),
-         {:ok, player} <- fetch_player(state, entry.id) do
+  defp charge_addon(_state, _user_id, {:error, reason}), do: {:error, reason}
+
+  defp charge_addon(state, user_id, {:ok, pid}) do
+    with {:ok, entry} <- Tournaments.addon(state.tournament_id, user_id) do
       chips = state.snapshot["addon_stack"]
 
       # Фишки кладёт стол, но по указанию турнира: сам себе стек за
       # столом турнира никто не увеличивает.
-      case Map.fetch(state.tables, player.table_id) do
-        {:ok, pid} ->
-          {:ok, stack} = TableServer.grant_chips(pid, user_id, chips)
-
+      case TableServer.grant_chips(pid, user_id, chips) do
+        {:ok, stack} ->
           broadcast(state, "addon_taken", %{entry_id: entry.id, user_id: user_id, stack: stack})
 
           {:ok, stack, update_player(state, entry.id, &%{&1 | stack: stack})}
 
-        :error ->
-          {:error, :not_seated}
+        {:error, reason} ->
+          # Место проверено до платежа, но между проверкой и выдачей лежит
+          # вызов к чужому процессу. Не прошёл — деньги возвращаются:
+          # списание без фишек хуже отказа.
+          undo_addon(state, entry, reason)
       end
     end
   end
 
-  defp fetch_player(state, entry_id) do
-    case Map.fetch(state.players, entry_id) do
-      {:ok, player} -> {:ok, player}
-      :error -> {:error, :not_registered}
+  defp undo_addon(state, entry, reason) do
+    Logger.error(
+      "турнир #{state.tournament_id}: стол не принял аддон входа #{entry.id} " <>
+        "(#{inspect(reason)}), возвращаем деньги"
+    )
+
+    case Tournaments.refund_addon(state.tournament_id, entry.id) do
+      :ok ->
+        {:error, :not_seated}
+
+      {:error, refund_error} ->
+        # Возврат не прошёл — это уже расхождение в деньгах, и молчать
+        # о нём нельзя: разбирается оно руками по ledger.
+        Logger.error(
+          "турнир #{state.tournament_id}: аддон входа #{entry.id} списан, но не выдан " <>
+            "и не возвращён — #{inspect(refund_error)}"
+        )
+
+        {:error, :internal_error}
     end
   end
 
@@ -1048,15 +1140,10 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
     Enum.each(state.tables, fn {_id, pid} -> send(pid, {:tournament_paused, true}) end)
 
+    # Только объявление: пять минут ещё не пошли. Сколько их ждать,
+    # в `XX:55` неизвестно — перерыв начинается с последней доигранной
+    # раздачи, и дедлайн уезжает в `break_clock` (см. `arm_break_end/1`).
     broadcast(state, "break_started", %{})
-
-    if state.final_table == nil and level_allows_addon?(state) do
-      broadcast(state, "addon_offer", %{
-        deadline_ms: TournamentBreak.duration_ms(),
-        cost: state.snapshot["addon_cost"],
-        stack: state.snapshot["addon_stack"]
-      })
-    end
 
     # Столы, где раздача не идёт, готовы сразу: ждать от них нечего.
     # Столов может не быть вовсе (последний схлопнулся, единственный
@@ -1093,9 +1180,32 @@ defmodule BlockPoker.Tournaments.TournamentServer do
         | break: %{break | ends_at: TournamentBreak.ends_at(state.wall.())},
           break_timer: schedule(:break_over, TournamentBreak.duration_ms())
       }
+      |> start_break_clock()
     else
       state
     end
+  end
+
+  # Пять минут пошли: все столы доиграли. Дедлайн объявляется **здесь**,
+  # а не вместе с `break_started`, потому что в `XX:55` он ещё неизвестен —
+  # перерыв отсчитывается от последней доигранной раздачи. Объявленный
+  # заранее счётчик врал бы ровно на её длительность, и игрок за медленным
+  # столом получил бы окно аддона короче, чем ему показали.
+  #
+  # Срабатывает один раз за перерыв: `arm_break_end/1` выше отсекает
+  # повторный вход по `ends_at != nil`.
+  defp start_break_clock(state) do
+    broadcast(state, "break_clock", %{ends_in_ms: TournamentBreak.duration_ms()})
+
+    if state.final_table == nil and level_allows_addon?(state) do
+      broadcast(state, "addon_offer", %{
+        deadline_ms: TournamentBreak.duration_ms(),
+        cost: state.snapshot["addon_cost"],
+        stack: state.snapshot["addon_stack"]
+      })
+    end
+
+    state
   end
 
   defp end_break(%State{break: nil} = state), do: state
@@ -1870,6 +1980,10 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       |> Enum.filter(&(&1.alive? and &1.table_id == table_id))
 
     state = %{state | tables: Map.delete(state.tables, table_id)}
+
+    # Упала финалка. Её признак снимается, потому что стол с этим `id`
+    # больше не существует: игроков пересадят за новый, и держать за
+    # финальный мёртвый — значит объявить клиенту стол, которого нет.
     state = if state.final_table == table_id, do: %{state | final_table: nil}, else: state
 
     # Мёртвый стол вычёркивается из ожиданий **до** пересадки: иначе
@@ -1881,7 +1995,13 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
     broadcast(state, "table_recovered", %{table_id: table_id})
 
-    state
+    # Финалка объявляется заново **здесь**, а не на следующей раздаче.
+    # Раздачи может и не быть: за поднятым столом сначала разыгрывается
+    # кнопка, а до `hand_summary` игрок всё это время сидел бы за столом
+    # без второй пары цветов — и с признаком финалки, потерянным вместе
+    # с упавшим столом. Идентификатор при этом новый, и клиенту нужен
+    # именно он: `maybe_final_table/1` пришлёт его вместе с настройками.
+    maybe_final_table(state)
   end
 
   defp reseat_orphan(state, player) do
@@ -1982,6 +2102,15 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
         %{state | status: :finished, results: results}
 
+      # Ни одного живого. По сохранению фишек это недостижимо — кто-то
+      # выигрывает каждый банк, — но если случится, турнир не закончится
+      # уже никогда: победителя нет, а `settle/2` звать не с кем. Молчать
+      # об этом нельзя, разбирается такое руками по `hand_actions`.
+      [] ->
+        Logger.error("турнир #{state.tournament_id}: не осталось живых входов, победителя нет")
+
+        state
+
       _more ->
         state
     end
@@ -2072,11 +2201,45 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       entries: map_size(state.players),
       tables: map_size(state.tables),
       on_break: state.break != nil,
+      # Сколько ещё стоять. `nil` при `on_break: true` означает не «нисколько»,
+      # а «столы ещё доигрывают» — пять минут не начались (`start_break_clock/1`).
+      break_ends_in_ms: break_ends_in_ms(state),
       hand_for_hand: state.hand_for_hand != nil,
-      next_payout_place: paid_places(state),
+      # Сколько мест оплачивается при нынешней явке — а не «какое место
+      # оплатят следующим»: следующий вылетевший получает `paid_places + 1`
+      # и остаётся вне призов. Имя врало ровно на единицу.
+      paid_places: paid_places(state),
       final_table: state.final_table,
-      hands_played: state.hands_played
+      hands_played: state.hands_played,
+      # Наружу уходит **остаток**, а не момент: часы уровня монотонны и
+      # паузятся, и абсолютного времени, которое клиент мог бы сверить со
+      # своими, у них нет по построению.
+      next_level_in_ms: next_level_in_ms(state),
+      levels: TableSetting.levels(state.snapshot),
+      level_flags: Tournaments.snapshot_level_flags(state.snapshot)
     }
+  end
+
+  # Остаток текущего уровня. `nil` — часы стоят (перерыв) либо уровень
+  # последний: и то и другое означает «отсчитывать нечего», и клиент
+  # рисует это отсутствием счётчика, а не нулём.
+  defp next_level_in_ms(%State{level_started_at: nil}), do: nil
+
+  defp next_level_in_ms(state) do
+    levels = TableSetting.levels(state.snapshot)
+    elapsed = state.level_elapsed_ms + (state.monotonic.() - state.level_started_at)
+
+    max(BlindSchedule.duration_ms(levels, state.level) - elapsed, 0)
+  end
+
+  # Остаток перерыва. Считается стенными часами, потому что ими же
+  # `TournamentBreak` его и назначил.
+  defp break_ends_in_ms(%State{break: nil}), do: nil
+
+  defp break_ends_in_ms(%State{break: %{ends_at: nil}}), do: nil
+
+  defp break_ends_in_ms(%State{break: %{ends_at: ends_at}} = state) do
+    max(DateTime.diff(ends_at, state.wall.(), :millisecond), 0)
   end
 
   defp broadcast(state, event, payload) do

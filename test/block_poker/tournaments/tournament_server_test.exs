@@ -207,6 +207,39 @@ defmodule BlockPoker.Tournaments.TournamentServerTest do
       assert state.level_elapsed_ms == 60_000
     end
 
+    test "снимок несёт остаток уровня, а не момент повышения", ctx do
+      clock = start_supervised!({Agent, fn -> 0 end}, id: :remaining_clock)
+      now = fn -> Agent.get(clock, & &1) end
+      advance = fn ms -> Agent.update(clock, &(&1 + ms)) end
+
+      %{pid: pid} = start_tournament(ctx.setting, 3, monotonic: now)
+      :ok = TournamentServer.start_tournament(pid)
+
+      # Уровень длится десять минут: минута игры — девять в остатке.
+      advance.(60_000)
+      assert TournamentServer.state(pid).next_level_in_ms == 540_000
+
+      # На перерыве часы стоят, и отсчитывать нечего: `nil`, а не ноль —
+      # клиент рисует это отсутствием счётчика, а не «повышение сейчас».
+      :ok = TournamentServer.fire(pid, :break)
+      assert TournamentServer.state(pid).next_level_in_ms == nil
+
+      # Перерыв уровню не засчитывается: остаток тот же самый.
+      advance.(300_000)
+      :ok = TournamentServer.fire(pid, :break_over)
+      assert TournamentServer.state(pid).next_level_in_ms == 540_000
+    end
+
+    test "снимок несёт структуру уровней с флагами входа", ctx do
+      %{pid: pid} = start_tournament(ctx.setting, 3)
+      :ok = TournamentServer.start_tournament(pid)
+
+      state = TournamentServer.state(pid)
+
+      refute state.levels == []
+      assert %{rebuy_allowed: _rebuy, addon_allowed: _addon} = state.level_flags[1]
+    end
+
     test "уровень турнира виден в снапшоте номиналами", ctx do
       %{pid: pid} = start_tournament(ctx.setting, 3)
       :ok = TournamentServer.start_tournament(pid)
@@ -267,14 +300,14 @@ defmodule BlockPoker.Tournaments.TournamentServerTest do
 
       # Живых четверо, платят двоих — до баббла ещё один вылет.
       refute state.hand_for_hand
-      assert state.next_payout_place == 2
+      assert state.paid_places == 2
     end
 
     test "число оплачиваемых мест считается по сетке при текущей явке", ctx do
       %{pid: pid} = start_tournament(ctx.setting, 4)
       :ok = TournamentServer.start_tournament(pid)
 
-      assert TournamentServer.state(pid).next_payout_place == 2
+      assert TournamentServer.state(pid).paid_places == 2
     end
   end
 

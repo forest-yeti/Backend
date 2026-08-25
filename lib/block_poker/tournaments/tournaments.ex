@@ -130,6 +130,30 @@ defmodule BlockPoker.Tournaments do
   end
 
   @doc """
+  Флаги уровней **инстанса** — из его снапшота, по той же причине, по
+  которой из снапшота берётся сетка выплат (`snapshot_payout_grid/1`):
+  правка шаблона посреди турнира не должна ни открыть ре-энтри заново,
+  ни передвинуть уровень аддона под ногами у играющих.
+
+  Пустая карта — снапшота ещё нет; для клиента это «флагов не знаем»,
+  а не «всё запрещено», и рисуется отсутствием пометок.
+  """
+  @spec snapshot_level_flags(map() | nil) :: %{
+          pos_integer() => %{rebuy_allowed: boolean(), addon_allowed: boolean()}
+        }
+  def snapshot_level_flags(nil), do: %{}
+
+  def snapshot_level_flags(snapshot) when is_map(snapshot) do
+    Map.new(snapshot["levels"] || [], fn level ->
+      {level["level"],
+       %{
+         rebuy_allowed: level["rebuy_allowed"] == true,
+         addon_allowed: level["addon_allowed"] == true
+       }}
+    end)
+  end
+
+  @doc """
   Сетка выплат **инстанса** — из его снапшота, а не из живого шаблона.
 
   Снапшот для того и снят при открытии регистрации: правка
@@ -904,6 +928,65 @@ defmodule BlockPoker.Tournaments do
   end
 
   @doc """
+  Откат повторного входа: вход не сел за стол, деньги возвращаются.
+
+  Компенсация, как и `refund_addon/2`, и по той же причине: между оплатой
+  и посадкой лежит вызов к чужому процессу. Стол мог отказать — свободных
+  мест не осталось, представление турнира о рассадке разошлось с самими
+  комнатами. Оставленный как есть, такой вход был бы худшим из состояний:
+  игрок заплатил, за столом не сидит, фишек не получил, а прежний его
+  вылет так и не стал окончательным — места в турнирной таблице у него
+  нет ни одного.
+
+  `unregister/2` для этого не годится: она снимает вход по игроку и
+  только до первой карты, а здесь турнир давно идёт и откатить нужно
+  ровно ту запись, которую только что завели.
+
+  Ре-энтри билетом не оплачивается (см. `register/3`), поэтому возврат
+  здесь всегда денежный.
+  """
+  @spec refund_reentry(Ecto.UUID.t(), Ecto.UUID.t()) :: :ok | {:error, term()}
+  def refund_reentry(tournament_id, entry_id) do
+    Multi.new()
+    |> Multi.run(:tournament, fn repo, _changes -> lock_tournament(repo, tournament_id) end)
+    |> Multi.run(:setting, fn _repo, %{tournament: tournament} ->
+      get_setting(tournament.tournament_setting_id)
+    end)
+    |> Multi.run(:entry, fn repo, _changes -> fetch_entry(entry_id, repo) end)
+    |> Multi.run(:refund, fn repo, changes -> refund_entry(repo, changes) end)
+    # Запись помечается возвращённой, а не удаляется: номер входа держит
+    # ключ идемпотентности списания, и переиспользовать его нельзя (та же
+    # причина, что в `unregister/2`).
+    |> Multi.run(:release, fn repo, %{entry: entry} ->
+      entry |> Entry.changeset(%{status: :refunded}) |> repo.update()
+    end)
+    |> Multi.run(:counters, fn repo, changes ->
+      {1, _returned} =
+        repo.update_all(from(t in Tournament, where: t.id == ^changes.tournament.id),
+          inc: [
+            entries_count: -1,
+            reentries_count: -1,
+            collected: -changes.entry.credited,
+            bounty_pool: -changes.entry.bounty
+          ]
+        )
+
+      {:ok, :updated}
+    end)
+    |> Multi.run(:pool, fn repo, changes -> refix_pool(repo, changes) end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{entry: entry, refund: written}} ->
+        Enum.each(written, &Wallet.publish(entry.user_id, &1))
+        announce_tournament(tournament_id)
+        :ok
+
+      {:error, _step, reason, _changes} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
   Взять повторный вход из-за стола: оплата **и** посадка.
 
   Транспорту нужна именно эта функция, а не `reenter/2`: та берёт только
@@ -1144,6 +1227,12 @@ defmodule BlockPoker.Tournaments do
     |> Multi.run(:setting, fn _repo, %{tournament: tournament} ->
       get_setting(tournament.tournament_setting_id)
     end)
+    |> Multi.run(:live, fn _repo, %{tournament: tournament} ->
+      # Доигранный или отменённый турнир денег не берёт. Право взять
+      # аддон проверяет процесс, но процесс мог и не дожить: снятая
+      # с него проверка оставила бы платёж, которому некуда лечь.
+      if Tournament.over?(tournament), do: {:error, :addon_not_allowed}, else: {:ok, :live}
+    end)
     |> Multi.run(:entry, fn repo, %{tournament: tournament} ->
       # Строка входа блокируется: `addons_count` читается и увеличивается
       # в разных шагах, и без блокировки два одновременных запроса оба
@@ -1175,6 +1264,7 @@ defmodule BlockPoker.Tournaments do
 
       {:ok, :counted}
     end)
+    |> Multi.run(:pool, fn repo, changes -> refix_pool(repo, changes) end)
     |> Repo.transaction()
     |> case do
       {:ok, %{entry: entry, charge: written}} ->
@@ -1184,6 +1274,110 @@ defmodule BlockPoker.Tournaments do
 
       {:error, _step, reason, _changes} ->
         {:error, reason}
+    end
+  end
+
+  @doc """
+  Откат аддона: деньги назад, счётчики назад, фонд обратно к тому, чем был.
+
+  Компенсация, а не «отмена по желанию»: взять её вправе только тот, кто
+  аддон и провёл, — процесс турнира, у которого стол отказался принять
+  фишки. Между списанием и выдачей фишек лежит вызов к чужому процессу,
+  и он может не пройти: представление турнира о том, где сидит игрок,
+  разошлось с самой комнатой. Оставить в этот момент как есть значило бы
+  взять деньги и не дать за них ничего.
+
+  Транзакция одна: возврат, `addons_count` у входа и у инстанса,
+  `collected` и — если фонд уже зафиксирован — сам фонд с оверлеем.
+  Ключ идемпотентности зеркалит ключ списания, поэтому повторный откат
+  второй записи не создаёт.
+  """
+  @spec refund_addon(Ecto.UUID.t(), Ecto.UUID.t()) :: :ok | {:error, term()}
+  def refund_addon(tournament_id, entry_id) do
+    Multi.new()
+    |> Multi.run(:tournament, fn repo, _changes -> lock_tournament(repo, tournament_id) end)
+    |> Multi.run(:setting, fn _repo, %{tournament: tournament} ->
+      get_setting(tournament.tournament_setting_id)
+    end)
+    |> Multi.run(:entry, fn repo, _changes -> fetch_entry(entry_id, repo) end)
+    |> Multi.run(:credit, fn repo, changes -> credit_addon_refund(repo, changes) end)
+    |> Multi.run(:count, fn repo, changes ->
+      {1, _returned} =
+        repo.update_all(from(e in Entry, where: e.id == ^changes.entry.id),
+          inc: [addons_count: -1]
+        )
+
+      {1, _returned} =
+        repo.update_all(from(t in Tournament, where: t.id == ^changes.tournament.id),
+          inc: [addons_count: -1, collected: -changes.setting.addon_cost]
+        )
+
+      {:ok, :counted}
+    end)
+    |> Multi.run(:pool, fn repo, changes -> refix_pool(repo, changes) end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{entry: entry, credit: written}} ->
+        Enum.each(written, &Wallet.publish(entry.user_id, &1))
+        announce_tournament(tournament_id)
+        :ok
+
+      {:error, _step, reason, _changes} ->
+        {:error, reason}
+    end
+  end
+
+  defp credit_addon_refund(_repo, %{setting: %TournamentSetting{addon_cost: 0}}), do: {:ok, []}
+
+  defp credit_addon_refund(repo, %{setting: setting, tournament: tournament, entry: entry}) do
+    with {:ok, wallet} <- Wallet.get_wallet(entry.user_id, setting.currency) do
+      Multi.new()
+      |> Wallet.record_entry(:refund, %{
+        wallet_id: wallet.id,
+        amount: setting.addon_cost,
+        type: :tournament_refund,
+        ref_id: tournament.id,
+        idempotency_key:
+          "tournament:#{tournament.id}:addon_refund:#{entry.id}:#{entry.addons_count}"
+      })
+      |> repo.transaction()
+      |> case do
+        {:ok, %{refund: written}} -> {:ok, [written]}
+        {:error, _step, reason, _changes} -> {:error, reason}
+      end
+    end
+  end
+
+  # Фонд, зафиксированный до аддона, обязан фиксацию пережить.
+  #
+  # `close_late_reg/1` фиксирует `prize_pool` по стенным часам, а перерыв
+  # с аддоном приходит по часам уровня — те стоят на каждом перерыве и
+  # отстают от стенных примерно на пять минут в час. То есть аддонный
+  # перерыв наступает **после** фиксации почти всегда, а не в редком
+  # случае. Пока фонд не пересчитывался, эти деньги уходили в `collected`
+  # и не доставались никому: `payouts/1` считает от `prize_pool`.
+  #
+  # Пересчёт идёт тем же `TournamentPayout.pool/2`, что и сама фиксация, —
+  # оверлей при этом честно уменьшается: рум доплачивает разницу до
+  # гарантии, а не сверх собранного.
+  #
+  # До фиксации делать нечего: `prize_pool` там ноль, и `close_late_reg/1`
+  # посчитает его от уже увеличенного `collected` сам.
+  defp refix_pool(repo, %{tournament: tournament, setting: setting}) do
+    case repo.get(Tournament, tournament.id) do
+      %Tournament{prize_pool: pool} = fresh when pool > 0 ->
+        %{prize_pool: prize_pool, overlay: overlay} =
+          TournamentPayout.pool(collected(fresh), setting.guarantee)
+
+        {1, _returned} =
+          repo.update_all(from(t in Tournament, where: t.id == ^fresh.id),
+            set: [prize_pool: prize_pool, overlay: overlay]
+          )
+
+        {:ok, prize_pool}
+
+      _not_fixed ->
+        {:ok, :not_fixed}
     end
   end
 
@@ -1282,17 +1476,37 @@ defmodule BlockPoker.Tournaments do
   Считается чистым ядром (`Engine.TournamentPayout`) от зафиксированного
   фонда, числа входов и числа **уникальных** участников. Последнее и есть
   усечение при ре-энтри: сетка на 60 мест при 50 живых людях неисполнима.
+
+  Сетка — инстанса, а не шаблона (`grid_of/2`): по этой функции пишутся
+  деньги, и разойтись с суммой, уже объявленной вылетевшему, ей нельзя.
   """
   @spec payouts(Tournament.t()) :: {:ok, [TournamentPayout.payout()]} | {:error, term()}
   def payouts(%Tournament{} = tournament) do
     with {:ok, setting} <- get_setting(tournament.tournament_setting_id) do
       {:ok,
        TournamentPayout.compute(
-         payout_grid(setting),
+         grid_of(tournament, setting),
          tournament.entries_count,
          tournament.players_count,
          tournament.prize_pool
        )}
+    end
+  end
+
+  # Сетка идущего инстанса — его собственная, из снапшота. Шаблон остаётся
+  # запасным значением, и только им: инстанс без снапшота — это турнир,
+  # который ещё не открывал регистрацию, и своей сетки у него пока нет.
+  #
+  # Одно место на обе функции намеренно. Сумма, объявленная вылетевшему
+  # (`current_payouts/1`), и сумма, записанная ему в кошелёк (`settle/2`
+  # через `payouts/1`), обязаны совпадать — а совпадать они могут, только
+  # если читают одну сетку одним кодом. Пока `payouts/1` брала живой
+  # шаблон, правка `tournament_payouts` посреди турнира разводила эти два
+  # числа, и игрок получал не то, что ему объявили.
+  defp grid_of(%Tournament{} = tournament, %TournamentSetting{} = setting) do
+    case snapshot_payout_grid(tournament.snapshot) do
+      [] -> payout_grid(setting)
+      grid -> grid
     end
   end
 
@@ -1326,7 +1540,7 @@ defmodule BlockPoker.Tournaments do
 
       {:ok,
        TournamentPayout.compute(
-         snapshot_payout_grid(tournament.snapshot),
+         grid_of(tournament, setting),
          tournament.entries_count,
          tournament.players_count,
          pool
@@ -1422,11 +1636,23 @@ defmodule BlockPoker.Tournaments do
         status: :busted,
         place: place,
         shared_places: shared_places,
-        busted_at: DateTime.utc_now()
+        busted_at: busted_at(entry)
       })
       |> Repo.update()
     end
   end
+
+  # Время вылета ставится один раз — тем моментом, когда у входа кончились
+  # фишки.
+  #
+  # Функция зовётся дважды за один вылет: сперва из `offer_reentry/2` без
+  # места (окно открыто, вылет ещё не окончателен), потом из
+  # `finalize_bust/3` с местом. Второй вызов приходит по истечении окна —
+  # и, перезаписывая `busted_at`, сдвигал бы время вылета на минуту-другую
+  # вперёд. По нему считается `finished_at` в истории, то есть длительность
+  # турнира для игрока.
+  defp busted_at(%Entry{busted_at: nil}), do: DateTime.utc_now()
+  defp busted_at(%Entry{busted_at: at}), do: at
 
   @doc """
   Сколько игрок заработал, выбивая чужие головы в этом турнире.

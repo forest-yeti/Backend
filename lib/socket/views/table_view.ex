@@ -102,6 +102,11 @@ defmodule Socket.Views.TableView do
     %{
       level: tournament.level,
       next_level_in_ms: remaining(tournament.level_deadline_at),
+      # Стол стоит: перерыв MTT либо синхронный круг на пузыре. Флаг
+      # приходит снапшотом, а не только событием `table_paused`, —
+      # подключившийся в паузу иначе увидел бы стол, который «не
+      # раздаёт», и никакого объяснения к нему.
+      paused: room.paused?,
       # Приза ещё нет, пока турнир не начался: он тянется до первой карты.
       prize: tournament.prize,
       buy_in: room.setting.buy_in,

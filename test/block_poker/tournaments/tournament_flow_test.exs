@@ -550,6 +550,28 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       assert entry.status in [:busted, :paid]
     end
 
+    test "время вылета — момент вылета, а не истечения окна", ctx do
+      play_until_bust(ctx.pid, ctx.table)
+
+      assert_received {:tournament_event, "reentry_offer", offer}
+
+      # Вылет уже записан: окно открыто, но фишек у входа нет, и время
+      # проставлено сейчас.
+      busted = Repo.get!(Entry, offer.entry_id)
+      assert busted.busted_at
+      assert busted.place == nil
+
+      send(ctx.pid, {:reentry_expired, offer.entry_id})
+      _sync = TournamentServer.state(ctx.pid)
+
+      # Окно истекло минутой позже — место присвоено, а время вылета
+      # осталось прежним. По нему считается `finished_at` в истории,
+      # то есть длительность турнира для игрока.
+      finalized = Repo.get!(Entry, offer.entry_id)
+      assert finalized.place == 2
+      assert finalized.busted_at == busted.busted_at
+    end
+
     test "исчерпанный лимит вылетает сразу, без предложения" do
       setting = fast_setting(%{rebuy_allowed: true, max_rebuys: 0})
       tournament = tournament_fixture(setting)
@@ -716,6 +738,48 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       assert reloaded.addons_count == 1
     end
 
+    test "потерянное турниром место не доводит запрос до кошелька", ctx do
+      before = balance(ctx.user)
+
+      :ok = TournamentServer.fire(ctx.pid, :break)
+
+      # Представление турнира о рассадке разошлось с комнатами: стол,
+      # за которым числится игрок, турнир больше не держит. Так бывает
+      # после неудачной пересадки и после падения стола.
+      :sys.replace_state(ctx.pid, fn state -> %{state | tables: %{}} end)
+
+      assert {:error, :not_seated} = TournamentServer.addon(ctx.pid, ctx.user.id)
+
+      # Главное здесь — не код ошибки, а кошелёк: место проверяется
+      # **до** платежа, и отказ не оставляет списания без фишек.
+      assert balance(ctx.user) == before
+
+      {:ok, reloaded} = Tournaments.get_tournament(ctx.tournament.id)
+      assert reloaded.addons_count == 0
+      assert Tournaments.collected(reloaded) == 2000
+    end
+
+    test "стол не принял фишки — взнос за аддон возвращается", ctx do
+      before = balance(ctx.user)
+
+      :ok = TournamentServer.fire(ctx.pid, :break)
+
+      # Место у турнира на месте, а за столом его уже нет: между
+      # проверкой и выдачей лежит вызов к чужому процессу, и вот он
+      # не проходит.
+      {:ok, _stack} = TableServer.pull_seat(ctx.table, ctx.user.id)
+
+      assert {:error, :not_seated} = TournamentServer.addon(ctx.pid, ctx.user.id)
+
+      # Списание было — и откатилось целиком: кошелёк, счётчик входа,
+      # счётчик инстанса и фонд.
+      assert balance(ctx.user) == before
+
+      {:ok, reloaded} = Tournaments.get_tournament(ctx.tournament.id)
+      assert reloaded.addons_count == 0
+      assert Tournaments.collected(reloaded) == 2000
+    end
+
     test "перерыв объявляет окно аддона", ctx do
       Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(ctx.tournament.id))
 
@@ -725,6 +789,36 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       assert offer.cost == 500
       assert offer.stack == 3000
       assert offer.deadline_ms == 300_000
+    end
+
+    test "окно аддона открывается с концом последней раздачи, а не в XX:55", ctx do
+      %{pid: pid, table: table} = ctx
+
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(ctx.tournament.id))
+
+      # Перерыв объявлен посреди раздачи. Пять минут ещё не пошли: они
+      # отсчитываются от последней доигранной руки, и объявленный сейчас
+      # дедлайн врал бы ровно на её длительность.
+      deal_hand(table)
+      :ok = TournamentServer.fire(pid, :break)
+
+      assert_received {:tournament_event, "break_started", _payload}
+      refute_received {:tournament_event, "break_clock", _clock}
+      refute_received {:tournament_event, "addon_offer", _offer}
+
+      # В снимке это видно тем же различием: стоим, но сколько ещё —
+      # пока неизвестно.
+      snapshot = TournamentServer.state(pid)
+      assert snapshot.on_break
+      assert snapshot.break_ends_in_ms == nil
+
+      play_hand(table)
+
+      assert_received {:tournament_event, "break_clock", %{ends_in_ms: 300_000}}
+      assert_received {:tournament_event, "addon_offer", %{deadline_ms: 300_000}}
+
+      # Часы стенные и настоящие: сверяем с запасом на исполнение теста.
+      assert_in_delta TournamentServer.state(pid).break_ends_in_ms, 300_000, 5_000
     end
   end
 
@@ -979,6 +1073,60 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       assert TableServer.state(table).hand != nil
     end
 
+    test "стол сообщает о паузе в свой топик, а не только турнир в свой", _ctx do
+      setting = fast_setting()
+      tournament = tournament_fixture(setting)
+
+      for _index <- 1..2,
+          do: {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      [{room_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      # Игрок сидит в топике **комнаты**, а не турнира: перерыв,
+      # объявленный только в турнирный топик, для него выглядел бы
+      # подвисшим столом.
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, TableServer.topic(room_id))
+
+      :ok = TournamentServer.fire(pid, :break)
+
+      assert_received {:table_event, "table_paused", %{paused: true}}
+      assert TableServer.state(table).paused?
+
+      :ok = TournamentServer.fire(pid, :break_over)
+
+      assert_received {:table_event, "table_paused", %{paused: false}}
+    end
+
+    test "часы перерыва идут один раз, а не на каждом доигравшем столе", _ctx do
+      # Два стола: перерыв объявлен, пока раздают оба. Взвестись пять
+      # минут обязаны один раз — от последнего доигравшего.
+      setting = fast_setting(%{table_size: 2, min_players: 2})
+      tournament = tournament_fixture(setting)
+
+      for _index <- 1..4,
+          do: {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      tables = Map.values(:sys.get_state(pid).tables)
+      assert length(tables) == 2
+
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(tournament.id))
+
+      for table <- tables, do: deal_hand(table)
+      :ok = TournamentServer.fire(pid, :break)
+
+      for table <- tables, do: play_hand(table)
+      sync_tournament(pid)
+
+      assert_received {:tournament_event, "break_clock", %{ends_in_ms: 300_000}}
+      refute_received {:tournament_event, "break_clock", _second}
+    end
+
     test "пересадка, назревшая за перерыв, случается по его концу", _ctx do
       # Стек равен большому блайнду: первая же раздача идёт на всё, и
       # вылет случается ровно на перерыве.
@@ -1040,6 +1188,41 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       # это решение турнира, а не настройка комнаты.
       {:ok, table} = Map.fetch(state.tables, table_id)
       assert TableServer.state(table).setting.final?
+    end
+
+    test "упавшая финалка объявляется заново — с новым столом", _ctx do
+      setting = fast_setting(%{table_size: 2, min_players: 2})
+      tournament = tournament_fixture(setting)
+
+      for _index <- 1..4,
+          do: {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      play_tables_until(pid, &(&1.final_table != nil))
+
+      old_id = TournamentServer.state(pid).final_table
+      assert old_id
+
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(tournament.id))
+
+      {:ok, table} = Map.fetch(:sys.get_state(pid).tables, old_id)
+      Process.exit(table, :kill)
+      assert_receive {:tournament_event, "table_recovered", %{table_id: ^old_id}}
+      sync_tournament(pid)
+
+      # Признак финалки не теряется вместе со столом. Ждать следующей
+      # раздачи нельзя: за поднятым столом сперва разыгрывается кнопка,
+      # и всё это время игрок сидел бы за столом без второй пары цветов.
+      new_id = TournamentServer.state(pid).final_table
+      assert new_id
+      assert new_id != old_id
+
+      assert_received {:tournament_event, "final_table", %{table_id: ^new_id}}
+
+      {:ok, recovered} = Map.fetch(:sys.get_state(pid).tables, new_id)
+      assert TableServer.state(recovered).setting.final?
     end
 
     test "финалка объявляется один раз, а не на каждой раздаче", _ctx do
@@ -1201,7 +1384,7 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       # Баббл — с первой раздачи: четверо живых при трёх оплачиваемых
       # местах, и раздают оба стола.
       assert TournamentServer.state(pid).players_left == 4
-      assert TournamentServer.state(pid).next_payout_place == 3
+      assert TournamentServer.state(pid).paid_places == 3
 
       %{tournament: tournament, pid: pid}
     end

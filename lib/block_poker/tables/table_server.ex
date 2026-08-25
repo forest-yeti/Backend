@@ -806,6 +806,13 @@ defmodule BlockPoker.Tables.TableServer do
         do: cancel_timer(state, :next_hand),
         else: maybe_start_game(state)
 
+    # Стол обязан сказать об этом сам. Перерыв объявляет турнир, но
+    # объявляет он его в свой топик, а игрок сидит в топике комнаты —
+    # тот же разрыв, ради которого заведён `notify_tables/3` в
+    # `TournamentServer`. Без этого события пауза выглядит как
+    # подвисший стол: раздача просто не начинается, и почему — не видно.
+    broadcast(state, "table_paused", %{paused: paused?})
+
     {:noreply, state}
   end
 
