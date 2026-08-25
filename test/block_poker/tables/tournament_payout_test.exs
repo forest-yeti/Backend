@@ -55,6 +55,51 @@ defmodule BlockPoker.Tables.TournamentPayoutTest do
   defp winner_takes_all, do: %{multiplier: 200, chance_ppm: 1_000_000, payouts: [100]}
   defp three_paid, do: %{multiplier: 10_000, chance_ppm: 1_000_000, payouts: [75, 20, 5]}
 
+  describe "строки истории" do
+    test "валюта берётся у настройки стола, а не считается денежной" do
+      setting =
+        SitAndGoFixtures.build_setting(%{
+          max_players: 3,
+          currency: :play_money,
+          prize_tiers: SitAndGoFixtures.prize_tiers([winner_takes_all()])
+        })
+
+      room = %{room([500, 500, 500], winner_takes_all()) | setting: setting}
+      now = DateTime.utc_now()
+
+      results = [
+        %{user_id: "user-1", place: 1, amount: 300},
+        %{user_id: "user-2", place: 2, amount: 0},
+        %{user_id: "user-3", place: 3, amount: 0}
+      ]
+
+      rows = TableServer.sit_and_go_rows(room, results, now, now)
+
+      # Турнир на игровые фишки не должен попадать в денежную историю:
+      # иначе его не найти в списке, а ROI по деньгам он завышает.
+      assert Enum.all?(rows, &(&1.currency == :play_money))
+      assert Enum.all?(rows, &(&1.format == :sit_and_go))
+      assert Enum.all?(rows, &(&1.entrants == 3))
+      assert [%{outcome: :won, itm: true} | rest] = rows
+      assert Enum.all?(rest, &(&1.outcome == :busted and &1.itm == false))
+    end
+
+    test "денежный стол пишется деньгами" do
+      setting =
+        SitAndGoFixtures.build_setting(%{
+          max_players: 2,
+          currency: :main,
+          prize_tiers: SitAndGoFixtures.prize_tiers([winner_takes_all()])
+        })
+
+      room = %{room([500, 500], winner_takes_all()) | setting: setting}
+      now = DateTime.utc_now()
+      results = [%{user_id: "user-1", place: 1, amount: 200}]
+
+      assert [%{currency: :main}] = TableServer.sit_and_go_rows(room, results, now, now)
+    end
+  end
+
   describe "признак конца" do
     test "пока живых больше одного, турнир не окончен" do
       refute Tournament.finished?(room([500, 500, 500], winner_takes_all()))

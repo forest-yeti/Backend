@@ -163,6 +163,35 @@ defmodule BlockPoker.HistoryTest do
       assert summary.average_place_ppm == div(2 * 1_000_000, 90)
     end
 
+    test "разрез по режиму не смешивает Spin & Go с MTT" do
+      user = user_fixture()
+
+      for format <- [:mtt, :sit_and_go] do
+        History.write_tournament_result(
+          tournament_result(%{user_id: user.id, format: format, prize: 5000, itm: true})
+        )
+      end
+
+      # Сводку зовут из `/history/stats`, а там разрез приходит режимом
+      # игры, не форматом: без сопоставления в Spin & Go попадали и MTT.
+      spins = History.tournament_summary(user.id, %{game_mode: [:sit_and_go]})
+      assert spins.entries == 1
+      assert spins.income == 5000
+
+      mtt = History.tournament_summary(user.id, %{game_mode: [:mtt]})
+      assert mtt.entries == 1
+
+      # Кэш-разрез турниров не содержит вовсе — сводка пустая.
+      cash = History.tournament_summary(user.id, %{game_mode: [:cash]})
+      assert cash.entries == 0
+      assert cash.tournaments == 0
+      assert cash.income == 0
+      assert cash.roi_ppm == nil
+
+      # Без разреза видно оба турнира, как и раньше.
+      assert History.tournament_summary(user.id).entries == 2
+    end
+
     test "отменённый турнир даёт строку с возвратом, и ROI её учитывает" do
       user = user_fixture()
 

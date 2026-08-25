@@ -1621,40 +1621,58 @@ defmodule BlockPoker.Tables.TableServer do
 
   defp record_sit_and_go_results(state, room, results) do
     if room.mode.game_mode_id() == :sit_and_go do
-      entrants = length(results)
+      started_at = state.room.hand_log && state.room.hand_log.started_at
       now = DateTime.utc_now()
 
-      Enum.each(results, fn result ->
-        History.persist_tournament_result_async(%{
-          entry_id: sit_and_go_entry_id(room.room_id, result.user_id),
-          tournament_id: room.room_id,
-          user_id: result.user_id,
-          title: room.mode.display_name(room),
-          tournament_setting_id: room.setting.id,
-          format: :sit_and_go,
-          bounty: false,
-          entry_kind: :initial,
-          entry_index: 0,
-          buy_in: room.setting.buy_in,
-          entry_fee: 0,
-          addons_count: 0,
-          addons_cost: 0,
-          prize: result.amount,
-          bounty_paid: 0,
-          bounty_final: 0,
-          refund: 0,
-          place: result.place,
-          entrants: entrants,
-          itm: result.amount > 0,
-          outcome: if(result.place == 1, do: :won, else: :busted),
-          hands_played: room.hands_played,
-          started_at: state.room.hand_log && state.room.hand_log.started_at,
-          finished_at: now
-        })
-      end)
+      Enum.each(
+        sit_and_go_rows(room, results, started_at, now),
+        &History.persist_tournament_result_async/1
+      )
     end
 
     :ok
+  end
+
+  @doc false
+  # Строки истории по итогам Sit & Go. Вынесена из `record_sit_and_go_results`
+  # публичной ради теста: сама запись уходит в Writer, которого под тестами
+  # нет, и проверить разрез — валюту, места, взносы — иначе нечем.
+  @spec sit_and_go_rows(map(), [map()], DateTime.t() | nil, DateTime.t()) :: [map()]
+  def sit_and_go_rows(room, results, started_at, finished_at) do
+    entrants = length(results)
+
+    Enum.map(results, fn result ->
+      %{
+        entry_id: sit_and_go_entry_id(room.room_id, result.user_id),
+        tournament_id: room.room_id,
+        user_id: result.user_id,
+        title: room.mode.display_name(room),
+        tournament_setting_id: room.setting.id,
+        format: :sit_and_go,
+        # Валюта берётся у настройки стола, как и у раздач: Sit & Go бывает
+        # и на игровые фишки, а без неё его взнос и приз ложились в
+        # денежную историю — там их не ищут, а ROI они портили.
+        currency: Map.get(room.setting, :currency) || :main,
+        bounty: false,
+        entry_kind: :initial,
+        entry_index: 0,
+        buy_in: room.setting.buy_in,
+        entry_fee: 0,
+        addons_count: 0,
+        addons_cost: 0,
+        prize: result.amount,
+        bounty_paid: 0,
+        bounty_final: 0,
+        refund: 0,
+        place: result.place,
+        entrants: entrants,
+        itm: result.amount > 0,
+        outcome: if(result.place == 1, do: :won, else: :busted),
+        hands_played: room.hands_played,
+        started_at: started_at,
+        finished_at: finished_at
+      }
+    end)
   end
 
   # Детерминированный идентификатор входа: комната плюс игрок. Именно

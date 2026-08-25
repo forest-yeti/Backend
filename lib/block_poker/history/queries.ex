@@ -35,6 +35,10 @@ defmodule BlockPoker.History.Queries do
 
   @max_limit 100
 
+  # Турнирные форматы. Совпадают с режимами игры по имени: разрез в
+  # `/history/stats` приходит режимом, а турниры хранят формат.
+  @formats [:sit_and_go, :mtt]
+
   @typedoc "Курсор страницы: время окончания раздачи и её идентификатор."
   @type cursor :: {DateTime.t(), Ecto.UUID.t()} | nil
 
@@ -525,12 +529,21 @@ defmodule BlockPoker.History.Queries do
   @spec tournament_summary(Ecto.UUID.t(), map()) :: map()
   def tournament_summary(user_id, opts \\ %{}) do
     results =
-      TournamentResult
-      |> where([r], r.user_id == ^user_id)
-      |> filter_format(opts[:format])
-      |> filter_result_currency(opts[:currency])
-      |> filter_finished(opts)
-      |> Repo.all()
+      case summary_formats(opts) do
+        # Разрез не содержит ни одного турнирного формата: считать нечего,
+        # и запрос не нужен. Пустой список здесь — не «фильтра нет», а
+        # «подходящих турниров быть не может».
+        [] ->
+          []
+
+        formats ->
+          TournamentResult
+          |> where([r], r.user_id == ^user_id)
+          |> filter_format(formats)
+          |> filter_result_currency(opts[:currency])
+          |> filter_finished(opts)
+          |> Repo.all()
+      end
 
     cost = Enum.reduce(results, 0, &(TournamentResult.cost(&1) + &2))
     income = Enum.reduce(results, 0, &(TournamentResult.income(&1) + &2))
@@ -559,6 +572,18 @@ defmodule BlockPoker.History.Queries do
       # разные достижения, и одним числом мест они несравнимы.
       average_place_ppm: average_place_ppm(placed)
     }
+  end
+
+  # Формат турниров для сводки. Явный `:format` сильнее, но сводку зовут и
+  # из `/history/stats`, где разрез приходит режимом игры: без этого
+  # сопоставления в Spin & Go считались бы ещё и MTT — фильтр молча не
+  # применялся, потому что `:format` там не приходит вовсе.
+  defp summary_formats(opts) do
+    cond do
+      opts[:format] != nil -> List.wrap(opts[:format])
+      opts[:game_mode] != nil -> Enum.filter(List.wrap(opts[:game_mode]), &(&1 in @formats))
+      true -> nil
+    end
   end
 
   defp average_place_ppm([]), do: nil
