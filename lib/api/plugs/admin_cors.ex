@@ -11,6 +11,11 @@ defmodule Api.Plugs.AdminCors do
   Незнакомый origin не получает заголовков — браузер сам не пустит ответ
   в такую страницу. Отдельный `403` для этого не нужен и только выдал бы
   наличие ручки.
+
+  Плаг стоит в `Socket.Endpoint` **до** роутера, а не в пайплайне: у
+  предполётного `OPTIONS` маршрута нет, пайплайны до него не доходят, и
+  запрос падал бы в `NoRouteError` без единого заголовка. Поэтому же плаг
+  сам ограничивает себя путями `/admin/*` — игровые ручки он не трогает.
   """
 
   import Plug.Conn
@@ -24,12 +29,14 @@ defmodule Api.Plugs.AdminCors do
   def init(opts), do: opts
 
   @impl true
-  def call(conn, _opts) do
+  def call(%Plug.Conn{path_info: ["admin" | _rest]} = conn, _opts) do
     case origin(conn) do
       nil -> preflight(conn)
       allowed -> conn |> put_cors(allowed) |> preflight()
     end
   end
+
+  def call(conn, _opts), do: conn
 
   defp origin(conn) do
     with [origin | _rest] <- get_req_header(conn, "origin"),

@@ -21,11 +21,11 @@ defmodule Api.Router do
   end
 
   # Панель администратора (задача 8). Отдельный пайплайн целиком: свой
-  # CORS (панель — приложение на другом origin), свой токен и своя
-  # проверка сессии. Игровой токен здесь не работает никогда.
+  # токен и своя проверка сессии. Игровой токен здесь не работает никогда.
+  # CORS панели живёт в `Socket.Endpoint`: предполётный `OPTIONS` маршрута
+  # не имеет и до пайплайна не доходит.
   pipeline :admin do
     plug :accepts, ["json"]
-    plug Api.Plugs.AdminCors
   end
 
   pipeline :admin_authenticated do

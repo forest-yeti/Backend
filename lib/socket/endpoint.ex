@@ -34,6 +34,10 @@ defmodule Socket.Endpoint do
 
   plug Plug.Head
 
+  # CORS панели — до роутера: предполётный `OPTIONS` не имеет маршрута,
+  # и в пайплайне роутера этот плаг для него не выполнялся бы вовсе.
+  plug Api.Plugs.AdminCors
+
   # HTTP-слой намеренно тощий: только то, что нельзя сделать по сокету.
   plug Api.Router
 end
