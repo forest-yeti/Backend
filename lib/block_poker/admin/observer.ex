@@ -103,6 +103,10 @@ defmodule BlockPoker.Admin.Observer do
       name: room.mode.display_name(room),
       kind: room.mode.game_mode_id(),
       discipline: room.discipline.id(),
+      # Масштаб сумм снапшота: `main` считается в центах, `play_money` — в
+      # целых фишках. Без валюты панель не может показать ни один стек, не
+      # угадывая, а угадывание здесь означает ошибку ровно в сто раз.
+      currency: room.setting.currency,
       phase: room.phase,
       action_seq: room.action_seq,
       hands_played: room.hands_played,

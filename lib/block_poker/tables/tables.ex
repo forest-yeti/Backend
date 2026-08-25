@@ -339,6 +339,9 @@ defmodule BlockPoker.Tables do
         user_id: seat.user_id,
         room_id: state.room_id,
         setting_id: state.setting.id,
+        # Валюта комнаты: без неё стек — просто число, а масштаб у него
+        # разный (центы у `main`, целые фишки у `play_money`).
+        currency: state.setting.currency,
         seat: seat.number,
         stack: seat.stack,
         status: seat.status
