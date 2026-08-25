@@ -19,6 +19,7 @@ defmodule BlockPoker.Admin do
 
   alias BlockPoker.Accounts.User
   alias BlockPoker.Admin.{AdminSession, Audit, Auth, Context, Games, Money, Observer, People}
+  alias BlockPoker.ClientReleases
 
   @type ctx :: Context.t()
 
@@ -92,6 +93,33 @@ defmodule BlockPoker.Admin do
   def take_to_admin(%Context{} = ctx, user_id, currency, amount, reason, idem) do
     with :ok <- allowed(ctx),
          do: Money.take_to_admin(ctx, user_id, currency, amount, reason, idem)
+  end
+
+  # --- сборки клиента -------------------------------------------------------
+
+  @spec client_releases(ctx()) :: {:ok, [map()]} | {:error, atom()}
+  def client_releases(%Context{} = ctx) do
+    with :ok <- allowed(ctx), do: {:ok, ClientReleases.list()}
+  end
+
+  @doc """
+  Приём загруженной сборки. `attrs` содержит путь к временному файлу и
+  имя, под которым его выбрали, — разбирать multipart умеет транспорт,
+  решать, что с этим файлом делать, умеет только контекст.
+  """
+  @spec upload_client_release(ctx(), map()) :: {:ok, map()} | {:error, atom()}
+  def upload_client_release(%Context{} = ctx, attrs) do
+    with :ok <- allowed(ctx), do: ClientReleases.upload(ctx, attrs)
+  end
+
+  @spec publish_client_release(ctx(), Ecto.UUID.t()) :: {:ok, map()} | {:error, atom()}
+  def publish_client_release(%Context{} = ctx, id) do
+    with :ok <- allowed(ctx), do: ClientReleases.publish(ctx, id)
+  end
+
+  @spec delete_client_release(ctx(), Ecto.UUID.t()) :: :ok | {:error, atom()}
+  def delete_client_release(%Context{} = ctx, id) do
+    with :ok <- allowed(ctx), do: ClientReleases.delete(ctx, id)
   end
 
   # --- игры -----------------------------------------------------------------

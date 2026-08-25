@@ -47,12 +47,33 @@ defmodule BlockPoker.Application do
     # Лобби поднимается последним и не поднимается в тестах: при старте оно
     # читает шаблоны из БД, а в тестах база живёт под Sandbox и принадлежит
     # тест-процессу. Тесты пула запускают своё лобби явно.
-    children = children ++ lobby_children() ++ scheduler_children() ++ history_children()
+    children =
+      children ++
+        lobby_children() ++
+        scheduler_children() ++ history_children() ++ client_release_children()
 
     # See https://elixir.hexdocs.pm/Supervisor.html
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: BlockPoker.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  # Границы версий клиента читаются из БД один раз при старте и дальше
+  # живут в `:persistent_term`: их спрашивает каждый handshake. В тестах
+  # не поднимается по той же причине, что и лобби — база под Sandbox
+  # принадлежит тест-процессу.
+  defp client_release_children do
+    if Application.get_env(:block_poker, :start_client_release_cache, true) do
+      [
+        %{
+          id: :client_release_cache,
+          start: {Task, :start_link, [&BlockPoker.ClientReleases.refresh/0]},
+          restart: :transient
+        }
+      ]
+    else
+      []
+    end
   end
 
   # Два пула: кэшевый и турнирный. Они не знают друг о друге и владеют

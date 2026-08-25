@@ -23,7 +23,7 @@ defmodule Api.Plugs.AdminCors do
   @behaviour Plug
 
   @allowed_headers "authorization, content-type"
-  @allowed_methods "GET, POST, OPTIONS"
+  @allowed_methods "GET, POST, DELETE, OPTIONS"
 
   @impl true
   def init(opts), do: opts

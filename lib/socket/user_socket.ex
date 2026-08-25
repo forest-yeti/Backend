@@ -10,7 +10,7 @@ defmodule Socket.UserSocket do
   use Phoenix.Socket
 
   alias BlockPoker.Accounts
-  alias BlockPoker.ClientRelease
+  alias BlockPoker.ClientReleases
   alias BlockPoker.ErrorCode
   alias Socket.Protocol.Version
 
@@ -35,7 +35,7 @@ defmodule Socket.UserSocket do
     # Устаревшему клиенту надо ответить «обновись», а не «токен протух», —
     # иначе он уйдёт продлевать токен по кругу вместо обновления.
     with :ok <- Version.check(params["protocol_vsn"]),
-         :ok <- ClientRelease.check(params["client_vsn"]),
+         :ok <- ClientReleases.check(params["client_vsn"]),
          {:ok, user} <- Accounts.verify_socket_token(params["token"] || "") do
       {:ok,
        socket

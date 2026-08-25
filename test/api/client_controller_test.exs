@@ -3,6 +3,7 @@ defmodule Api.ClientControllerTest do
 
   setup do
     previous = Application.get_env(:block_poker, :client_release, [])
+    BlockPoker.ClientReleases.Feed.reset()
 
     Application.put_env(:block_poker, :client_release,
       current: "1.4.2",
@@ -10,7 +11,11 @@ defmodule Api.ClientControllerTest do
       feed_url: "https://cdn.example/client-updates"
     )
 
-    on_exit(fn -> Application.put_env(:block_poker, :client_release, previous) end)
+    on_exit(fn ->
+      Application.put_env(:block_poker, :client_release, previous)
+      BlockPoker.ClientReleases.Feed.reset()
+    end)
+
     :ok
   end
 

@@ -12,9 +12,9 @@ defmodule Api.ClientController do
 
   use Api, :controller
 
-  alias BlockPoker.ClientRelease
+  alias BlockPoker.ClientReleases
 
   def show(conn, _params) do
-    json(conn, ClientRelease.info())
+    json(conn, ClientReleases.info())
   end
 end

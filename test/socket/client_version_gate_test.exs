@@ -17,8 +17,14 @@ defmodule Socket.ClientVersionGateTest do
 
   setup do
     previous = Application.get_env(:block_poker, :client_release, [])
+    BlockPoker.ClientReleases.Feed.reset()
     Application.put_env(:block_poker, :client_release, current: "1.4.2", minimum: "1.4.0")
-    on_exit(fn -> Application.put_env(:block_poker, :client_release, previous) end)
+
+    on_exit(fn ->
+      Application.put_env(:block_poker, :client_release, previous)
+      BlockPoker.ClientReleases.Feed.reset()
+    end)
+
     :ok
   end
 

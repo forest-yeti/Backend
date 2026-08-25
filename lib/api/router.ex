@@ -106,5 +106,13 @@ defmodule Api.Router do
     get "/games/:kind/:id", GameController, :show
 
     get "/audit", AuditController, :index
+
+    # Сборки клиента. Загрузка — единственная ручка панели с файлом, и
+    # тело у неё измеряется сотнями мегабайт: разбирает её отдельный
+    # плаг в `Socket.Endpoint`, а не общий `Plug.Parsers` (§3 задачи 34).
+    get "/client-releases", ClientReleaseController, :index
+    post "/client-releases", ClientReleaseController, :create
+    post "/client-releases/:id/publish", ClientReleaseController, :publish
+    delete "/client-releases/:id", ClientReleaseController, :delete
   end
 end

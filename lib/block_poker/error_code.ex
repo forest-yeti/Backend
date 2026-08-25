@@ -17,6 +17,15 @@ defmodule BlockPoker.ErrorCode do
           | :rate_limited
           | :unsupported_protocol_version
           | :client_too_old
+          | :invalid_version
+          | :version_exists
+          | :release_published
+          | :release_file_missing
+          | :release_file_required
+          | :updates_dir_not_configured
+          | :upload_write_failed
+          | :empty_upload
+          | :feed_write_failed
           | :insufficient_funds
           | :seat_taken
           | :already_seated
@@ -91,6 +100,16 @@ defmodule BlockPoker.ErrorCode do
     # `unsupported_protocol_version`: там клиент не понимает формат сообщений,
     # здесь — понимает, но устарел, и лечится это обновлением приложения.
     client_too_old: {426, "Версия приложения устарела, требуется обновление"},
+    # Загрузка сборок клиента через панель (задача 34).
+    invalid_version: {422, "Версия должна быть вида 1.0.1"},
+    version_exists: {409, "Сборка с такой версией уже загружена"},
+    release_published: {409, "Опубликованную сборку удалить нельзя"},
+    release_file_missing: {409, "Файл сборки на диске не найден"},
+    release_file_required: {422, "Файл сборки не приложен"},
+    updates_dir_not_configured: {503, "Каталог сборок на сервере не настроен"},
+    upload_write_failed: {500, "Не удалось сохранить файл сборки"},
+    empty_upload: {422, "Загруженный файл пуст"},
+    feed_write_failed: {500, "Не удалось перезаписать фид обновлений"},
     insufficient_funds: {422, "Недостаточно средств"},
     seat_taken: {409, "Место уже занято"},
     already_seated: {409, "Вы уже сидите за этим столом"},

@@ -31,6 +31,10 @@ defmodule Socket.Endpoint do
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
+  # Загрузка сборки клиента: своё тело, свой предел размера. Стоит до
+  # общего парсера и срабатывает ровно на одной ручке (§3 задачи 34).
+  plug Api.Plugs.ClientReleaseUpload
+
   plug Plug.Parsers,
     parsers: [:urlencoded, :json],
     pass: ["*/*"],

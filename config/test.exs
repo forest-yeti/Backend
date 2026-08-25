@@ -34,6 +34,11 @@ config :block_poker, start_tournament_scheduler: false
 # без него `persist_async` — no-op, и игра от этого не меняется ничем.
 config :block_poker, start_history_writer: false
 
+# Кэш версий клиента при старте читает БД, а она под Sandbox принадлежит
+# тест-процессу. Тесты границ заполняют кэш явно, остальным хватает
+# значений из конфигурации.
+config :block_poker, start_client_release_cache: false
+
 # Oban в тестах не выполняет джобы фоном: очередь без воркеров означает,
 # что джоба доступна для `Oban.Testing`, но не стартует сама и не лезет
 # в чужую транзакцию.
