@@ -114,6 +114,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       # Считается один раз на старте и дальше не двигается: см.
       # `late_reg_open?/1`.
       late_reg_until: nil,
+      late_reg_timer: nil,
       # Места присваиваются с конца: первый вылетевший получает номер,
       # равный числу живых плюс один.
       results: [],
@@ -248,9 +249,211 @@ defmodule BlockPoker.Tournaments.TournamentServer do
         status: tournament.status
       }
 
-      {:ok, state}
+      {:ok, restore(state, tournament)}
     end
   end
+
+  # --- Восстановление ------------------------------------------------------
+
+  # Процесс турнира перезапустился посреди игры.
+  #
+  # Это самое дорогое падение в системе, и оно не то же самое, что
+  # падение стола: столы живут в своём супервизоре и раздают дальше, а
+  # без турнира их никто не слушает — вылеты не считаются, места не
+  # присваиваются, балансировки нет, и закончиться турнир не может уже
+  # никогда. Пустой `players` означал бы именно это.
+  #
+  # Собирается состояние из двух источников, и разделение между ними —
+  # не случайность: **всё, кроме рассадки и стеков, персистентно само по
+  # себе.** Головы, статусы, места и окно входа лежат в `tournament_entries`
+  # и `tournaments`; рассадка и стеки — только в снимке (`SeatSnapshot`),
+  # ради чего он и пишется на каждой раздаче.
+  #
+  # Живой стол при этом важнее снимка: пока турнир лежал, стол продолжал
+  # раздавать, и его стеки новее. Поэтому у поднявшихся столов состав
+  # читается из самого стола, а снимок нужен только для тех, кто не пережил
+  # падение вместе с турниром.
+  defp restore(state, %Tournament{} = tournament) do
+    if Tournament.live?(tournament) do
+      do_restore(state, tournament)
+    else
+      state
+    end
+  end
+
+  defp do_restore(state, tournament) do
+    entries = Tournaments.list_seated(tournament.id)
+    snapshot = seat_snapshot(tournament.id)
+
+    Logger.warning(
+      "турнир #{tournament.id}: восстановление после перезапуска — " <>
+        "#{length(entries)} живых входов, уровень #{snapshot.level}"
+    )
+
+    state =
+      %{
+        state
+        | level: snapshot.level,
+          hands_played: snapshot.hands_played,
+          late_reg_until: tournament.late_reg_until,
+          results: restored_results(tournament.id)
+      }
+      |> adopt_tables(snapshot)
+      |> restore_players(entries, snapshot)
+
+    # Стол мог остаться на паузе — турнир упал на перерыве или посреди
+    # круга hand-for-hand, а снять паузу было уже некому.
+    resume_tables(state)
+
+    state
+    |> arm_level()
+    |> arm_break()
+    |> arm_late_reg()
+    |> restore_final_table(tournament)
+  end
+
+  defp seat_snapshot(tournament_id) do
+    case Tournaments.get_snapshot(tournament_id) do
+      {:ok, snapshot} ->
+        %{
+          level: snapshot.level || 1,
+          hands_played: snapshot.hands_played || 0,
+          seats: snapshot.seats || []
+        }
+
+      {:error, :not_found} ->
+        # Ни одной раздачи не сыграно: турнир упал между стартом и первой
+        # рукой. Рассаживать придётся заново, и это законно — фишек ни у
+        # кого ещё не двигалось.
+        %{level: 1, hands_played: 0, seats: []}
+    end
+  end
+
+  # Столы, пережившие падение турнира, подбираются как есть: подписка и
+  # монитор заводятся заново, состав читается у самого стола.
+  defp adopt_tables(state, snapshot) do
+    snapshot.seats
+    |> Enum.map(&Map.get(&1, "table"))
+    |> Enum.uniq()
+    |> Enum.reject(&is_nil/1)
+    |> Enum.reduce(state, fn table_id, acc ->
+      case TableRegistry.whereis(table_id) do
+        nil ->
+          acc
+
+        pid ->
+          :ok = PubSub.subscribe(@pubsub, TableServer.topic(table_id))
+          Process.monitor(pid)
+
+          %{acc | tables: Map.put(acc.tables, table_id, pid)}
+      end
+    end)
+  end
+
+  # Стек и место берутся у живого стола, а не из снимка: пока турнир
+  # лежал, стол раздавал, и снимок отстал ровно на эти раздачи.
+  defp restore_players(state, entries, snapshot) do
+    live = live_seats(state)
+    saved = Map.new(snapshot.seats, &{Map.get(&1, "entry_id"), &1})
+
+    {seated, homeless} =
+      Enum.reduce(entries, {%{}, []}, fn entry, {players, homeless} ->
+        case restored_player(entry, live) do
+          nil -> {players, [{entry, saved_stack(saved, entry)} | homeless]}
+          player -> {Map.put(players, entry.id, player), homeless}
+        end
+      end)
+
+    state = %{state | players: seated}
+
+    # Вход без места: его стол не пережил падение вместе с турниром либо
+    # он сел уже после последнего снимка. И тот и другой обязаны оказаться
+    # за столом — иначе живой вход останется вне игры навсегда.
+    #
+    # Стек берётся из снимка, если он там был: садить со стартовым
+    # значило бы напечатать фишки. Незавершённая раздача упавшего стола
+    # при этом аннулируется — то же правило, что и в `recover_table/3`
+    # (§8 CLAUDE.md).
+    Enum.reduce(homeless, state, fn {entry, stack}, acc ->
+      case place_player(
+             acc,
+             %{
+               id: entry.id,
+               user_id: entry.user_id,
+               entry_number: entry.entry_number,
+               bounty: entry.bounty
+             },
+             stack
+           ) do
+        {:ok, acc} ->
+          acc
+
+        {:error, reason} ->
+          Logger.error(
+            "турнир #{acc.tournament_id}: вход #{entry.id} не сел при восстановлении — " <>
+              "#{inspect(reason)}"
+          )
+
+          acc
+      end
+    end)
+  end
+
+  defp saved_stack(saved, entry) do
+    case Map.get(saved, entry.id) do
+      %{"stack" => stack} when is_integer(stack) and stack > 0 -> stack
+      _absent -> nil
+    end
+  end
+
+  defp restored_player(entry, live) do
+    cond do
+      seat = Map.get(live, entry.user_id) ->
+        %Player{
+          entry_id: entry.id,
+          user_id: entry.user_id,
+          stack: seat.stack,
+          table_id: seat.table_id,
+          seat: seat.seat,
+          bounty: entry.bounty
+        }
+
+      true ->
+        nil
+    end
+  end
+
+  defp live_seats(state) do
+    Enum.reduce(state.tables, %{}, fn {table_id, pid}, acc ->
+      pid
+      |> TableServer.state()
+      |> RoomState.players()
+      |> Enum.reduce(acc, fn seat, seats ->
+        Map.put(seats, seat.user_id, %{table_id: table_id, seat: seat.number, stack: seat.stack})
+      end)
+    end)
+  end
+
+  # Места вылетевших уже проставлены в БД — их и поднимаем: без них
+  # расчёт турнира не соберёт таблицу.
+  defp restored_results(tournament_id) do
+    tournament_id
+    |> Tournaments.list_entries()
+    |> Enum.filter(&(&1.place != nil))
+    |> Enum.sort_by(& &1.place)
+    |> Enum.map(
+      &%{entry_id: &1.id, place: &1.place, shared_places: &1.shared_places || [&1.place]}
+    )
+  end
+
+  defp restore_final_table(state, %Tournament{status: :finishing} = _tournament) do
+    case Map.keys(state.tables) do
+      [table_id] -> %{state | final_table: table_id}
+      _other -> state
+    end
+  end
+
+  defp restore_final_table(state, _tournament), do: state
 
   @impl true
   def handle_call(:state, _from, state), do: {:reply, snapshot(state), state}
@@ -354,12 +557,19 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     {:reply, :ok, end_break(state)}
   end
 
+  def handle_call({:fire, :late_reg}, _from, state) do
+    {:reply, :ok, close_late_reg(state)}
+  end
+
   @impl true
   def handle_info(:level_up, state), do: {:noreply, advance_level(state)}
 
   def handle_info(:break_due, state), do: {:noreply, begin_break(state)}
 
   def handle_info(:break_over, state), do: {:noreply, end_break(state)}
+
+  # Истекло окно входа: вход и ребаи закрыты, фонд зафиксирован.
+  def handle_info(:late_reg_over, state), do: {:noreply, close_late_reg(state)}
 
   # Пауза после итога вышла: столы, которые турнир ещё держит, можно
   # останавливать — победитель уже получил результат в свой канал.
@@ -373,7 +583,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       {:ok, pending} ->
         state = %{state | pending_reentries: Map.delete(state.pending_reentries, entry_id)}
 
-        {:noreply, state |> finalize_bust(entry_id, pending.place) |> maybe_finish()}
+        {:noreply, state |> finalize_bust(entry_id, pending.placement) |> maybe_finish()}
 
       :error ->
         {:noreply, state}
@@ -419,6 +629,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
         |> seat_prepared(entries)
         |> arm_level()
         |> arm_break()
+        |> arm_late_reg()
 
       broadcast(state, "tournament_started", %{tables: Map.keys(state.tables)})
 
@@ -439,6 +650,49 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       |> Enum.reduce(0, &(&2 + &1.duration_seconds))
 
     if seconds == 0, do: nil, else: DateTime.add(state.wall.(), seconds, :second)
+  end
+
+  # Закрытие входа взводится **стенными часами**, а не флагом уровня:
+  # часы уровня стоят на перерыве, и по ним окно закрывалось бы позже
+  # объявленного игроку `late_reg_until`. Тем же значением проверяет
+  # вход и `Tournaments.check_slot/5` — два разных правила разошлись бы
+  # на первом же перерыве.
+  #
+  # Без такого таймера фонд оставался бы нулевым весь турнир: единственным
+  # местом фиксации был расчёт в самом конце, а витрина читает `prize_pool`
+  # именно отсюда (`LobbyEntry.prize_pool/1`).
+  defp arm_late_reg(%State{late_reg_until: nil} = state), do: state
+
+  defp arm_late_reg(state) do
+    left = max(DateTime.diff(state.late_reg_until, state.wall.(), :millisecond), 0)
+
+    %{state | late_reg_timer: schedule(:late_reg_over, left)}
+  end
+
+  # Идемпотентно: фонд фиксируется один раз, и повторный тик таймера
+  # (ручной прогон в тестах, гонка с расчётом) второй раз его не двигает.
+  defp close_late_reg(%State{status: status} = state)
+       when status in [:late_reg_closed, :finished],
+       do: state
+
+  defp close_late_reg(state) do
+    with {:ok, tournament} <- Tournaments.get_tournament(state.tournament_id),
+         {:ok, tournament} <- Tournaments.close_late_reg(tournament) do
+      broadcast(state, "late_reg_closed", %{prize_pool: tournament.prize_pool})
+
+      # Финальный стол — стадия более поздняя, и понижать её нельзя:
+      # `Tournaments.close_late_reg/1` держит то же правило в БД.
+      status = if state.status == :finishing, do: :finishing, else: :late_reg_closed
+
+      %{state | status: status, late_reg_timer: nil}
+    else
+      {:error, reason} ->
+        Logger.error(
+          "турнир #{state.tournament_id}: не закрылась поздняя регистрация — #{inspect(reason)}"
+        )
+
+        state
+    end
   end
 
   defp level_flags(state) do
@@ -466,7 +720,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   # Столов ровно столько, сколько нужно на явку, и заполняются они
   # равномерно: «полные плюс огрызок» дали бы перекос с первой раздачи.
   defp seat_all(state, entries) do
-    table_size = state.setting.table_size
+    table_size = table_size(state)
     count = Seating.tables_needed(length(entries), table_size)
 
     state = Enum.reduce(1..count//1, state, fn _index, acc -> open_table(acc) end)
@@ -514,6 +768,15 @@ defmodule BlockPoker.Tournaments.TournamentServer do
         # не поднимется, а её падение иначе унесло бы весь турнир — на
         # первом же вызове к мёртвому процессу.
         Process.monitor(pid)
+
+        # Стол поднимается уже раздающим (`auto_start?`). Если турнир
+        # сейчас стоит — перерыв или круг hand-for-hand, — новый стол
+        # обязан встать вместе со всеми: иначе поздняя регистрация,
+        # ре-энтри или пересадка после падения открыли бы стол, который
+        # играет в перерыв.
+        if state.break != nil or state.hand_for_hand != nil do
+          send(pid, {:tournament_paused, true})
+        end
 
         %{state | tables: Map.put(state.tables, room_id, pid)}
 
@@ -565,18 +828,18 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     state
   end
 
-  defp place_player(state, entry) do
+  defp place_player(state, entry, stack \\ nil) do
     case least_filled_table(state) do
       nil ->
         state = open_table(state)
 
         case least_filled_table(state) do
           nil -> {:error, :no_table}
-          table_id -> seat_at(state, entry, table_id)
+          table_id -> seat_at(state, entry, table_id, stack)
         end
 
       table_id ->
-        seat_at(state, entry, table_id)
+        seat_at(state, entry, table_id, stack)
     end
   end
 
@@ -585,7 +848,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   defp least_filled_table(state) do
     state.tables
     |> Map.keys()
-    |> Enum.reject(&(occupancy(state, &1) >= state.setting.table_size))
+    |> Enum.reject(&(occupancy(state, &1) >= table_size(state)))
     |> Enum.min_by(&{occupancy(state, &1), &1}, fn -> nil end)
   end
 
@@ -595,9 +858,12 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     end)
   end
 
-  defp seat_at(state, entry, table_id) do
+  defp seat_at(state, entry, table_id, stack \\ nil) do
     pid = Map.fetch!(state.tables, table_id)
-    stack = stack_for(state, entry)
+
+    # Стек приходит явно только при восстановлении: там он взят из
+    # снимка, а не назначен заново. Новый вход считает `stack_for/2`.
+    stack = stack || stack_for(state, entry)
 
     with {:ok, %{reservation_id: reservation, seat: seat}} <-
            TableServer.reserve_seat(pid, entry.user_id, :first_free, stack),
@@ -721,7 +987,16 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   end
 
   defp advance_level(state) do
-    state = %{state | level: state.level + 1, level_elapsed_ms: 0}
+    # Прошлый таймер снимается явно: по `:level_up` он уже сработал, а
+    # вот ручной прогон (`fire/2`) оставил бы его висеть, и уровень
+    # повысился бы второй раз сам собой.
+    state = %{
+      state
+      | level: state.level + 1,
+        level_elapsed_ms: 0,
+        level_timer: cancel(state.level_timer)
+    }
+
     state = arm_level(state)
 
     Enum.each(state.tables, fn {_id, pid} -> send(pid, {:tournament_level, state.level}) end)
@@ -784,9 +1059,13 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     end
 
     # Столы, где раздача не идёт, готовы сразу: ждать от них нечего.
+    # Столов может не быть вовсе (последний схлопнулся, единственный
+    # упал) — тогда ждать некого, и перерыв обязан взвестись здесь же,
+    # иначе `break_over` не запланирует уже никто.
     waiting
     |> Enum.reject(&busy?(state, &1))
     |> Enum.reduce(state, fn table_id, acc -> table_ready(acc, table_id) end)
+    |> arm_break_end()
   end
 
   # Стол доиграл. Пять минут отсчитываются от **последнего** — перерыв не
@@ -795,18 +1074,27 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
   defp table_ready(state, table_id) do
     waiting = MapSet.delete(state.break.waiting, table_id)
-    break = %{state.break | waiting: waiting}
 
-    if MapSet.size(waiting) == 0 and break.ends_at == nil do
-      ends_at = TournamentBreak.ends_at(state.wall.())
+    arm_break_end(%{state | break: %{state.break | waiting: waiting}})
+  end
 
+  # Ждать больше некого — пошли пять минут. Отдельной функцией, потому
+  # что опустеть ожидание может тремя разными путями: стол доиграл, стол
+  # закрылся при схлопывании и стол упал. Взвод конца перерыва обязан
+  # случиться на каждом, иначе турнир стоит вечно.
+  defp arm_break_end(%State{break: nil} = state), do: state
+
+  defp arm_break_end(%State{break: %{ends_at: ends_at}} = state) when ends_at != nil, do: state
+
+  defp arm_break_end(%State{break: break} = state) do
+    if MapSet.size(break.waiting) == 0 do
       %{
         state
-        | break: %{break | ends_at: ends_at},
+        | break: %{break | ends_at: TournamentBreak.ends_at(state.wall.())},
           break_timer: schedule(:break_over, TournamentBreak.duration_ms())
       }
     else
-      %{state | break: break}
+      state
     end
   end
 
@@ -868,6 +1156,44 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     |> after_hand(payload.room_id)
     |> maybe_final_table()
     |> maybe_finish()
+    |> save_snapshot()
+  end
+
+  # Рассадка и стеки — единственное, что не выводится из остальных таблиц,
+  # и потому единственное, что теряется при падении процесса турнира
+  # (`Tournaments.SeatSnapshot`). Пишется синхронно и последним шагом:
+  # снимок — источник восстановления, и отставать от раздачи, которую он
+  # описывает, ему нельзя. Дороже это ровно один upsert маленькой строки
+  # на раздачу — на порядок меньше того, что процесс уже делает здесь же
+  # (`pay_bounty`, `bust`, `current_payouts`).
+  defp save_snapshot(%State{status: :finished} = state), do: state
+
+  defp save_snapshot(state) do
+    seats =
+      for {_id, player} <- state.players, player.alive? and player.table_id != nil do
+        %{
+          "table" => player.table_id,
+          "seat" => player.seat,
+          "entry_id" => player.entry_id,
+          "stack" => player.stack
+        }
+      end
+
+    case Tournaments.save_snapshot(state.tournament_id, %{
+           level: state.level,
+           hands_played: state.hands_played,
+           seats: seats
+         }) do
+      {:ok, _snapshot} ->
+        state
+
+      {:error, reason} ->
+        # Снимок — страховка, а не игровой цикл: его отказ не имеет права
+        # ронять турнир. Тот же размен, что у истории раздач (§6 задачи 6).
+        Logger.error("турнир #{state.tournament_id}: снимок не записан — #{inspect(reason)}")
+
+        state
+    end
   end
 
   # Что делать со столом, доигравшим раздачу. Три взаимоисключающих
@@ -933,9 +1259,18 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   defp hand_for_hand(state, table_id) do
     state = start_hand_for_hand(state)
 
-    waiting = MapSet.delete(state.hand_for_hand.waiting, table_id)
-
     pause_table(state, table_id)
+
+    hand_for_hand_ready(state, table_id)
+  end
+
+  # Стол отыграл свой круг. Как и у перерыва, опустеть ожидание может не
+  # только «доиграл»: стол мог закрыться при схлопывании или упасть.
+  # Поэтому шаг вынесен и зовётся из всех трёх мест.
+  defp hand_for_hand_ready(%State{hand_for_hand: nil} = state, _table_id), do: state
+
+  defp hand_for_hand_ready(state, table_id) do
+    waiting = MapSet.delete(state.hand_for_hand.waiting, table_id)
 
     if MapSet.size(waiting) == 0 do
       # Круг закончили все — начинаем следующий одновременно.
@@ -945,6 +1280,17 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     else
       %{state | hand_for_hand: %{waiting: waiting}}
     end
+  end
+
+  # Стол выбыл из турнира — закрылся при схлопывании или упал. Ждать от
+  # него нечего: `hand_summary` он больше не пришлёт никогда, и
+  # оставленный в ожидании он останавливает турнир навсегда — ни перерыв
+  # не кончится, ни круг hand-for-hand не начнётся, а `rebalance/1`,
+  # который мог бы спасти, зовётся только из `after_hand/2`.
+  defp forget_table(state, table_id) do
+    state
+    |> table_ready(table_id)
+    |> hand_for_hand_ready(table_id)
   end
 
   defp start_hand_for_hand(%State{hand_for_hand: nil} = state) do
@@ -995,9 +1341,11 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   # вылета её уже не спросить.
   defp settle_bounties(state, %{busted: []}), do: state
 
-  defp settle_bounties(%State{setting: %{bounty_part: 0}} = state, _payload), do: state
-
   defp settle_bounties(state, payload) do
+    if bounty_part(state) == 0, do: state, else: do_settle_bounties(state, payload)
+  end
+
+  defp do_settle_bounties(state, payload) do
     victims =
       for entry <- payload.busted, player = player_at(state, payload.room_id, entry.seat) do
         %{
@@ -1010,14 +1358,11 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       end
 
     rules = %{
-      progressive?: state.setting.bounty_progressive,
-      split_ppm: state.setting.bounty_split_ppm
+      progressive?: snapshot_value(state, "bounty_progressive", state.setting.bounty_progressive),
+      split_ppm: snapshot_value(state, "bounty_split_ppm", state.setting.bounty_split_ppm)
     }
 
-    table = %{
-      button_seat: payload.button_seat || 1,
-      table_size: state.setting.table_size
-    }
+    table = %{button_seat: payload.button_seat || 1, table_size: table_size(state)}
 
     result = Bounty.settle(victims, rules, table)
 
@@ -1071,7 +1416,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
     survivors = alive_count(state) - length(victims)
 
-    table = %{button_seat: payload.button_seat || 1, table_size: state.setting.table_size}
+    table = %{button_seat: payload.button_seat || 1, table_size: table_size(state)}
 
     placements = Elimination.assign(victims, survivors, table)
 
@@ -1106,13 +1451,15 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     if reentry_open?(state, placement.entry_id) do
       offer_reentry(state, placement)
     else
-      finalize_bust(state, placement.entry_id, placement.place)
+      finalize_bust(state, placement.entry_id, placement)
     end
   end
 
-  defp finalize_bust(state, entry_id, place) do
-    {:ok, entry} = Tournaments.bust(entry_id, place)
-    prize = prize_for_place(state, place)
+  defp finalize_bust(state, entry_id, placement) do
+    %{place: place} = placement
+    shared = Map.get(placement, :shared_places) || [place]
+    {:ok, entry} = Tournaments.bust(entry_id, place, if(shared == [place], do: nil, else: shared))
+    prize = prize_for(state, placement)
     bounty_paid = bounty_earned_by(state, entry)
 
     # История пишется **в момент вылета каждого**, а не батчем в конце.
@@ -1145,7 +1492,18 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
     state
     |> cancel_reentry_timer(entry_id)
-    |> Map.update!(:results, &[%{entry_id: entry_id, place: place} | &1])
+    |> Map.update!(:results, &[result_row(entry_id, placement) | &1])
+  end
+
+  # Строка результата. `shared_places` едет с ней до самого расчёта:
+  # именно по нему `Tournaments.settle/2` узнаёт, что два места слиты
+  # в одно и их призы надо сложить и поделить (`Engine.Elimination`).
+  defp result_row(entry_id, %{place: place} = placement) do
+    %{
+      entry_id: entry_id,
+      place: place,
+      shared_places: Map.get(placement, :shared_places) || [place]
+    }
   end
 
   # Снимок входа для истории. Снимок, а не ссылка на `tournament_entries`:
@@ -1219,11 +1577,12 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   # Сумма за место на момент вылета — по текущей явке, не по итогу
   # турнира: тот подводится один раз в конце (`SettleTournament`), а
   # вылетевший не может его ждать. Место вне призовой зоны — `0`.
-  defp prize_for_place(state, place) do
+  defp prize_for(state, %{place: place} = placement) do
+    shared = Map.get(placement, :shared_places) || [place]
+
     with {:ok, tournament} <- Tournaments.get_tournament(state.tournament_id),
-         {:ok, payouts} <- Tournaments.current_payouts(tournament),
-         %{amount: amount} <- Enum.find(payouts, &(&1.place == place)) do
-      amount
+         {:ok, payouts} <- Tournaments.current_payouts(tournament) do
+      Tournaments.share_of_places(payouts, shared, place)
     else
       _ -> 0
     end
@@ -1234,10 +1593,12 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   # игрок уже получил, выбивая чужие головы в этом турнире. Отдельного
   # счётчика для этого нет: сумма берётся из его же кошелька по записям
   # `tournament_bounty` с меткой турнира.
-  defp bounty_earned_by(%State{setting: %{bounty_part: 0}}, _entry), do: 0
-
   defp bounty_earned_by(state, entry) do
-    Tournaments.bounty_earned(entry.user_id, state.setting.currency, state.tournament_id)
+    if bounty_part(state) == 0 do
+      0
+    else
+      Tournaments.bounty_earned(entry.user_id, state.setting.currency, state.tournament_id)
+    end
   end
 
   defp offer_reentry(state, placement) do
@@ -1265,7 +1626,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       state
       | pending_reentries:
           Map.put(state.pending_reentries, placement.entry_id, %{
-            place: placement.place,
+            placement: placement,
             user_id: player.user_id,
             timer: timer
           })
@@ -1335,7 +1696,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   defp rebalance(%State{tables: tables} = state) when map_size(tables) < 2, do: state
 
   defp rebalance(state) do
-    plan = state |> seating_view() |> Seating.plan(state.setting.table_size)
+    plan = state |> seating_view() |> Seating.plan(table_size(state))
 
     state
     |> apply_moves(plan.moves)
@@ -1345,7 +1706,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   defp seating_view(state) do
     Enum.map(state.tables, fn {table_id, _pid} ->
       seats =
-        Map.new(1..state.setting.table_size, fn number ->
+        Map.new(1..table_size(state), fn number ->
           {number, player_at(state, table_id, number)}
         end)
 
@@ -1477,9 +1838,16 @@ defmodule BlockPoker.Tournaments.TournamentServer do
           acc
 
         {pid, tables} ->
-          close_table(acc, table_id, pid, tables)
+          acc |> close_table(table_id, pid, tables) |> forget_closed(table_id)
       end
     end)
+  end
+
+  # Ожидания перерыва и круга чистятся только у **действительно**
+  # закрытого стола: `close_table/4` отказывается гасить стол, за которым
+  # ещё сидят, и такой стол продолжает раздавать и присылать `hand_summary`.
+  defp forget_closed(state, table_id) do
+    if Map.has_key?(state.tables, table_id), do: state, else: forget_table(state, table_id)
   end
 
   # --- Падение стола -------------------------------------------------------
@@ -1503,6 +1871,11 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
     state = %{state | tables: Map.delete(state.tables, table_id)}
     state = if state.final_table == table_id, do: %{state | final_table: nil}, else: state
+
+    # Мёртвый стол вычёркивается из ожиданий **до** пересадки: иначе
+    # перерыв или круг hand-for-hand ждали бы от него раздачу, которой
+    # уже никогда не будет.
+    state = forget_table(state, table_id)
 
     state = Enum.reduce(orphans, state, &reseat_orphan(&2, &1))
 
@@ -1542,7 +1915,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   defp maybe_final_table(%State{final_table: table} = state) when table != nil, do: state
 
   defp maybe_final_table(state) do
-    if map_size(state.tables) == 1 and alive_count(state) <= state.setting.table_size do
+    if map_size(state.tables) == 1 and alive_count(state) <= table_size(state) do
       [{table_id, pid}] = Map.to_list(state.tables)
 
       # Финалка — событие турнира, а не настройка комнаты: стол берёт
@@ -1580,13 +1953,16 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   defp maybe_finish(state) do
     case alive_players(state) do
       [winner] ->
-        results = [%{entry_id: winner.entry_id, place: 1} | state.results]
+        results = [%{entry_id: winner.entry_id, place: 1, shared_places: [1]} | state.results]
 
         {:ok, tournament} = Tournaments.get_tournament(state.tournament_id)
         {:ok, tournament} = ensure_pool_fixed(tournament)
         {:ok, payouts} = Tournaments.settle(tournament, results)
 
-        payload = %{results: results, payouts: payouts}
+        # Клиенту едет то, что вход **получил**, а не то, сколько стоит
+        # его место: при слитых местах одновременного вылета это разные
+        # числа, и считает их ядро (`Tournaments.award_amounts/2`).
+        payload = %{results: with_prizes(results, payouts), payouts: payouts}
 
         # Победитель не вылетает, и `finalize_bust` для него не
         # вызывается — строку истории ему пишет завершение турнира.
@@ -1611,6 +1987,14 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     end
   end
 
+  defp with_prizes(results, payouts) do
+    won = Map.new(Tournaments.award_amounts(results, payouts), &{&1.entry_id, &1.amount})
+
+    Enum.map(results, fn result ->
+      %{entry_id: result.entry_id, place: result.place, prize: Map.get(won, result.entry_id, 0)}
+    end)
+  end
+
   # Фонд фиксируется на закрытии поздней регистрации. Если турнир
   # закончился раньше, чем оно случилось, фиксируем здесь: выплачивать
   # из незафиксированного фонда нечем.
@@ -1624,6 +2008,25 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
   # --- Служебное -----------------------------------------------------------
 
+  # Размер стола и правила голов читаются из **снапшота инстанса**, а не
+  # из живого шаблона: снапшот для того и снят, чтобы правка шаблона не
+  # меняла турнир под ногами у играющих (§6 CLAUDE.md). Через `state.setting`
+  # они приходили бы заново при каждом перезапуске процесса — то есть
+  # ровно в момент, когда турнир и так восстанавливается.
+  #
+  # Шаблон остаётся запасным значением: снапшот инстанса, снятый до
+  # появления поля, его не содержит.
+  defp table_size(state), do: snapshot_value(state, "table_size", state.setting.table_size)
+
+  defp bounty_part(state), do: snapshot_value(state, "bounty_part", state.setting.bounty_part)
+
+  defp snapshot_value(state, key, fallback) do
+    case Map.get(state.snapshot, key) do
+      nil -> fallback
+      value -> value
+    end
+  end
+
   defp alive_players(state) do
     state.players |> Map.values() |> Enum.filter(& &1.alive?)
   end
@@ -1636,8 +2039,14 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     end)
   end
 
+  # Неизвестный вход не заводится: `Map.update/4` подставил бы дефолт,
+  # и в `players` появился бы `nil`, на котором упали бы `occupancy/2` и
+  # `player_at/3`. Пропуск здесь честнее — обновлять нечего.
   defp update_player(state, entry_id, fun) do
-    %{state | players: Map.update(state.players, entry_id, nil, fun)}
+    case Map.fetch(state.players, entry_id) do
+      {:ok, player} -> %{state | players: Map.put(state.players, entry_id, fun.(player))}
+      :error -> state
+    end
   end
 
   defp schedule(message, ms) when is_integer(ms) and ms >= 0 do

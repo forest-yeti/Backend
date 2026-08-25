@@ -984,6 +984,58 @@ defmodule BlockPoker.TournamentsTest do
       assert total == ctx.tournament.prize_pool
     end
 
+    test "слитые места делятся поровну", ctx do
+      before_one = balance(ctx.one)
+      before_two = balance(ctx.two)
+
+      # Двое вылетели одной раздачей с равным стеком: игра не решила,
+      # кто из них выше, и решать это деньгами нельзя. Призы первого и
+      # второго места складываются и делятся пополам
+      # (`Engine.Elimination`).
+      {:ok, _payouts} =
+        Tournaments.settle(ctx.tournament, [
+          %{entry_id: ctx.first.id, place: 1, shared_places: [1, 2]},
+          %{entry_id: ctx.second.id, place: 2, shared_places: [1, 2]}
+        ])
+
+      assert balance(ctx.one) == before_one + 1000
+      assert balance(ctx.two) == before_two + 1000
+
+      # И в БД лежит то же, что ушло в кошелёк: иначе история покажет
+      # одну сумму, а кошелёк другую.
+      assert Repo.get!(Entry, ctx.first.id).prize == 1000
+      assert Repo.get!(Entry, ctx.second.id).prize == 1000
+    end
+
+    test "сумма слитых мест равна сумме их призов", ctx do
+      {:ok, payouts} = Tournaments.payouts(ctx.tournament)
+
+      shared = [1, 2]
+
+      total =
+        Enum.reduce(shared, 0, fn place, acc ->
+          acc + Tournaments.share_of_places(payouts, shared, place)
+        end)
+
+      # Ни фишки, ни копейки не теряется на делении: остаток уходит
+      # первому по тайбрейку, а не пропадает.
+      assert total == 1300 + 700
+    end
+
+    test "распавшаяся группа платит каждому его место", ctx do
+      before_one = balance(ctx.one)
+
+      # Связанный вход вошёл заново, вылета у него нет, и в результатах
+      # его тоже нет. Делить не с кем — оставшийся получает своё место
+      # целиком, а не половину.
+      {:ok, _payouts} =
+        Tournaments.settle(ctx.tournament, [
+          %{entry_id: ctx.first.id, place: 1, shared_places: [1, 2]}
+        ])
+
+      assert balance(ctx.one) == before_one + 1300
+    end
+
     test "повторная выплата не начисляет дважды", ctx do
       results = [%{entry_id: ctx.first.id, place: 1}]
 

@@ -63,6 +63,13 @@ defmodule BlockPoker.Tournaments.Entry do
     field :credited, :integer, default: 0
 
     field :place, :integer
+
+    # Места, слитые одновременным вылетом с равным стеком: их призы
+    # складываются и делятся поровну (`Engine.Elimination`). `nil` —
+    # обычный одиночный вылет. Хранится потому, что из `place` группа
+    # не выводится, а дорасчёт джобой поднимает результаты из БД.
+    field :shared_places, {:array, :integer}
+
     field :prize, :integer, default: 0
 
     belongs_to :paid_with_ticket, UserTicket, foreign_key: :paid_with_ticket_id
@@ -96,6 +103,7 @@ defmodule BlockPoker.Tournaments.Entry do
       :addons_count,
       :credited,
       :place,
+      :shared_places,
       :prize,
       :paid_with_ticket_id,
       :busted_at

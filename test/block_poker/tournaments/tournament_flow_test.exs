@@ -79,10 +79,12 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
   defp start_server(tournament_id, opts \\ []) do
     # Столы с ручными таймерами: пауза между раздачами в тестах не
     # отсчитывается реальным временем (§11 CLAUDE.md).
+    {id, opts} = Keyword.pop(opts, :id, {TournamentServer, tournament_id})
+
     args =
       Keyword.merge([tournament_id: tournament_id, room_opts: [timers: :manual]], opts)
 
-    pid = start_supervised!({TournamentServer, args}, id: {TournamentServer, tournament_id})
+    pid = start_supervised!({TournamentServer, args}, id: id)
 
     Sandbox.allow(BlockPoker.Repo, self(), pid)
     pid
@@ -694,6 +696,26 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       assert {:error, :addon_not_allowed} = TournamentServer.addon(ctx.pid, ctx.user.id)
     end
 
+    test "аддон один на вход: второй отвергается", ctx do
+      before = balance(ctx.user)
+
+      :ok = TournamentServer.fire(ctx.pid, :break)
+
+      assert {:ok, %{stack: stack}} = TournamentServer.addon(ctx.pid, ctx.user.id)
+
+      # Второй аддон в тот же перерыв — это докупка без потолка: за пять
+      # минут игрок собрал бы стек, ограниченный только кошельком.
+      assert {:error, :addon_already_taken} = TournamentServer.addon(ctx.pid, ctx.user.id)
+
+      assert balance(ctx.user) == before - 500
+
+      seat = ctx.table |> TableServer.state() |> RoomState.find_seat(ctx.user.id)
+      assert seat.stack == stack
+
+      {:ok, reloaded} = Tournaments.get_tournament(ctx.tournament.id)
+      assert reloaded.addons_count == 1
+    end
+
     test "перерыв объявляет окно аддона", ctx do
       Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(ctx.tournament.id))
 
@@ -1254,6 +1276,278 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       for {_id, table} <- :sys.get_state(pid).tables do
         refute TableServer.state(table).paused?
       end
+    end
+  end
+
+  describe "одновременный вылет с равным стеком" do
+    # Игра не решила, кто из двоих выше, и решать это номером места
+    # нельзя: призы связанных мест складываются и делятся поровну
+    # (`Engine.Elimination`). Считает это ядро, а проверяется здесь то,
+    # что расчёт вообще доезжает до денег: связь мест обязана дожить от
+    # вылета до выплаты — через процесс, `tournament_entries` и `settle/2`.
+    test "делит призы связанных мест поровну", _ctx do
+      setting =
+        setting_fixture(
+          %{table_size: 6, min_players: 2, buy_in: 1000, entry_fee: 100, starting_stack: 5000},
+          bubble_levels(50)
+        )
+
+      tournament = tournament_fixture(setting)
+
+      users = for _index <- 1..3, do: user_fixture()
+      for user <- users, do: {:ok, _entry} = Tournaments.register(tournament.id, user.id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(tournament.id))
+
+      [{table_id, _table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      players = TournamentServer.players(pid)
+      [one, two] = Enum.take(players, 2)
+
+      # Раздача, которая выбила двоих сразу и с одинаковым стеком на её
+      # начало. Ребая в структуре нет, поэтому вылет окончателен.
+      send(
+        pid,
+        {:table_event, "hand_summary",
+         %{
+           room_id: table_id,
+           busted: [
+             %{seat: one.seat, user_id: one.user_id, stack_before: 2500},
+             %{seat: two.seat, user_id: two.user_id, stack_before: 2500}
+           ],
+           pots: [],
+           button_seat: 1,
+           stacks: %{}
+         }}
+      )
+
+      _sync = TournamentServer.state(pid)
+
+      # Связь мест записана у обоих входов: из `place` она не выводится,
+      # а дорасчёт джобой поднимает результаты именно из БД.
+      for entry_id <- [one.entry_id, two.entry_id] do
+        {:ok, entry} = Tournaments.get_entry(entry_id)
+
+        assert entry.place in [2, 3]
+        assert entry.shared_places == [2, 3]
+      end
+
+      # Третий остался один — турнир кончился и рассчитался.
+      assert_received {:tournament_event, "tournament_finished", %{results: results}}
+
+      shared = Enum.filter(results, &(&1.entry_id in [one.entry_id, two.entry_id]))
+
+      assert length(shared) == 2
+      assert [prize, prize] = Enum.map(shared, & &1.prize)
+
+      # И в кошелёк ушло ровно то, что объявлено.
+      for entry_id <- [one.entry_id, two.entry_id] do
+        {:ok, entry} = Tournaments.get_entry(entry_id)
+        assert entry.prize == prize
+      end
+    end
+  end
+
+  describe "выбывший стол не подвешивает турнир" do
+    # Общий сюжет обоих тестов: стол, от которого турнир ждёт конца
+    # раздачи, перестаёт существовать. `hand_summary` он больше не
+    # пришлёт никогда, и оставленный в ожидании он останавливает турнир
+    # навсегда — `rebalance/1` зовётся только из `after_hand/2`, и
+    # спасти уже некому.
+    test "падение стола на перерыве не оставляет перерыв без конца", _ctx do
+      setting = fast_setting(%{table_size: 2, min_players: 2})
+      tournament = tournament_fixture(setting)
+
+      for _index <- 1..4,
+          do: {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(tournament.id))
+
+      [{busy_id, busy}, {_idle_id, _idle}] = Map.to_list(:sys.get_state(pid).tables)
+
+      # Раздача идёт: перерыв объявлен, но ждёт этот стол.
+      deal_hand(busy)
+      assert TableServer.state(busy).hand
+
+      :ok = TournamentServer.fire(pid, :break)
+
+      break = :sys.get_state(pid).break
+      assert MapSet.member?(break.waiting, busy_id)
+      assert break.ends_at == nil
+
+      Process.exit(busy, :kill)
+      assert_receive {:tournament_event, "table_recovered", %{table_id: ^busy_id}}
+      sync_tournament(pid)
+
+      # Ждать больше некого — пять минут пошли, и перерыв кончится.
+      break = :sys.get_state(pid).break
+      refute MapSet.member?(break.waiting, busy_id)
+      assert break.ends_at
+      assert :sys.get_state(pid).break_timer
+
+      :ok = TournamentServer.fire(pid, :break_over)
+      refute :sys.get_state(pid).break
+    end
+
+    test "падение стола на баббле не оставляет круг незакрытым", _ctx do
+      %{pid: pid} = start_bubble(50)
+
+      [{first_id, first}, {second_id, second}] = Map.to_list(:sys.get_state(pid).tables)
+
+      deal_hand(first)
+      play_current_hand(first)
+      sync_tournament(pid)
+
+      # Круг начат: первый отыграл и стоит, ждём второго.
+      assert MapSet.member?(:sys.get_state(pid).hand_for_hand.waiting, second_id)
+      assert TableServer.state(first).paused?
+
+      Process.exit(second, :kill)
+      assert_receive {:tournament_event, "table_recovered", %{table_id: ^second_id}}
+      sync_tournament(pid)
+
+      # Ждать нечего: круг закрыт, столы отпущены, турнир играет дальше.
+      refute MapSet.member?(:sys.get_state(pid).hand_for_hand.waiting, second_id)
+      refute TableServer.state(first).paused?
+      assert Map.has_key?(:sys.get_state(pid).tables, first_id)
+    end
+  end
+
+  describe "закрытие поздней регистрации" do
+    # Фонд фиксируется здесь и больше нигде: до закрытия `prize_pool`
+    # у инстанса ноль, и витрина читает именно его. Без таймера окно не
+    # закрывалось бы никогда, и фонд оставался бы нулевым весь турнир.
+    test "по часам фиксирует фонд и закрывает вход", ctx do
+      tournament = tournament_fixture(ctx.setting)
+
+      for _index <- 1..3,
+          do: {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(tournament.id))
+
+      {:ok, running} = Tournaments.get_tournament(tournament.id)
+      assert running.status == :running
+      assert running.prize_pool == 0
+      assert running.late_reg_until
+
+      :ok = TournamentServer.fire(pid, :late_reg)
+
+      assert_received {:tournament_event, "late_reg_closed", %{prize_pool: pool}}
+      assert pool == 3 * ctx.setting.buy_in
+
+      {:ok, closed} = Tournaments.get_tournament(tournament.id)
+      assert closed.status == :late_reg_closed
+      assert closed.prize_pool == pool
+
+      # Вход закрыт: новых денег в турнире больше нет по построению.
+      assert {:error, :tournament_started} =
+               Tournaments.register(tournament.id, user_fixture().id)
+    end
+
+    test "повторное закрытие фонд не двигает", ctx do
+      tournament = tournament_fixture(ctx.setting)
+
+      for _index <- 1..3,
+          do: {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      :ok = TournamentServer.fire(pid, :late_reg)
+      {:ok, first} = Tournaments.get_tournament(tournament.id)
+
+      :ok = TournamentServer.fire(pid, :late_reg)
+      {:ok, second} = Tournaments.get_tournament(tournament.id)
+
+      assert second.prize_pool == first.prize_pool
+      assert second.status == first.status
+    end
+  end
+
+  describe "падение процесса турнира" do
+    # Самое дорогое падение в системе. Столы живут в своём супервизоре и
+    # раздают дальше — без восстановленной рассадки их не слушает никто:
+    # вылеты не считаются, места не присваиваются, закончиться турнир не
+    # может уже никогда.
+    test "поднявшийся заново турнир подбирает свои столы и стеки", _ctx do
+      setting = fast_setting(%{table_size: 6, min_players: 2})
+      tournament = tournament_fixture(setting)
+
+      users = for _index <- 1..3, do: user_fixture()
+      for user <- users, do: {:ok, _entry} = Tournaments.register(tournament.id, user.id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      [{table_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      # Раздача сыграна: стеки разошлись, и снимок записан.
+      deal_hand(table)
+      play_hand(table)
+      sync_tournament(pid)
+
+      before = Map.new(TournamentServer.players(pid), &{&1.user_id, &1.stack})
+      assert map_size(before) == 3
+
+      :ok = stop_supervised({TournamentServer, tournament.id})
+      refute Process.alive?(pid)
+
+      # Стол падение турнира пережил — он в своём супервизоре.
+      assert Process.alive?(table)
+
+      revived = start_server(tournament.id, id: {TournamentServer, tournament.id, :revived})
+
+      # Тот же стол, те же стеки, та же рассадка.
+      assert Map.keys(:sys.get_state(revived).tables) == [table_id]
+      assert Map.new(TournamentServer.players(revived), &{&1.user_id, &1.stack}) == before
+      assert TournamentServer.state(revived).players_left == 3
+
+      # Стадия поднимается из БД: трое за одним столом — это уже финалка,
+      # и восстановленный турнир обязан знать об этом.
+      assert TournamentServer.state(revived).status == :finishing
+      assert TournamentServer.state(revived).final_table == table_id
+
+      # И турнир доигрывается: подобранный стол — обычный стол.
+      assert :finished = play_until_finished(revived, table)
+    end
+
+    test "вход, севший после снимка, не остаётся вне игры", _ctx do
+      setting = fast_setting(%{table_size: 6, min_players: 2})
+      tournament = tournament_fixture(setting)
+
+      users = for _index <- 1..2, do: user_fixture()
+      for user <- users, do: {:ok, _entry} = Tournaments.register(tournament.id, user.id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      [{_table_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      deal_hand(table)
+      play_hand(table)
+      sync_tournament(pid)
+
+      # Поздняя регистрация — уже после снимка: в нём этого входа нет.
+      latecomer = user_fixture()
+      {:ok, _entry} = Tournaments.register(tournament.id, latecomer.id)
+      sync_tournament(pid)
+
+      :ok = stop_supervised({TournamentServer, tournament.id})
+
+      revived = start_server(tournament.id, id: {TournamentServer, tournament.id, :revived})
+
+      seated = Enum.map(TournamentServer.players(revived), & &1.user_id)
+      assert latecomer.id in seated
+      assert length(seated) == 3
     end
   end
 

@@ -82,9 +82,19 @@ defmodule BlockPoker.Tournaments.Workers.SettleTournament do
 
     case alive do
       [winner] ->
-        places = Enum.map(busted, &%{entry_id: &1.id, place: &1.place})
+        # `shared_places` едут из БД: слитые места одновременного вылета
+        # делятся поровну, и дорасчёт обязан заплатить то же, что уже
+        # объявили игроку при вылете (`Tournaments.share_of_places/3`).
+        places =
+          Enum.map(busted, fn entry ->
+            %{
+              entry_id: entry.id,
+              place: entry.place,
+              shared_places: entry.shared_places || [entry.place]
+            }
+          end)
 
-        {:ok, [%{entry_id: winner.id, place: 1} | places]}
+        {:ok, [%{entry_id: winner.id, place: 1, shared_places: [1]} | places]}
 
       _more ->
         {:error, :not_finished}

@@ -33,6 +33,7 @@ defmodule BlockPoker.Tournaments do
 
   alias BlockPoker.Engine.{BlindSchedule, Bounty, TournamentPayout}
   alias BlockPoker.History
+  alias BlockPoker.Engine.Elimination
   alias BlockPoker.Repo
   alias BlockPoker.Tables.LobbyQuery
   alias BlockPoker.Tickets
@@ -56,6 +57,11 @@ defmodule BlockPoker.Tournaments do
   alias Phoenix.PubSub
 
   @pubsub BlockPoker.PubSub
+
+  # Сколько аддонов положено одному входу. Константа, а не поле шаблона:
+  # см. `addon/2` — второй аддон превращает точку структуры в докупку без
+  # потолка, и настройкой такое не делают.
+  @addons_per_entry 1
 
   @typedoc "Фильтр витрины шаблонов."
   @type filter :: [game_types: [atom()], currency: atom(), enabled: boolean()]
@@ -1122,6 +1128,14 @@ defmodule BlockPoker.Tournaments do
   сюда приходит уже решённое «можно». Голову аддон **не увеличивает**:
   `addon_cost` целиком идёт в призовой фонд, потому что голова берётся
   из взноса, а аддон взносом не является.
+
+  **Аддон один на вход, и это правило, а не настройка.** Аддон — точка
+  структуры турнира: все получают одну и ту же возможность добрать один
+  и тот же стек за одну и ту же цену. Второй аддон превратил бы её
+  в докупку без потолка — за пять минут перерыва игрок собрал бы стек,
+  не ограниченный ничем, кроме кошелька, и структура мест перестала бы
+  что-либо значить. Ре-энтри лимита не наследует: новый вход — новый
+  стек и новое право на аддон.
   """
   @spec addon(Ecto.UUID.t(), Ecto.UUID.t()) :: {:ok, Entry.t()} | {:error, atom()}
   def addon(tournament_id, user_id) do
@@ -1131,9 +1145,18 @@ defmodule BlockPoker.Tournaments do
       get_setting(tournament.tournament_setting_id)
     end)
     |> Multi.run(:entry, fn repo, %{tournament: tournament} ->
-      case active_entry(repo, tournament.id, user_id) do
-        nil -> {:error, :not_registered}
-        entry -> {:ok, entry}
+      # Строка входа блокируется: `addons_count` читается и увеличивается
+      # в разных шагах, и без блокировки два одновременных запроса оба
+      # увидели бы ноль.
+      case active_entry(repo, tournament.id, user_id, lock: true) do
+        nil ->
+          {:error, :not_registered}
+
+        %Entry{addons_count: taken} when taken >= @addons_per_entry ->
+          {:error, :addon_already_taken}
+
+        entry ->
+          {:ok, entry}
       end
     end)
     |> Multi.run(:charge, fn repo, changes -> charge_addon(repo, changes) end)
@@ -1240,8 +1263,14 @@ defmodule BlockPoker.Tournaments do
       %{prize_pool: pool, overlay: overlay} =
         TournamentPayout.pool(collected(tournament), setting.guarantee)
 
+      # Статус назад не откатывается. В коротком турнире финальный стол
+      # собирается раньше, чем истекает окно входа, и `:finishing` — уже
+      # более поздняя стадия: перевести его в `:late_reg_closed` значило
+      # бы объявить клиенту, что финалка распалась.
+      status = if tournament.status == :finishing, do: :finishing, else: :late_reg_closed
+
       tournament
-      |> Tournament.changeset(%{status: :late_reg_closed, prize_pool: pool, overlay: overlay})
+      |> Tournament.changeset(%{status: status, prize_pool: pool, overlay: overlay})
       |> Repo.update()
       |> announce()
     end
@@ -1305,6 +1334,33 @@ defmodule BlockPoker.Tournaments do
     end
   end
 
+  @doc """
+  Доля игрока, чьё место слито с соседними: одновременный вылет с равным
+  стеком.
+
+  Призы связанных мест складываются и делятся поровну, остаток — первому
+  по тайбрейку (`Engine.Elimination.split_prize/2`). Живёт здесь, а не
+  в процессе, потому что считать деньги вне ядра нельзя, а нужен один и
+  тот же расчёт в двух местах: сумма, объявленная вылетевшему сразу
+  (`TournamentServer`), и сумма, записанная в кошелёк при расчёте
+  (`settle/2`), обязаны совпасть.
+
+  Место вне списка связанных или сетка без такого места дают ноль —
+  «вне призовой зоны», а не ошибку.
+  """
+  @spec share_of_places([TournamentPayout.payout()], [pos_integer()], pos_integer()) ::
+          non_neg_integer()
+  def share_of_places(payouts, shared_places, place) do
+    by_place = Map.new(payouts, &{&1.place, &1.amount})
+    ordered = Enum.sort(shared_places)
+    total = ordered |> Enum.map(&Map.get(by_place, &1, 0)) |> Enum.sum()
+
+    case Enum.find_index(ordered, &(&1 == place)) do
+      nil -> 0
+      index -> total |> Elimination.split_prize(length(ordered)) |> Enum.at(index, 0)
+    end
+  end
+
   # --- Ход турнира ---------------------------------------------------------
 
   @doc "Помечает начало турнира и крайний срок поздней регистрации."
@@ -1352,12 +1408,22 @@ defmodule BlockPoker.Tournaments do
 
   Место присваивается только здесь: пока идёт окно ре-энтри, вылет не
   окончателен, и записывать место было бы записью несуществующего факта.
+
+  `shared_places` — места, слитые одновременным вылетом с равным стеком.
+  Пишутся вместе с местом, потому что из `place` группа не выводится,
+  а дорасчёт джобой поднимает результаты из БД (`share_of_places/3`).
   """
-  @spec bust(Ecto.UUID.t(), pos_integer() | nil) :: {:ok, Entry.t()} | {:error, term()}
-  def bust(entry_id, place) do
+  @spec bust(Ecto.UUID.t(), pos_integer() | nil, [pos_integer()] | nil) ::
+          {:ok, Entry.t()} | {:error, term()}
+  def bust(entry_id, place, shared_places \\ nil) do
     with {:ok, entry} <- fetch_entry(entry_id) do
       entry
-      |> Entry.changeset(%{status: :busted, place: place, busted_at: DateTime.utc_now()})
+      |> Entry.changeset(%{
+        status: :busted,
+        place: place,
+        shared_places: shared_places,
+        busted_at: DateTime.utc_now()
+      })
       |> Repo.update()
     end
   end
@@ -1500,21 +1566,23 @@ defmodule BlockPoker.Tournaments do
   доплачивать или нет. Поэтому призы, оверлей, голова победителя и
   `finished_at` пишутся вместе.
 
-  `results` — список `%{entry_id, place}`, посчитанный процессом;
-  суммы берутся из `payouts/1`, а не приходят снаружи: считать деньги
-  вне ядра нельзя.
+  `results` — список `%{entry_id, place, shared_places}`, посчитанный
+  процессом; суммы берутся из `payouts/1`, а не приходят снаружи: считать
+  деньги вне ядра нельзя.
+
+  `shared_places` — места, слитые одновременным вылетом с равным стеком:
+  их призы складываются и делятся поровну (`share_of_places/3`). У
+  одиночного вылета это `[place]`, и делить нечего.
   """
-  @spec settle(Tournament.t(), [%{entry_id: term(), place: pos_integer()}]) ::
+  @spec settle(Tournament.t(), [
+          %{entry_id: term(), place: pos_integer(), shared_places: [pos_integer()]}
+        ]) ::
           {:ok, [map()]} | {:error, term()}
   def settle(%Tournament{} = tournament, results) do
     with {:ok, setting} <- get_setting(tournament.tournament_setting_id),
          {:ok, payouts} <- payouts(tournament) do
       by_place = Map.new(payouts, &{&1.place, &1})
-
-      awards =
-        results
-        |> Enum.map(fn result -> {result, Map.get(by_place, result.place)} end)
-        |> Enum.reject(fn {_result, payout} -> payout == nil end)
+      awards = awards(results, payouts, by_place)
 
       Multi.new()
       |> award_prizes(tournament, setting, awards)
@@ -1539,29 +1607,85 @@ defmodule BlockPoker.Tournaments do
     end
   end
 
+  @doc """
+  Кому сколько достанется — по входам, а не по местам.
+
+  Сетка выплат (`payouts/1`) отвечает на вопрос «сколько стоит место»,
+  а этот список — «сколько получит вот этот вход»: при слитых местах
+  одновременного вылета это разные числа. Публична, потому что нужна
+  дважды и обязана дать один ответ: по ней пишутся деньги (`settle/2`)
+  и по ней же объявляется итог в канал (`TournamentServer`).
+  """
+  @spec award_amounts([map()], [TournamentPayout.payout()]) :: [map()]
+  def award_amounts(results, payouts) do
+    by_place = Map.new(payouts, &{&1.place, &1})
+
+    results
+    |> awards(payouts, by_place)
+    |> Enum.map(fn {result, payout, amount} ->
+      %{
+        entry_id: result.entry_id,
+        place: result.place,
+        amount: amount,
+        ticket_id: payout && payout.ticket_id
+      }
+    end)
+  end
+
+  # Кому сколько. Обычный случай — сумма своего места; слитые места
+  # (`shared_places`) складываются и делятся поровну.
+  #
+  # Группа может распасться: один из связанных вошёл заново, вылета
+  # у него нет, и в `results` он не попал. Делить тогда не с кем —
+  # оставшийся получает своё место целиком.
+  defp awards(results, payouts, by_place) do
+    results
+    |> Enum.group_by(&shared_places/1)
+    |> Enum.flat_map(fn {places, members} ->
+      if length(members) == length(places) do
+        Enum.map(members, fn member ->
+          {member, Map.get(by_place, member.place),
+           share_of_places(payouts, places, member.place)}
+        end)
+      else
+        Enum.map(members, fn member ->
+          payout = Map.get(by_place, member.place)
+          {member, payout, (payout && payout.amount) || 0}
+        end)
+      end
+    end)
+    |> Enum.reject(fn {_member, payout, amount} -> payout == nil and amount == 0 end)
+  end
+
+  defp shared_places(%{shared_places: places}) when is_list(places) and places != [], do: places
+  defp shared_places(%{place: place}), do: [place]
+
   defp award_prizes(multi, tournament, setting, awards) do
-    Enum.reduce(awards, multi, fn {result, payout}, acc ->
+    Enum.reduce(awards, multi, fn {result, payout, amount}, acc ->
       acc
       |> Multi.run({:prize, result.entry_id}, fn repo, _changes ->
-        credit_prize(repo, tournament, setting, result, payout)
+        credit_prize(repo, tournament, setting, result, amount)
       end)
       |> Multi.update_all(
         {:mark, result.entry_id},
         from(e in Entry, where: e.id == ^result.entry_id),
-        set: [status: :paid, place: result.place, prize: payout.amount]
+        set: [status: :paid, place: result.place, prize: amount]
       )
+      # Билет достаётся по **своему** месту и не делится: разрезать
+      # билет пополам нечем. Слитые места, где билет есть только
+      # у верхнего, отдают его тому, кто это место занял.
       |> maybe_award_ticket(tournament, result, payout)
     end)
   end
 
-  defp credit_prize(_repo, _tournament, _setting, _result, %{amount: 0}), do: {:ok, :noop}
+  defp credit_prize(_repo, _tournament, _setting, _result, 0), do: {:ok, :noop}
 
-  defp credit_prize(repo, tournament, setting, result, payout) do
+  defp credit_prize(repo, tournament, setting, result, amount) do
     with {:ok, entry} <- fetch_entry(result.entry_id, repo),
          {:ok, wallet} <- Wallet.get_wallet(entry.user_id, setting.currency) do
       Wallet.record_entry(Multi.new(), :prize, %{
         wallet_id: wallet.id,
-        amount: payout.amount,
+        amount: amount,
         type: :tournament_prize,
         ref_id: tournament.id,
         idempotency_key: "tournament:#{tournament.id}:prize:#{entry.id}"
@@ -1578,6 +1702,7 @@ defmodule BlockPoker.Tournaments do
     end
   end
 
+  defp maybe_award_ticket(multi, _tournament, _result, nil), do: multi
   defp maybe_award_ticket(multi, _tournament, _result, %{ticket_id: nil}), do: multi
 
   defp maybe_award_ticket(multi, tournament, result, payout) do
@@ -1776,10 +1901,11 @@ defmodule BlockPoker.Tournaments do
     end
   end
 
-  defp active_entry(repo, tournament_id, user_id) do
+  defp active_entry(repo, tournament_id, user_id, opts \\ []) do
     Entry
     |> where([e], e.tournament_id == ^tournament_id and e.user_id == ^user_id)
     |> where([e], e.status in [:registered, :playing])
+    |> then(&if Keyword.get(opts, :lock, false), do: lock(&1, "FOR UPDATE"), else: &1)
     |> repo.one()
   end
 

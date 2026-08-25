@@ -62,6 +62,7 @@ defmodule BlockPoker.ErrorCode do
           | :reentry_not_allowed
           | :rebuy_limit_reached
           | :addon_not_allowed
+          | :addon_already_taken
           | :ticket_required
           | :ticket_unavailable
           | :ticket_expired
@@ -123,6 +124,7 @@ defmodule BlockPoker.ErrorCode do
     reentry_not_allowed: {409, "Повторный вход в этом турнире запрещён"},
     rebuy_limit_reached: {409, "Лимит повторных входов исчерпан"},
     addon_not_allowed: {409, "Аддон сейчас недоступен"},
+    addon_already_taken: {409, "Аддон в этом турнире уже взят"},
     ticket_required: {422, "Подходящего билета нет"},
     ticket_unavailable: {409, "Билет уже использован"},
     ticket_expired: {422, "Срок действия билета истёк"},
