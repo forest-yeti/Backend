@@ -794,7 +794,7 @@ defmodule BlockPoker.Tables.TableServer do
   # Пауза турнира: новых раздач не начинаем. Идущая доигрывается — её
   # прерывание было бы отменой уже сделанных ставок.
   def handle_info({:tournament_paused, paused?}, state) do
-    state = put_room(state, %{state.room | draining?: paused?})
+    state = put_room(state, RoomState.put_paused(state.room, paused?))
 
     # Снятие паузы идёт через общий вход в игру, а не прямо в раздачу:
     # стол мог ещё ни разу не раздавать (рассадка до старта турнира), и
@@ -1577,7 +1577,12 @@ defmodule BlockPoker.Tables.TableServer do
 
     announce(state)
 
-    if length(RoomState.players(state.room)) >= 2 and state.room.game_started? do
+    # Стол на паузе турнира следующую раздачу не планирует: иначе стол,
+    # доигравший уже после объявления перерыва, через паузу сдал бы лишнюю
+    # руку прямо в перерыв. Снятие паузы поднимает стол само
+    # (`{:tournament_paused, false}`).
+    if length(RoomState.players(state.room)) >= 2 and state.room.game_started? and
+         not state.room.paused? do
       schedule(state, :next_hand, @next_hand_ms)
     else
       state
@@ -1997,6 +2002,11 @@ defmodule BlockPoker.Tables.TableServer do
   # Кнопка ещё разыгрывается: севший в этот момент игрок раздачу не начинает.
   # Иначе она стартовала бы посреди анимации, а доигравший её таймер розыгрыша
   # начинал бы поверх неё вторую.
+  # Пауза турнира: ни раздача, ни розыгрыш кнопки не начинаются, кто бы
+  # ни сел за стол посреди перерыва (поздняя регистрация, возврат из
+  # сит-аута). Снятие паузы само зовёт эту же функцию.
+  defp maybe_start_game(%State{room: %RoomState{paused?: true}} = state), do: state
+
   defp maybe_start_game(%State{room: %RoomState{phase: :button_draw}} = state), do: state
 
   defp maybe_start_game(%State{room: %RoomState{game_started?: true, hand: nil}} = state) do

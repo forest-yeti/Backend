@@ -62,6 +62,7 @@ defmodule BlockPoker.Tables.RoomState do
           seats: %{pos_integer() => Seat.t()},
           phase: phase(),
           draining?: boolean(),
+          paused?: boolean(),
           button_seat: pos_integer() | nil,
           big_blind_seat: pos_integer() | nil,
           hands_played: non_neg_integer(),
@@ -204,6 +205,11 @@ defmodule BlockPoker.Tables.RoomState do
     discipline: BlockPoker.Engine.Hand,
     phase: :idle,
     draining?: false,
+    # Пауза турнира (перерыв). Отдельный флаг, а не `draining?`: тот
+    # означает «комната закрывается и новых не пускает», и доигрывать
+    # начатое ей никто не запрещает. Пауза же — ровно наоборот: комната
+    # жива, но новых раздач не начинает.
+    paused?: false,
     game_started?: false,
     hands_played: 0,
     action_seq: 0,
@@ -1662,6 +1668,16 @@ defmodule BlockPoker.Tables.RoomState do
 
   @spec mark_draining(t()) :: t()
   def mark_draining(state), do: %{state | draining?: true}
+
+  @doc """
+  Ставит комнату на паузу турнира и снимает с неё.
+
+  Идущая раздача паузой не трогается — прерывание отменяло бы уже
+  сделанные ставки. Пауза видна только в том, что следующая раздача не
+  начинается.
+  """
+  @spec put_paused(t(), boolean()) :: t()
+  def put_paused(state, paused?), do: %{state | paused?: paused?}
 
   @doc """
   Можно ли закрыть комнату прямо сейчас: пуста, не идёт раздача и в ней

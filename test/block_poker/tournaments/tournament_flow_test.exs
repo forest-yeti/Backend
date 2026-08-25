@@ -21,6 +21,8 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
   import BlockPoker.AccountsFixtures
   import BlockPoker.TournamentsFixtures
 
+  alias BlockPoker.Engine.Rng
+  alias BlockPoker.Engine.Rng
   alias BlockPoker.Tables.{RoomState, TableServer}
   alias BlockPoker.Tournaments
   alias BlockPoker.Tournaments.{Entry, TournamentServer}
@@ -689,7 +691,8 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       for _index <- 1..3,
           do: {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
 
-      pid = start_server(tournament.id)
+      # Карты фиксированы: вылет на перерыве — условие сценария, а не удача.
+      pid = start_server(tournament.id, room_opts: [timers: :manual, rng: Rng.seeded(<<1>>)])
       :ok = TournamentServer.start_tournament(pid)
 
       tables = Map.values(:sys.get_state(pid).tables)
@@ -792,6 +795,102 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       [{_id, table}] = Map.to_list(:sys.get_state(pid).tables)
 
       assert table |> TableServer.state() |> RoomState.find_seat(quitter.id) == nil
+    end
+  end
+
+  describe "перерыв" do
+    # 2-Max без ребая: обнулившийся вылетает сразу, а не остаётся за
+    # столом с правом докупки — сценарию нужен именно вылет.
+    defp heads_up_setting do
+      levels = [
+        %{
+          level: 1,
+          small_blind: 1000,
+          big_blind: 2000,
+          ante: 0,
+          duration_seconds: 600,
+          rebuy_allowed: false,
+          addon_allowed: false
+        },
+        %{
+          level: 2,
+          small_blind: 2000,
+          big_blind: 4000,
+          ante: 0,
+          duration_seconds: 600,
+          rebuy_allowed: false,
+          addon_allowed: false
+        }
+      ]
+
+      setting_fixture(
+        %{
+          table_size: 2,
+          min_players: 2,
+          buy_in: 1000,
+          entry_fee: 100,
+          starting_stack: 2000
+        },
+        levels
+      )
+    end
+
+    test "доигранная на перерыве раздача не тянет за собой следующую", _ctx do
+      setting = fast_setting()
+      tournament = tournament_fixture(setting)
+
+      for _index <- 1..2,
+          do: {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      [{_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      # Перерыв объявлен посреди раздачи: она доигрывается, и вот этот
+      # момент и проверяется — следующую она за собой не тянет.
+      deal_hand(table)
+      assert TableServer.state(table).hand != nil
+
+      :ok = TournamentServer.fire(pid, :break)
+      play_hand(table)
+
+      assert TableServer.state(table).hand == nil
+      refute Map.has_key?(:sys.get_state(table).timers, :next_hand)
+
+      # И даже севший на перерыве игрок раздачу не начинает.
+      :ok = TournamentServer.fire(pid, :break_over)
+      assert TableServer.state(table).hand != nil
+    end
+
+    test "пересадка, назревшая за перерыв, случается по его концу", _ctx do
+      # Стек равен большому блайнду: первая же раздача идёт на всё, и
+      # вылет случается ровно на перерыве.
+      setting = heads_up_setting()
+      tournament = tournament_fixture(setting)
+
+      for _index <- 1..3,
+          do: {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+
+      # Карты фиксированы: вылет на перерыве — условие сценария, а не удача.
+      pid = start_server(tournament.id, room_opts: [timers: :manual, rng: Rng.seeded(<<1>>)])
+      :ok = TournamentServer.start_tournament(pid)
+
+      tables = Map.values(:sys.get_state(pid).tables)
+      for t <- tables, do: deal_hand(t)
+
+      :ok = TournamentServer.fire(pid, :break)
+      for t <- tables, do: play_hand(t)
+
+      # Двое на два стола: раздать не может ни один. Пересадку на
+      # перерыве турнир не делает — но обязан сделать по его концу,
+      # иначе `hand_finished` больше не придёт ниоткуда и турнир
+      # останется стоять навсегда.
+      assert TournamentServer.state(pid).players_left == 2
+
+      :ok = TournamentServer.fire(pid, :break_over)
+
+      assert play_tables_until_finished(pid) == :finished
     end
   end
 end

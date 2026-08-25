@@ -203,7 +203,7 @@ defmodule BlockPoker.Tournaments.TournamentServerTest do
 
       # Стол на перерыве новых раздач не начинает.
       for {_id, table} <- tables_of(pid) do
-        assert TableServer.state(table).draining?
+        assert TableServer.state(table).paused?
       end
     end
 
@@ -217,7 +217,7 @@ defmodule BlockPoker.Tournaments.TournamentServerTest do
       refute TournamentServer.state(pid).on_break
 
       for {_id, table} <- tables_of(pid) do
-        refute TableServer.state(table).draining?
+        refute TableServer.state(table).paused?
       end
     end
 

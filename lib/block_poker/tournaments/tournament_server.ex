@@ -798,13 +798,46 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   defp end_break(%State{break: nil} = state), do: state
 
   defp end_break(state) do
-    Enum.each(state.tables, fn {_id, pid} -> send(pid, {:tournament_paused, false}) end)
-
     broadcast(state, "break_ended", %{})
 
-    %{state | break: nil, break_timer: nil}
+    state =
+      %{state | break: nil, break_timer: nil}
+      |> catch_up_seating()
+
+    resume_tables(state)
+
+    state
     |> arm_level()
     |> arm_break()
+  end
+
+  # Решения, отложенные перерывом.
+  #
+  # На перерыве `after_hand/2` уходит в ветку `table_ready/2`, то есть ни
+  # балансировка, ни круг hand-for-hand за это время не пересчитываются.
+  # Досчитать обязан конец перерыва, и это не косметика: `rebalance/1`
+  # зовётся **только** из `after_hand/2`. Стол, оставшийся к концу
+  # перерыва без пары, раздать не может и `hand_finished` больше не
+  # пришлёт — а значит и пересадка, которая его спасла бы, не случится
+  # никогда. Турнир встаёт навсегда.
+  #
+  # Порядок жёсткий: пересаживаем **до** снятия паузы. Поднятый стол
+  # сразу начинает раздачу, а из-под идущей раздачи игрока не двигают
+  # (`busy?/2`), и балансировка снова отложилась бы.
+  defp catch_up_seating(state) do
+    if bubble?(state) and split_field?(state) do
+      # Баббл: пересадки нет по правилу, но круг начинается заново — все
+      # столы выходят с перерыва одновременно.
+      restart_hand_for_hand(state)
+    else
+      state |> rebalance() |> stop_hand_for_hand()
+    end
+  end
+
+  defp restart_hand_for_hand(state) do
+    state = start_hand_for_hand(state)
+
+    %{state | hand_for_hand: %{waiting: dealing_tables(state)}}
   end
 
   # --- Конец раздачи -------------------------------------------------------
