@@ -57,6 +57,20 @@ if config_env() == :prod do
 
   config :block_poker, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
+  # Origin'ы панели администратора. В отличие от игрового клиента, панель —
+  # обычная страница в браузере, и пускает её только этот список: `*`
+  # `Api.Plugs.AdminCors` не поддерживает вовсе. Пустая переменная означает
+  # «панель снаружи недоступна» — это рабочее состояние ноды без панели,
+  # а не ошибка конфигурации, поэтому здесь нет `raise`.
+  admin_origins =
+    "ADMIN_ORIGINS"
+    |> System.get_env("")
+    |> String.split(",", trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+
+  config :block_poker, :admin_origins, admin_origins
+
   config :block_poker, Socket.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [

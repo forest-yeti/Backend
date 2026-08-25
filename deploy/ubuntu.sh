@@ -309,6 +309,10 @@ if [[ -f "$ENV_FILE" ]] && grep -q '^DATABASE_URL=' "$ENV_FILE"; then
   # shellcheck disable=SC1090
   DB_PASS="$(sed -n 's|^DATABASE_URL=ecto://[^:]*:\([^@]*\)@.*|\1|p' "$ENV_FILE")"
   SECRET_KEY_BASE="$(sed -n 's/^SECRET_KEY_BASE=//p' "$ENV_FILE")"
+  # Файл переписывается целиком, поэтому всё дописанное руками надо
+  # прочитать до этого. Origin'ы панели — как раз такое поле: пароли
+  # скрипт генерирует сам, а адрес панели знает только администратор.
+  ADMIN_ORIGINS="${ADMIN_ORIGINS:-$(sed -n 's/^ADMIN_ORIGINS=//p' "$ENV_FILE")}"
 else
   DB_PASS="$(openssl rand -hex 24)"
   SECRET_KEY_BASE="$(openssl rand -base64 64 | tr -d '\n')"
@@ -336,6 +340,10 @@ PHX_HOST=${DOMAIN}
 SECRET_KEY_BASE=${SECRET_KEY_BASE}
 DATABASE_URL=ecto://${DB_USER}:${DB_PASS}@127.0.0.1/${DB_NAME}
 POOL_SIZE=10
+# Origin'ы панели администратора через запятую, например
+# https://admin.example.com. Пусто — панель снаружи не пускается: CORS для
+# `/admin/*` разрешает только перечисленные адреса, `*` не поддерживается.
+ADMIN_ORIGINS=${ADMIN_ORIGINS:-}
 MIX_ENV=prod
 LANG=C.UTF-8
 ENV
