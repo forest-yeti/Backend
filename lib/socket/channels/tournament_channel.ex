@@ -114,21 +114,18 @@ defmodule Socket.Channels.TournamentChannel do
 
   def handle_in("reentry", _payload, socket) do
     socket.assigns.tournament_id
-    |> Tournaments.reenter(socket.assigns.user_id)
+    |> Tournaments.take_reentry(socket.assigns.user_id)
     |> case do
-      {:ok, entry} ->
-        {:reply, {:ok, %{entry_id: entry.id, entry_number: entry.entry_number}}, socket}
-
-      {:error, code} ->
-        Message.error_reply(error_code(code), socket)
+      {:ok, entry} -> {:reply, {:ok, entry}, socket}
+      {:error, code} -> Message.error_reply(error_code(code), socket)
     end
   end
 
   def handle_in("addon", _payload, socket) do
     socket.assigns.tournament_id
-    |> Tournaments.addon(socket.assigns.user_id)
+    |> Tournaments.take_addon(socket.assigns.user_id)
     |> case do
-      {:ok, _entry} -> {:reply, :ok, socket}
+      {:ok, result} -> {:reply, {:ok, result}, socket}
       {:error, code} -> Message.error_reply(error_code(code), socket)
     end
   end

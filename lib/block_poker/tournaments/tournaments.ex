@@ -897,6 +897,31 @@ defmodule BlockPoker.Tournaments do
     {:ok, :counted}
   end
 
+  @doc """
+  Взять повторный вход из-за стола: оплата **и** посадка.
+
+  Транспорту нужна именно эта функция, а не `reenter/2`: та берёт только
+  деньги, потому что зовёт её сам турнир, у которого рассадка уже в
+  руках. Позови транспорт `reenter/2` напрямую — и игрок заплатит, но
+  за стол не сядет, а окно ре-энтри у турнира дотикает до вылета.
+  """
+  @spec take_reentry(Ecto.UUID.t(), Ecto.UUID.t()) :: {:ok, map()} | {:error, atom()}
+  def take_reentry(tournament_id, user_id) do
+    TournamentServer.reenter(tournament_id, user_id)
+  end
+
+  @doc """
+  Взять аддон: оплата **и** фишки за столом.
+
+  По той же причине, что и `take_reentry/2`: `addon/2` только списывает,
+  а фишки кладёт стол по указанию турнира. Заодно турнир и решает, можно
+  ли аддон сейчас, — это знание про перерыв и уровень, а не про деньги.
+  """
+  @spec take_addon(Ecto.UUID.t(), Ecto.UUID.t()) :: {:ok, map()} | {:error, atom()}
+  def take_addon(tournament_id, user_id) do
+    TournamentServer.addon(tournament_id, user_id)
+  end
+
   # --- Разрегистрация и отмена ---------------------------------------------
 
   @doc """

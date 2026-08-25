@@ -14,8 +14,11 @@ defmodule Socket.Channels.TournamentChannelTest do
   import BlockPoker.AccountsFixtures
   import BlockPoker.TournamentsFixtures
 
+  alias BlockPoker.Engine.Rng
+  alias BlockPoker.Tables.{RoomState, TableServer}
   alias BlockPoker.Tournaments
   alias BlockPoker.Tournaments.TournamentServer
+  alias BlockPoker.Wallet
   alias Ecto.Adapters.SQL.Sandbox
   alias Socket.UserSocket
 
@@ -401,6 +404,193 @@ defmodule Socket.Channels.TournamentChannelTest do
 
       ref = push(channel, "ping", %{"t" => 123})
       assert_reply ref, :ok, %{client_time: 123, server_time: _server}
+    end
+  end
+
+  describe "ре-энтри и аддон из канала" do
+    # Ре-энтри и аддон — единственные сообщения канала, за которыми стоят
+    # **и деньги, и место за столом**. Оплата без посадки (и списание без
+    # фишек) выглядит для игрока как «кнопка не работает», поэтому путь
+    # проверяется целиком, до стека за столом.
+    defp playing_setting(overrides) do
+      levels = [
+        %{
+          level: 1,
+          small_blind: 1000,
+          big_blind: 2000,
+          ante: 0,
+          duration_seconds: 600,
+          rebuy_allowed: true,
+          addon_allowed: true
+        },
+        %{
+          level: 2,
+          small_blind: 2000,
+          big_blind: 4000,
+          ante: 0,
+          duration_seconds: 600,
+          rebuy_allowed: false,
+          addon_allowed: false
+        }
+      ]
+
+      setting_fixture(
+        Map.merge(
+          %{
+            table_size: 6,
+            min_players: 2,
+            buy_in: 1000,
+            entry_fee: 100,
+            starting_stack: 2000,
+            addon_cost: 500,
+            addon_stack: 3000
+          },
+          overrides
+        ),
+        levels
+      )
+    end
+
+    defp start_playing(setting) do
+      tournament = tournament_fixture(setting)
+      users = for _index <- 1..2, do: user_fixture()
+      for user <- users, do: {:ok, _entry} = Tournaments.register(tournament.id, user.id)
+
+      pid =
+        start_supervised!(
+          {TournamentServer,
+           [
+             tournament_id: tournament.id,
+             room_opts: [timers: :manual, rng: Rng.seeded(<<1>>)]
+           ]},
+          id: {TournamentServer, tournament.id}
+        )
+
+      Sandbox.allow(BlockPoker.Repo, self(), pid)
+      :ok = TournamentServer.start_tournament(pid)
+
+      [{_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      %{tournament: tournament, users: users, pid: pid, table: table}
+    end
+
+    # Стек равен большому блайнду: первая раздача идёт на всё и кто-то
+    # обязательно вылетает.
+    defp bust_one(%{table: table, users: users} = ctx) do
+      Enum.reduce_while(1..10, nil, fn _hand, _acc ->
+        play_one_hand(table)
+
+        room = TableServer.state(table)
+
+        case Enum.find(users, &(RoomState.find_seat(room, &1.id) == nil)) do
+          nil -> {:cont, nil}
+          busted -> {:halt, busted}
+        end
+      end)
+      |> case do
+        nil -> flunk("никто не вылетел: сетап раздачи сломан #{inspect(map_size(ctx))}")
+        busted -> busted
+      end
+    end
+
+    defp play_one_hand(table) do
+      room = TableServer.state(table)
+      if room.phase == :button_draw, do: TableServer.fire_timer(table, :button_draw)
+      if TableServer.state(table).hand == nil, do: TableServer.fire_timer(table, :next_hand)
+
+      Enum.reduce_while(1..40, nil, fn _step, _acc ->
+        room = TableServer.state(table)
+
+        case room.hand do
+          nil ->
+            {:halt, nil}
+
+          hand ->
+            case BlockPoker.Engine.Hand.to_act(hand) do
+              nil ->
+                TableServer.fire_timer(table, :runout)
+
+              number ->
+                seat = Map.get(room.seats, number)
+                actions = BlockPoker.Engine.Hand.legal_actions(hand, number)
+                action = if actions[:call], do: :call, else: :check
+
+                TableServer.act(table, seat.user_id, action, room.action_seq)
+            end
+
+            {:cont, nil}
+        end
+      end)
+    end
+
+    defp balance(user) do
+      {:ok, wallet} = Wallet.get_wallet(user.id, :play_money)
+      wallet.amount
+    end
+
+    test "reentry возвращает игрока за стол, а не просто берёт деньги" do
+      ctx =
+        start_playing(playing_setting(%{rebuy_allowed: true, rebuy_cost: 700, rebuy_stack: 3000}))
+
+      busted = bust_one(ctx)
+      assert busted
+
+      socket = connect_as(busted)
+
+      {:ok, _snapshot, channel} =
+        subscribe_and_join(socket, "tournament:#{ctx.tournament.id}", %{})
+
+      before = balance(busted)
+
+      ref = push(channel, "reentry", %{})
+      assert_reply ref, :ok, %{entry_number: 2}
+
+      # Деньги ушли — и ровно на них игрок снова сидит за столом.
+      assert balance(busted) == before - 700
+
+      seat = ctx.table |> TableServer.state() |> RoomState.find_seat(busted.id)
+      assert seat.stack == 3000
+    end
+
+    test "addon вне перерыва отвергается и денег не берёт" do
+      ctx = start_playing(playing_setting(%{addon_cost: 500, addon_stack: 3000}))
+      [user | _rest] = ctx.users
+
+      socket = connect_as(user)
+
+      {:ok, _snapshot, channel} =
+        subscribe_and_join(socket, "tournament:#{ctx.tournament.id}", %{})
+
+      before = balance(user)
+
+      ref = push(channel, "addon", %{})
+      assert_reply ref, :error, %{code: "addon_not_allowed"}
+
+      assert balance(user) == before
+    end
+
+    test "addon на перерыве кладёт фишки за столом" do
+      ctx = start_playing(playing_setting(%{addon_cost: 500, addon_stack: 3000}))
+      [user | _rest] = ctx.users
+
+      socket = connect_as(user)
+
+      {:ok, _snapshot, channel} =
+        subscribe_and_join(socket, "tournament:#{ctx.tournament.id}", %{})
+
+      :ok = TournamentServer.fire(ctx.pid, :break)
+
+      before = balance(user)
+      stack_before = (ctx.table |> TableServer.state() |> RoomState.find_seat(user.id)).stack
+
+      ref = push(channel, "addon", %{})
+      assert_reply ref, :ok, %{stack: stack}
+
+      assert balance(user) == before - 500
+      assert stack == stack_before + 3000
+
+      seat = ctx.table |> TableServer.state() |> RoomState.find_seat(user.id)
+      assert seat.stack == stack
     end
   end
 end
