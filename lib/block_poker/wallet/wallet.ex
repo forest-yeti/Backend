@@ -115,6 +115,83 @@ defmodule BlockPoker.Wallet do
   end
 
   @doc """
+  Запись по ключу идемпотентности либо `nil`.
+
+  Нужна тем, кто обязан отличить «операция ещё не выполнялась» от «уже
+  выполнена»: сам `record_entry/3` при повторе молча возвращает старую
+  запись, и по её виду повтор неотличим от первого раза. Панели
+  администратора это различие важно — второй записи в журнал действий по
+  тому же ключу быть не должно.
+  """
+  @spec get_entry_by_key(String.t()) :: WalletEntry.t() | nil
+  def get_entry_by_key(idempotency_key) do
+    Repo.get_by(WalletEntry, idempotency_key: idempotency_key)
+  end
+
+  @doc """
+  Выписка по всем кошелькам игрока сразу, свежие записи первыми.
+
+  Курсор — `seq`, счётчик самой БД: по времени вставки журнал сортировать
+  нельзя, операции в одной микросекунде встали бы в произвольном порядке.
+  """
+  @spec list_user_entries(Ecto.UUID.t(), keyword()) :: [map()]
+  def list_user_entries(user_id, opts \\ []) do
+    from(e in WalletEntry,
+      join: w in UserWallet,
+      on: w.id == e.wallet_id,
+      where: w.user_id == ^user_id,
+      select: %{
+        id: e.id,
+        seq: e.seq,
+        currency: w.type,
+        amount: e.amount,
+        type: e.type,
+        balance_after: e.balance_after,
+        ref_id: e.ref_id,
+        at: e.inserted_at
+      }
+    )
+    |> then(fn query ->
+      case Keyword.get(opts, :currency) do
+        nil -> query
+        currency -> where(query, [_e, w], w.type == ^currency)
+      end
+    end)
+    |> then(fn query ->
+      case Keyword.get(opts, :before_seq) do
+        seq when is_integer(seq) -> where(query, [e], e.seq < ^seq)
+        _other -> query
+      end
+    end)
+    |> order_by([e], desc: e.seq)
+    |> limit(^Keyword.get(opts, :limit, 50))
+    |> Repo.all()
+  end
+
+  @doc """
+  Сумма журнала по каждому из кошельков: `%{wallet_id => сумма}`.
+
+  Источник истины по деньгам — журнал, а `user_wallets.amount` лишь кэш
+  поверх него. Эта функция и есть та самая сверка, которую §11 CLAUDE.md
+  требует уметь делать.
+  """
+  @spec ledger_sums([Ecto.UUID.t()]) :: %{Ecto.UUID.t() => integer()}
+  def ledger_sums([]), do: %{}
+
+  def ledger_sums(wallet_ids) do
+    WalletEntry
+    |> where([e], e.wallet_id in ^wallet_ids)
+    |> group_by([e], e.wallet_id)
+    |> select([e], {e.wallet_id, sum(e.amount)})
+    |> Repo.all()
+    |> Map.new(fn {wallet_id, sum} -> {wallet_id, to_integer(sum)} end)
+  end
+
+  defp to_integer(nil), do: 0
+  defp to_integer(%Decimal{} = sum), do: Decimal.to_integer(sum)
+  defp to_integer(sum), do: sum
+
+  @doc """
   Сумма записей одного типа с одной меткой (`ref_id`) — «сколько уже
   получено по этой причине», не читая всю выписку. Например: сколько
   баунти игрок заработал в конкретном турнире (`ref_id` — id турнира,

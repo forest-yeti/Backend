@@ -20,6 +20,23 @@ defmodule Api.Router do
     plug Api.Plugs.RateLimit, scope: :refresh, limit: 30, window_ms: 300_000
   end
 
+  # Панель администратора (задача 8). Отдельный пайплайн целиком: свой
+  # CORS (панель — приложение на другом origin), свой токен и своя
+  # проверка сессии. Игровой токен здесь не работает никогда.
+  pipeline :admin do
+    plug :accepts, ["json"]
+    plug Api.Plugs.AdminCors
+  end
+
+  pipeline :admin_authenticated do
+    plug Api.Plugs.AdminAuth
+  end
+
+  # Вход в панель — самый дорогой перебор в системе: 5 попыток за 15 минут.
+  pipeline :admin_login_rate_limit do
+    plug Api.Plugs.RateLimit, scope: :admin_login, limit: 5, window_ms: 900_000
+  end
+
   scope "/", Api do
     pipe_through :api
 
@@ -51,5 +68,35 @@ defmodule Api.Router do
     get "/history/graph", HistoryController, :graph
     get "/history/tournaments", HistoryController, :tournaments
     get "/history/tournaments/:id", HistoryController, :tournament
+  end
+
+  # Панель администратора. Списки и деньги — это чтение с пагинацией и
+  # транзакционная запись, то есть HTTP; god-mode стола — это push, и он
+  # живёт в `/admin/socket` (§2 задачи 8).
+  scope "/admin", Api.Admin do
+    pipe_through [:admin, :admin_login_rate_limit]
+
+    post "/auth/login", AuthController, :login
+    post "/auth/refresh", AuthController, :refresh
+  end
+
+  scope "/admin", Api.Admin do
+    pipe_through [:admin, :admin_authenticated]
+
+    post "/auth/logout", AuthController, :logout
+    get "/auth/me", AuthController, :me
+
+    get "/users", UserController, :index
+    get "/users/:id", UserController, :show
+    get "/users/:id/ledger", UserController, :ledger
+    post "/users/:id/ban", UserController, :ban
+    post "/users/:id/unban", UserController, :unban
+    post "/users/:id/credit", UserController, :credit
+    post "/users/:id/take", UserController, :take
+
+    get "/games", GameController, :index
+    get "/games/:kind/:id", GameController, :show
+
+    get "/audit", AuditController, :index
   end
 end

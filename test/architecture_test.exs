@@ -78,7 +78,7 @@ defmodule BlockPoker.ArchitectureTest do
 
   test "транспорт не ветвится по доменным состояниям раздачи" do
     # Ветвление по правилам игры вне engine запрещено (§3 CLAUDE.md).
-    pattern = ~r/:preflop|:flop|:turn|:river|:showdown/
+    pattern = ~r/:preflop|:flop\b|:turn\b|:river|:showdown/
 
     assert offenders(@transport, pattern) == []
   end
@@ -113,7 +113,7 @@ defmodule BlockPoker.ArchitectureTest do
     # его как-то надо. А вот правила дисциплины — фантазия, роялти и
     # названия боксов — в транспорт протечь не должны: набор полей
     # выбирает дисциплина, view его только рендерит.
-    pattern = ~r/fantasy|royalt|:top|:middle|:bottom/
+    pattern = ~r/fantasy|royalt|:top\b|:middle\b|:bottom\b/
 
     assert offenders(@transport, pattern) == []
   end
@@ -131,7 +131,7 @@ defmodule BlockPoker.ArchitectureTest do
   end
 
   test "дисциплина китайского покера не ходит в БД и не заводит процессов" do
-    pattern = ~r/BlockPoker\.Repo|Repo\.|Ecto\.|Phoenix\.|GenServer|send\(|Process\./
+    pattern = ~r/BlockPoker\.Repo|\bRepo\.|Ecto\.|Phoenix\.|GenServer|\bsend\(|Process\./
 
     assert offenders(["lib/block_poker/engine/ofc"], pattern) == []
   end
@@ -145,7 +145,7 @@ defmodule BlockPoker.ArchitectureTest do
     # упоминание блайндов в `Hand` означало бы, что шов проведён неверно.
     source = "lib/block_poker/engine/hand.ex" |> sources() |> hd() |> elem(1) |> strip_docs()
 
-    refute Regex.match?(~r/small_blind|big_blind|ante/, source)
+    refute Regex.match?(~r/small_blind|big_blind|\bante\b/, source)
   end
 
   test "ветвление по структуре ставок живёт только в её реестре реализаций" do
@@ -156,7 +156,7 @@ defmodule BlockPoker.ArchitectureTest do
         String.contains?(path, "betting_structure") or String.contains?(path, "variant")
       end)
       |> Enum.filter(fn {_path, source} ->
-        Regex.match?(~r/:button_ante|ButtonAnte|:blinds/, strip_docs(source))
+        Regex.match?(~r/:button_ante|ButtonAnte|:blinds\b/, strip_docs(source))
       end)
       |> Enum.map(&elem(&1, 0))
 
@@ -172,9 +172,79 @@ defmodule BlockPoker.ArchitectureTest do
   test "транспорт не решает, кому и когда играть дважды" do
     # Канал только передаёт ответ игрока: кого спрашивают, разрешено ли это
     # за столом и чем кончилось — целиком дело ядра (§3 задачи 5).
-    pattern = ~r/allowed_run_it_twice|run_it_twice\?|RunItTwice|rit\./
+    pattern = ~r/allowed_run_it_twice|run_it_twice\?|RunItTwice|\brit\./
 
     assert offenders(@transport, pattern) == []
+  end
+
+  test "админский транспорт не собирает список игр сам" do
+    # §9 задачи 8: обходить `Registry` или `Lobby` из контроллера и канала
+    # нельзя — список живых игр собирает `Admin.Games.live_games/1`.
+    dirs = ["lib/api/controllers/admin", "lib/socket/channels/admin"]
+
+    assert offenders(dirs, ~r/TableRegistry|Lobby\.|TableServer\.state|Tournaments\.card/) == []
+  end
+
+  test "админский транспорт зовёт только контекст Admin" do
+    # Контроллеры и каналы панели вправе знать ровно один модуль ядра.
+    # `Tables`/`Wallet`/`Accounts`/`Tournaments` мимо `Admin` — утёкшая логика.
+    dirs = ["lib/api/controllers/admin", "lib/socket/channels/admin"]
+
+    assert offenders(dirs, ~r/BlockPoker\.(Wallet|Accounts|Tables|Tournaments)\b/) == []
+  end
+
+  test "роль администратора проверяет ядро, а не транспорт" do
+    # §4 задачи 8: `admin?` живёт внутри каждой публичной функции `Admin`.
+    # Плаг проверяет подпись токена и не решает, можно ли.
+    dirs = ["lib/api/controllers/admin", "lib/socket/channels/admin", "lib/api/plugs"]
+
+    assert offenders(dirs, ~r/role\s*==|:admin\s*->|admin\?/) == []
+  end
+
+  test "записи журнала действий не обновляются и не удаляются нигде в коде" do
+    # §8 задачи 8: `admin_audit` только на вставку. Запись, которую можно
+    # поправить, ничего не доказывает.
+    offenders =
+      offenders(
+        ["lib"],
+        ~r/(update|delete)(_all)?\(\s*AdminAudit|AdminAudit\s*\|>\s*Repo\.(update|delete)/
+      )
+
+    assert offenders == []
+  end
+
+  test "наблюдение живёт ровно в трёх файлах" do
+    # §13 задачи 8: удаление god-mode должно быть операцией на один коммит,
+    # а не археологией. Упоминания вне трёх файлов — начало археологии.
+    allowed = [
+      "lib/block_poker/admin/observer.ex",
+      "lib/block_poker/admin/admin.ex",
+      "lib/socket/channels/admin/room_channel.ex",
+      "lib/socket/views/admin/room_view.ex",
+      # Сокет обязан знать про топик, чтобы его маршрутизировать, а
+      # приложение — поднять процесс. Обе строки удаляются тем же коммитом.
+      "lib/socket/admin_socket.ex",
+      "lib/block_poker/application.ex"
+    ]
+
+    offenders =
+      ["lib"]
+      |> Enum.flat_map(&sources/1)
+      |> Enum.reject(fn {path, _source} -> Path.relative_to_cwd(path) in allowed end)
+      |> Enum.filter(fn {_path, source} ->
+        Regex.match?(~r/Admin\.Observer|admin:room|table_debug/, strip_docs(source))
+      end)
+      |> Enum.map(&elem(&1, 0))
+
+    assert offenders == []
+  end
+
+  test "наблюдение по умолчанию выключено" do
+    # §13 задачи 8: в проде флаг не включён ни разу до тех пор, пока это
+    # сознательно не сделано. Дефолт живёт в `config/config.exs`.
+    config = File.read!("config/config.exs")
+
+    assert config =~ ~r/config :block_poker, :admin_observer, enabled: false/
   end
 
   test "комната ходит в кошелёк только через контекст, а не сама" do

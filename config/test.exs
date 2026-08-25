@@ -39,6 +39,11 @@ config :block_poker, start_history_writer: false
 # в чужую транзакцию.
 config :block_poker, Oban, testing: :manual
 
+# Наблюдение панели в тестах включено: иначе тесты god-mode проверяли бы
+# только то, что он выключен. В проде флаг остаётся выключенным (§13
+# задачи 8), и это проверяется отдельным тестом на дефолт конфига.
+config :block_poker, :admin_observer, enabled: true
+
 # Print only warnings and errors during test
 config :logger, level: :warning
 

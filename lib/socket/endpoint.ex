@@ -9,6 +9,16 @@ defmodule Socket.Endpoint do
     ],
     longpoll: false
 
+  # Панель администратора: отдельный сокет по отдельному пути и с
+  # отдельной солью токена. Игровой `UserSocket` этим не затрагивается
+  # вообще (§6 задачи 8).
+  socket "/admin/socket", Socket.AdminSocket,
+    websocket: [
+      connect_info: [:peer_data, :x_headers],
+      error_handler: {Socket.AdminSocket, :handle_error, []}
+    ],
+    longpoll: false
+
   if code_reloading? do
     plug Phoenix.CodeReloader
     plug Phoenix.Ecto.CheckRepoStatus, otp_app: :block_poker

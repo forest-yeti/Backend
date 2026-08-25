@@ -66,6 +66,14 @@ defmodule BlockPoker.ErrorCode do
           | :ticket_required
           | :ticket_unavailable
           | :ticket_expired
+          | :admin_required
+          | :admin_session_expired
+          | :admin_reason_required
+          | :admin_amount_invalid
+          | :admin_insufficient_funds
+          | :admin_self_target
+          | :admin_room_not_found
+          | :admin_observer_disabled
           | :internal_error
 
   @codes %{
@@ -128,6 +136,17 @@ defmodule BlockPoker.ErrorCode do
     ticket_required: {422, "Подходящего билета нет"},
     ticket_unavailable: {409, "Билет уже использован"},
     ticket_expired: {422, "Срок действия билета истёк"},
+    # Панель администратора (задача 8). `admin_required` отвечает `403`, а
+    # не `404`: сюда доходит только тот, чей токен уже проверен, и прятать
+    # от него существование ручки бессмысленно.
+    admin_required: {403, "Нужны права администратора"},
+    admin_session_expired: {401, "Сессия администратора истекла"},
+    admin_reason_required: {422, "Нужно указать причину"},
+    admin_amount_invalid: {422, "Некорректная сумма"},
+    admin_insufficient_funds: {422, "На кошельке игрока недостаточно средств"},
+    admin_self_target: {422, "Себе начислять и списывать нельзя"},
+    admin_room_not_found: {404, "Комната не найдена"},
+    admin_observer_disabled: {403, "Наблюдение за столами выключено"},
     internal_error: {500, "Внутренняя ошибка"}
   }
 

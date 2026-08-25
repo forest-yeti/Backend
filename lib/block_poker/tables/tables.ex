@@ -303,6 +303,50 @@ defmodule BlockPoker.Tables do
   end
 
   @doc """
+  Посадки сразу многих игроков — одним обходом комнат.
+
+  Существует ради списка панели администратора: `my_seats/1` спрашивает
+  каждую живую комнату, и вызвать её на страницу в полсотни человек
+  значило бы опросить пул полсотни раз подряд. Комнаты те же, ответ тот
+  же — меняется только то, что обход один.
+  """
+  @spec seats_of([Ecto.UUID.t()]) :: %{Ecto.UUID.t() => [map()]}
+  def seats_of([]), do: %{}
+
+  def seats_of(user_ids) do
+    wanted = MapSet.new(user_ids)
+
+    # Реестр, а не пулы лобби: «где сидит игрок» — это все комнаты рума,
+    # включая турнирные, которых в витрине нет вовсе. Плюс ответ не
+    # зависит от живости лобби: упавший пул не должен уносить с собой
+    # список посадок.
+    TableRegistry.live_tables()
+    |> Enum.flat_map(fn {room_id, _pid} ->
+      case room_state(room_id) do
+        {:ok, state} -> seats_in(state, wanted)
+        {:error, _reason} -> []
+      end
+    end)
+    |> Enum.group_by(& &1.user_id)
+  end
+
+  defp seats_in(state, wanted) do
+    state
+    |> RoomState.seats()
+    |> Enum.filter(&(&1.user_id != nil and MapSet.member?(wanted, &1.user_id)))
+    |> Enum.map(fn seat ->
+      %{
+        user_id: seat.user_id,
+        room_id: state.room_id,
+        setting_id: state.setting.id,
+        seat: seat.number,
+        stack: seat.stack,
+        status: seat.status
+      }
+    end)
+  end
+
+  @doc """
   Выплата призов турнира: единственное место, где приз доходит до кошелька.
 
   Идёт после расчёта, вне процесса стола: транзакция в кошелёк не должна

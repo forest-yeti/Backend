@@ -40,7 +40,12 @@ defmodule BlockPoker.Wallet.WalletEntry do
     :tournament_prize,
     :tournament_bounty,
     :tournament_refund,
-    :overlay
+    :overlay,
+    # Решение живого админа. Существующий `:adjustment` не переиспользуется:
+    # он означает техническую коррекцию (сверка, исправление бага), а
+    # действие человека должно отличаться от неё одним `WHERE`.
+    :admin_credit,
+    :admin_transfer
   ]
 
   @primary_key {:id, :binary_id, autogenerate: true}

@@ -5,6 +5,7 @@ defmodule BlockPoker.Application do
 
   use Application
 
+  alias BlockPoker.Admin.Observer, as: AdminObserver
   alias BlockPoker.History.Writer, as: HistoryWriter
   alias BlockPoker.Tables.{Lobby, SitAndGoLobby, TableRegistry, TableSupervisor}
   alias BlockPoker.Tournaments.{TournamentScheduler, TournamentSupervisor}
@@ -27,6 +28,12 @@ defmodule BlockPoker.Application do
       # между анонсом и стартом, — таймер процесса этого не переживёт,
       # а строка в `oban_jobs` переживёт.
       {Oban, Application.fetch_env!(:block_poker, Oban)},
+      # Наблюдение панели: единственный потребитель telemetry-события
+      # `[:block_poker, :table, :intent]` и владелец кольцевого буфера
+      # ленты. Процесс поднимается всегда, а вот подписку на события
+      # заводит только при включённом флаге — выключённый режим не должен
+      # стоить ни одного лишнего сообщения (§13 задачи 8).
+      AdminObserver,
       # Между столом и Oban обязан стоять отдельный процесс: постановка
       # Oban-задачи — это `Repo.insert`, то есть взятие коннекта из пула
       # синхронно, в вызывающем процессе. Стол делает `cast` и

@@ -45,8 +45,48 @@ defmodule Socket.Channels.TableChannel do
     end
   end
 
+  @doc """
+  Единая точка входа всех сообщений стола.
+
+  Существует ради одного `:telemetry.execute/3` на запрос: событие
+  `[:block_poker, :table, :intent]` нужно и метрикам (сколько действий,
+  сколько отказов, за какое время), и отладочному наблюдению панели.
+  Канал при этом ничего не решает и никуда не заглядывает — он замеряет
+  собственный вызов, а разбирается с событием тот, кто на него подписан.
+
+  Карт в событии нет и быть не может: наружу уходит то, что игрок и так
+  прислал сам.
+  """
   @impl true
-  def handle_in("join_seat", payload, socket) do
+  def handle_in(event, payload, socket) do
+    started_at = System.monotonic_time()
+    reply = dispatch(event, payload, socket)
+
+    :telemetry.execute(
+      [:block_poker, :table, :intent],
+      %{duration: System.monotonic_time() - started_at},
+      %{
+        room_id: Map.get(socket.assigns, :room_id),
+        user_id: socket.assigns.user_id,
+        topic: socket.topic,
+        event: event,
+        payload: payload,
+        outcome: outcome(reply),
+        code: code(reply)
+      }
+    )
+
+    reply
+  end
+
+  defp outcome({:reply, :ok, _socket}), do: :ok
+  defp outcome({:reply, {:ok, _result}, _socket}), do: :ok
+  defp outcome({:reply, {:error, _reason}, _socket}), do: :error
+
+  defp code({:reply, {:error, %{code: code}}, _socket}), do: code
+  defp code(_reply), do: nil
+
+  defp dispatch("join_seat", payload, socket) do
     with {:ok, seat} <- Message.fetch_seat(payload, "seat"),
          {:ok, buy_in} <- Message.fetch_amount(payload, "buy_in") do
       socket.assigns.room_id
@@ -57,7 +97,7 @@ defmodule Socket.Channels.TableChannel do
     end
   end
 
-  def handle_in("action", payload, socket) do
+  defp dispatch("action", payload, socket) do
     case Message.fetch_action(payload) do
       {:ok, action} ->
         socket.assigns.room_id
@@ -72,7 +112,7 @@ defmodule Socket.Channels.TableChannel do
   # Раскладка карт: один ход целиком. Канал разбирает форму сообщения и
   # зовёт ту же функцию контекста, что и обычное действие, — «действие» для
   # стола это то, что прислал игрок, а не то, что бывает в холдеме.
-  def handle_in("place_cards", payload, socket) do
+  defp dispatch("place_cards", payload, socket) do
     case Message.fetch_placement(payload) do
       {:ok, action} ->
         socket.assigns.room_id
@@ -84,13 +124,13 @@ defmodule Socket.Channels.TableChannel do
     end
   end
 
-  def handle_in("preselect", payload, socket) do
+  defp dispatch("preselect", payload, socket) do
     socket.assigns.room_id
     |> Tables.preselect(socket.assigns.user_id, Map.get(payload, "action"))
     |> Message.reply(socket)
   end
 
-  def handle_in("straddle", payload, socket) do
+  defp dispatch("straddle", payload, socket) do
     case Message.fetch_straddle(payload) do
       {:ok, amount} ->
         socket.assigns.room_id
@@ -102,36 +142,36 @@ defmodule Socket.Channels.TableChannel do
     end
   end
 
-  def handle_in("post_blind", payload, socket) do
+  defp dispatch("post_blind", payload, socket) do
     socket.assigns.room_id
     |> Tables.request_post(socket.assigns.user_id, Map.get(payload, "post", true) == true)
     |> Message.reply(socket)
   end
 
   # Замер задержки: канал отвечает сам, не тревожа ни комнату, ни контекст.
-  def handle_in("ping", payload, socket) do
+  defp dispatch("ping", payload, socket) do
     {:reply, {:ok, Message.pong(payload)}, socket}
   end
 
-  def handle_in("reaction", payload, socket) do
+  defp dispatch("reaction", payload, socket) do
     socket.assigns.room_id
     |> Tables.react(socket.assigns.user_id, Map.get(payload, "id"))
     |> Message.reply(socket)
   end
 
-  def handle_in("chat", payload, socket) do
+  defp dispatch("chat", payload, socket) do
     socket.assigns.room_id
     |> Tables.chat(socket.assigns.user_id, Map.get(payload, "text"))
     |> Message.reply(socket)
   end
 
-  def handle_in("show_cards", payload, socket) do
+  defp dispatch("show_cards", payload, socket) do
     socket.assigns.room_id
     |> Tables.show_cards(socket.assigns.user_id, Message.card_indexes(payload))
     |> Message.reply(socket)
   end
 
-  def handle_in("run_it_twice", payload, socket) do
+  defp dispatch("run_it_twice", payload, socket) do
     socket.assigns.room_id
     |> Tables.answer_run_it_twice(socket.assigns.user_id, payload["accept"] == true)
     |> Message.reply(socket)
@@ -139,26 +179,26 @@ defmodule Socket.Channels.TableChannel do
 
   # Окно-калькулятор: разбор своей руки по запросу. Канал ничего не считает —
   # берёт готовый разбор у контекста и сериализует.
-  def handle_in("hand_insight", _payload, socket) do
+  defp dispatch("hand_insight", _payload, socket) do
     case Tables.hand_insight(socket.assigns.room_id, socket.assigns.user_id) do
       {:ok, insight} -> {:reply, {:ok, %{insight: TableView.insight(insight)}}, socket}
       {:error, code} -> Message.error_reply(code, socket)
     end
   end
 
-  def handle_in("rabbit_hunt", _payload, socket) do
+  defp dispatch("rabbit_hunt", _payload, socket) do
     socket.assigns.room_id
     |> Tables.rabbit_hunt(socket.assigns.user_id)
     |> Message.reply(socket)
   end
 
-  def handle_in("leave_seat", _payload, socket) do
+  defp dispatch("leave_seat", _payload, socket) do
     socket.assigns.room_id
     |> Tables.leave_seat(socket.assigns.user_id)
     |> Message.reply(socket)
   end
 
-  def handle_in("add_chips", payload, socket) do
+  defp dispatch("add_chips", payload, socket) do
     case Message.fetch_amount(payload, "amount") do
       {:ok, amount} ->
         socket.assigns.room_id
@@ -170,31 +210,31 @@ defmodule Socket.Channels.TableChannel do
     end
   end
 
-  def handle_in("cancel_add_chips", _payload, socket) do
+  defp dispatch("cancel_add_chips", _payload, socket) do
     socket.assigns.room_id
     |> Tables.cancel_add_chips(socket.assigns.user_id)
     |> Message.reply(socket)
   end
 
-  def handle_in("start_game", _payload, socket) do
+  defp dispatch("start_game", _payload, socket) do
     socket.assigns.room_id
     |> Tables.start_game(socket.assigns.user_id)
     |> Message.reply(socket)
   end
 
-  def handle_in("sit_out", _payload, socket) do
+  defp dispatch("sit_out", _payload, socket) do
     socket.assigns.room_id
     |> Tables.sit_out(socket.assigns.user_id)
     |> Message.reply(socket)
   end
 
-  def handle_in("sit_in", _payload, socket) do
+  defp dispatch("sit_in", _payload, socket) do
     socket.assigns.room_id
     |> Tables.sit_in(socket.assigns.user_id)
     |> Message.reply(socket)
   end
 
-  def handle_in("table_state", _payload, socket) do
+  defp dispatch("table_state", _payload, socket) do
     case Tables.room_state(socket.assigns.room_id) do
       {:ok, room} -> {:reply, {:ok, TableView.render(room, socket.assigns.user_id)}, socket}
       {:error, code} -> Message.error_reply(code, socket)
