@@ -1460,13 +1460,19 @@ defmodule BlockPoker.Tournaments do
     end
   end
 
+  # Приросты складываются по входу до того, как станут шагами `Multi`.
+  # Двойной нокаут одной раздачей даёт **два** прироста одному убийце,
+  # а имя шага в `Multi` уникально: без свёртки такая раздача роняла бы
+  # процесс турнира на ровном месте.
   defp raise_bounties(multi, increments) do
-    Enum.reduce(increments, multi, fn increment, acc ->
+    increments
+    |> Enum.group_by(& &1.entry_id, & &1.amount)
+    |> Enum.reduce(multi, fn {entry_id, amounts}, acc ->
       Multi.update_all(
         acc,
-        {:raise, increment.entry_id},
-        from(e in Entry, where: e.id == ^increment.entry_id),
-        inc: [bounty: increment.amount]
+        {:raise, entry_id},
+        from(e in Entry, where: e.id == ^entry_id),
+        inc: [bounty: Enum.sum(amounts)]
       )
     end)
   end

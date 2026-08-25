@@ -182,6 +182,31 @@ defmodule BlockPoker.Tournaments.TournamentServerTest do
       end
     end
 
+    test "часы уровня стоят на перерыве", ctx do
+      # Часы под контролем теста: уровень длится десять минут, и весь
+      # смысл проверки — что эти десять минут считаются игровым
+      # временем, а не стенным.
+      clock = start_supervised!({Agent, fn -> 0 end}, id: :level_clock)
+      now = fn -> Agent.get(clock, & &1) end
+      advance = fn ms -> Agent.update(clock, &(&1 + ms)) end
+
+      %{pid: pid} = start_tournament(ctx.setting, 3, monotonic: now)
+      :ok = TournamentServer.start_tournament(pid)
+
+      # Минута игры...
+      advance.(60_000)
+      :ok = TournamentServer.fire(pid, :break)
+
+      # ...и пять минут перерыва, которые уровню не засчитываются.
+      advance.(300_000)
+      :ok = TournamentServer.fire(pid, :break_over)
+
+      state = :sys.get_state(pid)
+
+      assert state.level == 1
+      assert state.level_elapsed_ms == 60_000
+    end
+
     test "уровень турнира виден в снапшоте номиналами", ctx do
       %{pid: pid} = start_tournament(ctx.setting, 3)
       :ok = TournamentServer.start_tournament(pid)

@@ -1123,6 +1123,43 @@ defmodule BlockPoker.TournamentsTest do
       assert Tournaments.bounty_earned(ctx.killer.id, :play_money, ctx.tournament.id) == 400
     end
 
+    test "двойной нокаут в одной раздаче не роняет выплату", ctx do
+      third = user_fixture()
+      {:ok, third_entry} = Tournaments.register(ctx.tournament.id, third.id)
+
+      # Один убийца, две головы одной раздачей: два прироста на один и
+      # тот же вход. Имя шага в `Multi` уникально, поэтому приросты
+      # обязаны сложиться, а не встать двумя одноимёнными шагами.
+      :ok =
+        Tournaments.pay_bounty(ctx.tournament, %{
+          payouts: [
+            %{
+              entry_id: ctx.killer_entry.id,
+              victim_entry_id: ctx.victim_entry.id,
+              seat: 1,
+              amount: 200
+            },
+            %{
+              entry_id: ctx.killer_entry.id,
+              victim_entry_id: third_entry.id,
+              seat: 1,
+              amount: 200
+            }
+          ],
+          increments: [
+            %{entry_id: ctx.killer_entry.id, amount: 200},
+            %{entry_id: ctx.killer_entry.id, amount: 200}
+          ],
+          refunds: []
+        })
+
+      assert Tournaments.bounty_earned(ctx.killer.id, :play_money, ctx.tournament.id) == 400
+
+      # Голова убийцы выросла на оба прироста, а не на один из них.
+      killer_entry = Repo.get!(Entry, ctx.killer_entry.id)
+      assert killer_entry.bounty == 400 + 400
+    end
+
     test "заработанное баунти не путает турниры одного игрока", ctx do
       other_setting = setting_fixture(%{bounty_part: 400})
       other_tournament = tournament_fixture(other_setting)

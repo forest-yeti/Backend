@@ -192,6 +192,77 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
     end
   end
 
+  # Доигрывает **ровно текущую** раздачу. Обычный `play_hand/1` играет,
+  # пока за столом идёт раздача, — а на снятии паузы стол начинает
+  # следующую сразу, и тест сыграл бы лишний круг там, где проверяет
+  # именно один.
+  defp play_current_hand(table) do
+    before = TableServer.state(table).hands_played
+
+    Enum.reduce_while(1..40, :playing, fn _step, _acc ->
+      room = TableServer.state(table)
+
+      cond do
+        room.hands_played > before -> {:halt, :finished}
+        room.hand == nil -> {:halt, :finished}
+        true -> act_or_run_out(table, room, room.hand) && {:cont, :playing}
+      end
+    end)
+  end
+
+  # Барьер: конец раздачи доезжает до турнира сообщением, и решения
+  # (пауза стола, снятие паузы, пересадка) турнир принимает уже после
+  # того, как тест увидел раздачу законченной. Синхронный вызов
+  # гарантирует, что это уже случилось.
+  defp sync_tournament(pid) do
+    _state = TournamentServer.state(pid)
+    :ok
+  end
+
+  # Играет раздачи на одном столе, пока условие не выполнится.
+  defp play_hands_until(pid, table, done?, limit \\ 30) do
+    Enum.reduce_while(1..limit, :playing, fn _index, _acc ->
+      state = TournamentServer.state(pid)
+
+      if state.status == :finished or done?.(state) do
+        {:halt, :done}
+      else
+        deal_hand(table)
+        play_hand(table)
+        {:cont, :playing}
+      end
+    end)
+  end
+
+  # Играет по кругу, пока условие не выполнится. Состав столов меняется
+  # балансировкой, поэтому список читается заново на каждом круге.
+  defp play_tables_until(pid, done?, limit \\ 80) do
+    Enum.reduce_while(1..limit, :playing, fn _index, _acc ->
+      state = TournamentServer.state(pid)
+
+      if state.status == :finished or done?.(state) do
+        {:halt, :done}
+      else
+        for {_id, table} <- :sys.get_state(pid).tables do
+          deal_hand(table)
+          play_hand(table)
+        end
+
+        {:cont, :playing}
+      end
+    end)
+  end
+
+  # Всё, что накопилось в почтовом ящике от турнира. Нужен там, где
+  # проверяется отсутствие повторов, а не факт события.
+  defp receive_all(acc \\ []) do
+    receive do
+      {:tournament_event, event, payload} -> receive_all([{event, payload} | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
   defp chips_at(table) do
     room = TableServer.state(table)
 
@@ -835,6 +906,29 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       )
     end
 
+    # Доводит турнир до вылета, случившегося **на перерыве**: раздача
+    # начата до XX:55 и доиграна уже на нём.
+    defp bust_on_break(pid, limit \\ 10) do
+      Enum.reduce_while(1..limit, :playing, fn _index, _acc ->
+        tables = Map.values(:sys.get_state(pid).tables)
+
+        for table <- tables, do: deal_hand(table)
+
+        :ok = TournamentServer.fire(pid, :break)
+
+        for table <- tables, do: play_hand(table)
+
+        sync_tournament(pid)
+
+        if TournamentServer.state(pid).players_left < 3 do
+          {:halt, :busted}
+        else
+          :ok = TournamentServer.fire(pid, :break_over)
+          {:cont, :playing}
+        end
+      end)
+    end
+
     test "доигранная на перерыве раздача не тянет за собой следующую", _ctx do
       setting = fast_setting()
       tournament = tournament_fixture(setting)
@@ -872,15 +966,14 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       for _index <- 1..3,
           do: {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
 
-      # Карты фиксированы: вылет на перерыве — условие сценария, а не удача.
       pid = start_server(tournament.id, room_opts: [timers: :manual, rng: Rng.seeded(<<1>>)])
       :ok = TournamentServer.start_tournament(pid)
 
-      tables = Map.values(:sys.get_state(pid).tables)
-      for t <- tables, do: deal_hand(t)
-
-      :ok = TournamentServer.fire(pid, :break)
-      for t <- tables, do: play_hand(t)
+      # Раздача идёт, посреди неё объявляется перерыв, и она доигрывается
+      # уже на нём. Раздача на всё чаще всего кончается вылетом, но может
+      # и разделить банк, — поэтому перерывов столько, сколько нужно до
+      # первого вылета на перерыве.
+      bust_on_break(pid)
 
       # Двое на два стола: раздать не может ни один. Пересадку на
       # перерыве турнир не делает — но обязан сделать по его концу,
@@ -891,6 +984,276 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       :ok = TournamentServer.fire(pid, :break_over)
 
       assert play_tables_until_finished(pid) == :finished
+    end
+  end
+
+  describe "финальный стол" do
+    test "схлопывание до одного стола объявляет финалку и красит стол", _ctx do
+      # Четверо на двухместных столах — это два стола.
+      setting = fast_setting(%{table_size: 2, min_players: 2})
+      tournament = tournament_fixture(setting)
+
+      for _index <- 1..4,
+          do: {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(tournament.id))
+
+      assert map_size(:sys.get_state(pid).tables) == 2
+      refute TournamentServer.state(pid).final_table
+
+      # Играем, пока живых не станет двое: столов остаётся один, и он
+      # финальный.
+      play_tables_until(pid, fn state -> state.players_left <= 2 end)
+
+      assert_received {:tournament_event, "final_table", %{table_id: table_id}}
+
+      state = :sys.get_state(pid)
+      assert state.final_table == table_id
+      assert state.status == :finishing
+
+      # Стол знает, что он финальный, и берёт вторую пару цветов:
+      # это решение турнира, а не настройка комнаты.
+      {:ok, table} = Map.fetch(state.tables, table_id)
+      assert TableServer.state(table).setting.final?
+    end
+
+    test "финалка объявляется один раз, а не на каждой раздаче", _ctx do
+      setting = fast_setting(%{table_size: 2, min_players: 2})
+      tournament = tournament_fixture(setting)
+
+      for _index <- 1..4,
+          do: {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(tournament.id))
+
+      # Доходим до финалки и играем дальше: объявление — событие, а не
+      # состояние, и повторяться на каждой раздаче оно не должно.
+      play_tables_until(pid, &(&1.final_table != nil))
+      assert TournamentServer.state(pid).final_table
+
+      play_tables_until(pid, fn state -> state.players_left < 2 end, 10)
+
+      announcements =
+        receive_all()
+        |> Enum.count(fn {event, _payload} -> event == "final_table" end)
+
+      assert announcements == 1
+    end
+  end
+
+  describe "PKO" do
+    # Прогрессивный баунти: половина головы деньгами, половина — на
+    # собственную голову убийцы. Проверяется на живом турнире, а не на
+    # чистой функции: тому есть свои тесты (`Engine.Bounty`), а здесь
+    # важно, что выросшая голова доживает до следующего вылета.
+    test "голова убийцы растёт и достаётся тому, кто выбьет уже его", _ctx do
+      setting = fast_setting(%{table_size: 6, min_players: 2, bounty_part: 400})
+      tournament = tournament_fixture(setting)
+
+      users = for _index <- 1..3, do: user_fixture()
+      for user <- users, do: {:ok, _entry} = Tournaments.register(tournament.id, user.id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      [{_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      # Стартовая голова у всех одинаковая — цена головы шаблона.
+      assert Enum.all?(TournamentServer.players(pid), &(&1.bounty == 400))
+
+      play_hands_until(pid, table, &(&1.players_left < 3))
+
+      # Кто-то выбил: голова убийцы выросла на половину чужой. Сколько
+      # именно вылетов случилось в этой раздаче, тесту неважно — важно,
+      # что каждая снятая голова легла половиной на голову убийцы, а
+      # головы вылетевших с ними и ушли.
+      players = TournamentServer.players(pid)
+      busted = 3 - TournamentServer.state(pid).players_left
+
+      assert busted > 0
+
+      # Головы всех трёх входов: у каждого своя (400) плюс половина
+      # чужой у каждого убийцы.
+      assert Enum.sum(Enum.map(players, & &1.bounty)) == 400 * 3 + 200 * busted
+
+      :finished = play_until_finished(pid, table)
+
+      # Деньги не появились и не исчезли: собрано три взноса, выплачено
+      # ровно столько же — призами и головами.
+      assert Enum.sum(Enum.map(users, &balance/1)) == 3 * (10_000 - 100)
+    end
+
+    test "фиксированный баунти голову убийцы не растит", _ctx do
+      setting =
+        fast_setting(%{
+          table_size: 6,
+          min_players: 2,
+          bounty_part: 400,
+          bounty_progressive: false
+        })
+
+      tournament = tournament_fixture(setting)
+
+      users = for _index <- 1..3, do: user_fixture()
+      for user <- users, do: {:ok, _entry} = Tournaments.register(tournament.id, user.id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      [{_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      play_hands_until(pid, table, &(&1.players_left < 3))
+
+      # Вся голова ушла деньгами: голова убийцы осталась прежней.
+      assert Enum.all?(TournamentServer.players(pid), &(&1.bounty == 400))
+    end
+  end
+
+  describe "hand-for-hand на баббле" do
+    # Баббл с двумя раздающими столами — единственная конфигурация, где
+    # синхронный круг вообще нужен. Сетка платит троим уже при четырёх
+    # входах, поэтому баббл здесь наступает сразу: четверо живых, три
+    # оплачиваемых места, два стола по двое.
+    defp bubble_payouts do
+      [
+        %{entries_from: 2, entries_to: 3, place_from: 1, place_to: 1, share_ppm: 1_000_000},
+        %{entries_from: 4, entries_to: nil, place_from: 1, place_to: 1, share_ppm: 500_000},
+        %{entries_from: 4, entries_to: nil, place_from: 2, place_to: 2, share_ppm: 300_000},
+        %{entries_from: 4, entries_to: nil, place_from: 3, place_to: 3, share_ppm: 200_000}
+      ]
+    end
+
+    defp bubble_levels(big_blind) do
+      [
+        %{
+          level: 1,
+          small_blind: div(big_blind, 2),
+          big_blind: big_blind,
+          ante: 0,
+          duration_seconds: 600,
+          rebuy_allowed: false,
+          addon_allowed: false
+        },
+        %{
+          level: 2,
+          small_blind: big_blind,
+          big_blind: big_blind * 2,
+          ante: 0,
+          duration_seconds: 600,
+          rebuy_allowed: false,
+          addon_allowed: false
+        }
+      ]
+    end
+
+    defp start_bubble(big_blind) do
+      setting =
+        setting_fixture(
+          %{
+            table_size: 2,
+            min_players: 2,
+            buy_in: 1000,
+            entry_fee: 100,
+            starting_stack: 5000
+          },
+          bubble_levels(big_blind),
+          bubble_payouts()
+        )
+
+      tournament = tournament_fixture(setting)
+
+      for _index <- 1..4,
+          do: {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(tournament.id))
+
+      # Баббл — с первой раздачи: четверо живых при трёх оплачиваемых
+      # местах, и раздают оба стола.
+      assert TournamentServer.state(pid).players_left == 4
+      assert TournamentServer.state(pid).next_payout_place == 3
+
+      %{tournament: tournament, pid: pid}
+    end
+
+    test "доигравший стол ждёт остальных, а не сдаёт следующую", _ctx do
+      # Блайнды маленькие: за одну раздачу чек-коллом никто не вылетает,
+      # и баббл посреди проверки не лопается.
+      %{pid: pid} = start_bubble(50)
+
+      [first, second] = Map.values(:sys.get_state(pid).tables)
+
+      deal_hand(first)
+      play_current_hand(first)
+      sync_tournament(pid)
+
+      assert TournamentServer.state(pid).hand_for_hand
+      assert_received {:tournament_event, "hand_for_hand", %{active: true}}
+
+      # Первый доиграл круг и стоит: второй ещё раздаёт, и узнать от
+      # него, кто вылетел, первый не должен.
+      assert TableServer.state(first).paused?
+      refute TableServer.state(second).paused?
+
+      deal_hand(second)
+      play_current_hand(second)
+      sync_tournament(pid)
+
+      # Круг закончили все — оба отпущены одновременно.
+      refute TableServer.state(first).paused?
+      refute TableServer.state(second).paused?
+    end
+
+    test "на баббле не пересаживают", _ctx do
+      %{pid: pid} = start_bubble(50)
+
+      before = Map.keys(:sys.get_state(pid).tables)
+
+      [first, second] = Map.values(:sys.get_state(pid).tables)
+
+      for table <- [first, second] do
+        deal_hand(table)
+        play_current_hand(table)
+        sync_tournament(pid)
+      end
+
+      # Пересадка меняет позицию относительно блайндов — ровно то, от
+      # чего hand-for-hand и защищает. Столы остаются те же.
+      assert Map.keys(:sys.get_state(pid).tables) == before
+    end
+
+    test "лопнувший баббл распускает синхронный круг", _ctx do
+      # Блайнды кусаются, но одну раздачу стек переживает: круг успевает
+      # начаться до первого вылета.
+      %{pid: pid} = start_bubble(2000)
+
+      [first | _rest] = Map.values(:sys.get_state(pid).tables)
+
+      deal_hand(first)
+      play_current_hand(first)
+      sync_tournament(pid)
+
+      assert TournamentServer.state(pid).hand_for_hand
+
+      play_tables_until(pid, &(&1.players_left <= 3))
+      sync_tournament(pid)
+
+      # Кто-то вылетел — оставшиеся уже в деньгах, синхронизировать
+      # больше нечего.
+      refute TournamentServer.state(pid).hand_for_hand
+      assert_received {:tournament_event, "hand_for_hand", %{active: false}}
+
+      for {_id, table} <- :sys.get_state(pid).tables do
+        refute TableServer.state(table).paused?
+      end
     end
   end
 end
