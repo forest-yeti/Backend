@@ -813,6 +813,7 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       assert snapshot.break_ends_in_ms == nil
 
       play_hand(table)
+      sync_tournament(pid)
 
       assert_received {:tournament_event, "break_clock", %{ends_in_ms: 300_000}}
       assert_received {:tournament_event, "addon_offer", %{deadline_ms: 300_000}}
