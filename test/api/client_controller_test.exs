@@ -25,7 +25,7 @@ defmodule Api.ClientControllerTest do
     assert %{
              "current" => "1.4.2",
              "minimum" => "1.4.0",
-             "feed_url" => "https://cdn.example/client-updates"
+             "feed_url" => "https://cdn.example/client-updates/"
            } = json_response(conn, 200)
   end
 end

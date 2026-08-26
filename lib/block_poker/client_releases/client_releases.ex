@@ -49,9 +49,23 @@ defmodule BlockPoker.ClientReleases do
   Адрес фида обновлений. Отдаётся клиенту, а не зашивается в сборку:
   иначе переезд раздачи на другой хост потребовал бы релиза того самого
   клиента, который этим релизом и обновляют.
+
+  Адрес всегда заканчивается слешем, и это не косметика.
+  `electron-updater` собирает ссылки на `latest.yml` и на инсталлятор
+  как `new URL(file, feed_url)`, а такое разрешение отбрасывает
+  последний сегмент пути, если он не завершён слешем: из
+  `https://host/client-updates` получается `https://host/latest.yml`,
+  то есть 404 и обновление, которое ничего не качает. Нормализуем здесь,
+  а не в клиенте, потому что чинить это надо и в уже выпущенных сборках —
+  адрес они спрашивают у нас.
   """
   @spec feed_url() :: String.t() | nil
-  def feed_url, do: Application.get_env(:block_poker, :client_release, [])[:feed_url]
+  def feed_url do
+    case Application.get_env(:block_poker, :client_release, [])[:feed_url] do
+      url when is_binary(url) and url != "" -> String.trim_trailing(url, "/") <> "/"
+      _absent -> nil
+    end
+  end
 
   @doc """
   Пускаем ли эту сборку в игру.

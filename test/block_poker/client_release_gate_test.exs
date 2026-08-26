@@ -88,7 +88,21 @@ defmodule BlockPoker.ClientReleaseGateTest do
     assert ClientReleases.info() == %{
              current: "1.4.2",
              minimum: "1.4.0",
-             feed_url: "https://cdn/updates"
+             feed_url: "https://cdn/updates/"
            }
+  end
+
+  # `electron-updater` разрешает имя файла относительно адреса фида через
+  # `new URL/2`: без завершающего слеша последний сегмент отбрасывается, и
+  # клиент уходит за `latest.yml` в корень хоста.
+  test "адрес фида нормализуется до завершающего слеша" do
+    configure(feed_url: "https://cdn/updates")
+    assert ClientReleases.feed_url() == "https://cdn/updates/"
+
+    configure(feed_url: "https://cdn/updates///")
+    assert ClientReleases.feed_url() == "https://cdn/updates/"
+
+    configure(feed_url: nil)
+    assert ClientReleases.feed_url() == nil
   end
 end
