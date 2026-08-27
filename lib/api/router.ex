@@ -126,5 +126,9 @@ defmodule Api.Router do
     get "/banners", BannerController, :index
     post "/banners", BannerController, :create
     delete "/banners/:place", BannerController, :delete
+
+    # Объявление всем игрокам. Ручка только создаёт: объявление —
+    # событие, а не запись, читать и отзывать нечего.
+    post "/announcements", AnnouncementController, :create
   end
 end

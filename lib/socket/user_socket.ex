@@ -29,6 +29,10 @@ defmodule Socket.UserSocket do
   channel "table:*", Socket.Channels.TableChannel
   channel "wallet:*", Socket.Channels.WalletChannel
 
+  # Единственный топик, адресованный всем сразу. Остальные — подписки на
+  # конкретный предмет, и игрок за столом не подписан ни на одно лобби.
+  channel "announcements", Socket.Channels.AnnouncementChannel
+
   @impl true
   def connect(params, socket, _connect_info) do
     # Порядок проверок неслучаен: версия сборки отсекается **до** токена.

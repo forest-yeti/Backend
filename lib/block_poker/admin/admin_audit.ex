@@ -35,10 +35,19 @@ defmodule BlockPoker.Admin.AdminAudit do
     :client_release_publish,
     :client_release_delete,
     :banner_update,
-    :banner_delete
+    :banner_delete,
+    :announcement
   ]
 
-  @subject_types [:user, :room, :tournament, :wallet, :client_release, :banner]
+  @subject_types [
+    :user,
+    :room,
+    :tournament,
+    :wallet,
+    :client_release,
+    :banner,
+    :announcement
+  ]
   @currencies [:main, :play_money]
 
   # Действия, у которых причина обязательна: без неё запись бесполезна

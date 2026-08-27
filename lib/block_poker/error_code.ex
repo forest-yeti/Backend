@@ -31,6 +31,8 @@ defmodule BlockPoker.ErrorCode do
           | :banners_dir_not_configured
           | :unsupported_image_type
           | :image_too_large
+          | :announcement_text_required
+          | :announcement_too_long
           | :insufficient_funds
           | :seat_taken
           | :already_seated
@@ -122,6 +124,9 @@ defmodule BlockPoker.ErrorCode do
     banners_dir_not_configured: {503, "Каталог картинок баннеров не настроен"},
     unsupported_image_type: {422, "Поддерживаются PNG, JPEG, WebP и GIF"},
     image_too_large: {422, "Картинка больше 5 МБ"},
+    # Объявление всем игрокам.
+    announcement_text_required: {422, "Текст объявления обязателен"},
+    announcement_too_long: {422, "Текст объявления слишком длинный"},
     insufficient_funds: {422, "Недостаточно средств"},
     seat_taken: {409, "Место уже занято"},
     already_seated: {409, "Вы уже сидите за этим столом"},

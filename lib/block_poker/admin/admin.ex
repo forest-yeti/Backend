@@ -19,6 +19,7 @@ defmodule BlockPoker.Admin do
 
   alias BlockPoker.Accounts.User
   alias BlockPoker.Admin.{AdminSession, Audit, Auth, Context, Games, Money, Observer, People}
+  alias BlockPoker.Announcements
   alias BlockPoker.Banners
   alias BlockPoker.ClientReleases
 
@@ -143,6 +144,17 @@ defmodule BlockPoker.Admin do
   @spec delete_banner(ctx(), String.t()) :: :ok | {:error, atom()}
   def delete_banner(%Context{} = ctx, place) do
     with :ok <- allowed(ctx), do: Banners.delete(ctx, place)
+  end
+
+  # --- объявления -------------------------------------------------------------
+
+  @doc """
+  Объявление всем подключённым игрокам. Отправленное объявление не
+  отзывается: оно уже ушло (см. `BlockPoker.Announcements`).
+  """
+  @spec announce(ctx(), map()) :: {:ok, map()} | {:error, atom()}
+  def announce(%Context{} = ctx, attrs) do
+    with :ok <- allowed(ctx), do: Announcements.announce(ctx, attrs)
   end
 
   # --- игры -----------------------------------------------------------------
