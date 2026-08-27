@@ -49,6 +49,10 @@ defmodule Api.Router do
     pipe_through :api
 
     get "/client/version", ClientController, :show
+
+    # Баннеры — публично и без токена: `OnRunApplication` показывается на
+    # запуске приложения, когда логина ещё не было.
+    get "/banners/:place", BannerController, :show
   end
 
   scope "/api", Api do
@@ -114,5 +118,13 @@ defmodule Api.Router do
     post "/client-releases", ClientReleaseController, :create
     post "/client-releases/:id/publish", ClientReleaseController, :publish
     delete "/client-releases/:id", ClientReleaseController, :delete
+
+    # Баннеры. Место — ключ, поэтому создание и правка это одна ручка:
+    # `POST` кладёт баннер на место независимо от того, стоял там что-то
+    # раньше. Тело — multipart с картинкой, его разбирает
+    # `Api.Plugs.BannerUpload` со своим небольшим пределом размера.
+    get "/banners", BannerController, :index
+    post "/banners", BannerController, :create
+    delete "/banners/:place", BannerController, :delete
   end
 end

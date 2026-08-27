@@ -28,6 +28,10 @@ defmodule Socket.Endpoint do
   # и разбирать её тело как JSON незачем (§3 задачи 34).
   plug Api.Plugs.ClientUpdates
 
+  # Картинки баннеров — тоже статика и тоже до парсеров, по тем же
+  # причинам: разбирать их тело как JSON незачем.
+  plug Api.Plugs.BannerImages
+
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
@@ -41,6 +45,10 @@ defmodule Socket.Endpoint do
   # Загрузка сборки клиента: своё тело, свой предел размера. Стоит до
   # общего парсера и срабатывает ровно на одной ручке (§3 задачи 34).
   plug Api.Plugs.ClientReleaseUpload
+
+  # Загрузка картинки баннера: свой multipart и свой — маленький —
+  # предел размера. Общий парсер multipart не понимает вовсе.
+  plug Api.Plugs.BannerUpload
 
   plug Plug.Parsers,
     parsers: [:urlencoded, :json],

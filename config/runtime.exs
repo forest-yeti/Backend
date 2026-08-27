@@ -89,6 +89,15 @@ if config_env() == :prod do
     feed_url: System.get_env("CLIENT_FEED_URL"),
     dir: System.get_env("CLIENT_UPDATES_DIR")
 
+  # Баннеры. `BANNERS_DIR` — каталог, куда панель кладёт картинки; он же
+  # раздаётся по `/banners`. `BANNERS_BASE_URL` — публичный адрес этой
+  # раздачи; он уходит клиенту в поле `image`. Пустой означает «клиент
+  # разрешит путь `/banners/...` относительно адреса API», чего хватает,
+  # пока картинки отдаёт та же нода.
+  config :block_poker, :banners,
+    dir: System.get_env("BANNERS_DIR"),
+    base_url: System.get_env("BANNERS_BASE_URL")
+
   config :block_poker, Socket.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [

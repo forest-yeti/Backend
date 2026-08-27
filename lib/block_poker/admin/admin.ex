@@ -19,6 +19,7 @@ defmodule BlockPoker.Admin do
 
   alias BlockPoker.Accounts.User
   alias BlockPoker.Admin.{AdminSession, Audit, Auth, Context, Games, Money, Observer, People}
+  alias BlockPoker.Banners
   alias BlockPoker.ClientReleases
 
   @type ctx :: Context.t()
@@ -120,6 +121,28 @@ defmodule BlockPoker.Admin do
   @spec delete_client_release(ctx(), Ecto.UUID.t()) :: :ok | {:error, atom()}
   def delete_client_release(%Context{} = ctx, id) do
     with :ok <- allowed(ctx), do: ClientReleases.delete(ctx, id)
+  end
+
+  # --- баннеры ---------------------------------------------------------------
+
+  @spec banners(ctx()) :: {:ok, map()} | {:error, atom()}
+  def banners(%Context{} = ctx) do
+    with :ok <- allowed(ctx), do: {:ok, Banners.list()}
+  end
+
+  @doc """
+  Замена содержимого места. `attrs` содержит место, тексты и — если
+  картинку меняют — путь к временному файлу: разбирать multipart умеет
+  транспорт, решать, что с этим файлом делать, умеет только контекст.
+  """
+  @spec put_banner(ctx(), map()) :: {:ok, map()} | {:error, atom() | Ecto.Changeset.t()}
+  def put_banner(%Context{} = ctx, attrs) do
+    with :ok <- allowed(ctx), do: Banners.put(ctx, attrs)
+  end
+
+  @spec delete_banner(ctx(), String.t()) :: :ok | {:error, atom()}
+  def delete_banner(%Context{} = ctx, place) do
+    with :ok <- allowed(ctx), do: Banners.delete(ctx, place)
   end
 
   # --- игры -----------------------------------------------------------------

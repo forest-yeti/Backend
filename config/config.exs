@@ -37,6 +37,11 @@ config :block_poker, :client_release,
   feed_url: nil,
   dir: nil
 
+# Баннеры. Каталог не настроен — картинки через панель не грузятся, а
+# уже сохранённые адреса продолжают работать: раздавать файлы может
+# nginx или CDN, и бэкенд об этом знать не обязан.
+config :block_poker, :banners, dir: nil, base_url: nil
+
 # База часовых поясов. `tz` компилирует данные IANA в модули на сборке:
 # в рантайме нет ни сетевых загрузок, ни фонового процесса обновления.
 config :elixir, :time_zone_database, Tz.TimeZoneDatabase

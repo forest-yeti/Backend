@@ -98,6 +98,7 @@ systemctl list-unit-files "${SERVICE}.service" --no-legend | grep -q . \
 # обновлений вовсе — снаружи это выглядит как «обновление не работает».
 
 UPDATES_DIR="${UPDATES_DIR:-$BASE_DIR/client_updates}"
+BANNERS_DIR="${BANNERS_DIR:-$BASE_DIR/banners}"
 
 # `if`, а не `grep ... && return`: под `set -e` составное выражение с
 # коротким замыканием возвращает ненулевой статус и роняет весь деплой
@@ -139,6 +140,19 @@ add_env CLIENT_UPDATES_DIR "$UPDATES_DIR"
 
 mkdir -p "$UPDATES_DIR"
 chown -R "$APP_USER:$APP_USER" "$UPDATES_DIR"
+
+# Баннеры: каталог картинок и публичный адрес его раздачи. Схема та же,
+# что и у фида, — по тому же признаку наличия сертификата.
+if [[ -n "$PHX_HOST_NOW" ]]; then
+  add_env BANNERS_BASE_URL "${UPDATES_SCHEME}://${PHX_HOST_NOW}/banners"
+else
+  warn "в $ENV_FILE нет PHX_HOST — BANNERS_BASE_URL не добавлен, адреса картинок останутся относительными"
+fi
+
+add_env BANNERS_DIR "$BANNERS_DIR"
+
+mkdir -p "$BANNERS_DIR"
+chown -R "$APP_USER:$APP_USER" "$BANNERS_DIR"
 
 
 # --------------------------------------------------------------------------

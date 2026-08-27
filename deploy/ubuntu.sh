@@ -45,6 +45,7 @@ SRC_DIR="$BASE_DIR/src"
 REL_DIR="$BASE_DIR/current"
 ENV_FILE="/etc/block_poker.env"
 UPDATES_DIR="${UPDATES_DIR:-$BASE_DIR/client_updates}"
+BANNERS_DIR="${BANNERS_DIR:-$BASE_DIR/banners}"
 DB_NAME="block-poker"
 DB_USER="blockpoker"
 ELIXIR_VERSION="${ELIXIR_VERSION:-1.18.4}"
@@ -299,7 +300,9 @@ fi
 # `client_updates` — каталог сборок клиента: панель кладёт туда
 # инсталляторы и `latest.yml`, приложение раздаёт его по `/client-updates`.
 # Владелец — служебный пользователь: пишет в него нода, а не root.
-mkdir -p "$SRC_DIR" "$REL_DIR" "$UPDATES_DIR"
+# `banners` — картинки баннеров: панель кладёт их туда, приложение
+# раздаёт по `/banners`. Владелец тот же и по той же причине.
+mkdir -p "$SRC_DIR" "$REL_DIR" "$UPDATES_DIR" "$BANNERS_DIR"
 chown -R "$APP_USER:$APP_USER" "$BASE_DIR"
 
 # --------------------------------------------------------------------------
@@ -368,6 +371,12 @@ ADMIN_ORIGINS=${ADMIN_ORIGINS:-}
 # разбираться, почему обновление молчит.
 CLIENT_UPDATES_DIR=${UPDATES_DIR}
 CLIENT_FEED_URL=${CLIENT_FEED_URL:-${UPDATES_SCHEME}://${DOMAIN}/client-updates/}
+# Баннеры. Каталог раздаётся самим приложением по `/banners`, панель
+# кладёт туда картинки. Базовый адрес уходит клиенту в поле `image`
+# ручки `GET /api/banners/:place` — он абсолютный, потому что клиент
+# грузит картинку напрямую, а не через API.
+BANNERS_DIR=${BANNERS_DIR}
+BANNERS_BASE_URL=${UPDATES_SCHEME}://${DOMAIN}/banners
 MIX_ENV=prod
 LANG=C.UTF-8
 ENV
@@ -559,6 +568,21 @@ server {
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
         proxy_buffering off;
+    }
+
+    # Загрузка картинки баннера. Общий `client_max_body_size 1m`
+    # отверг бы её на любом сколько-нибудь качественном изображении, и
+    # снова ответом `413` без CORS-заголовков. Предел здесь щедрее
+    # доменных 5 МБ ровно настолько, чтобы отказ выдавало приложение
+    # понятным кодом, а не прокси — молча.
+    location /admin/banners {
+        proxy_pass http://127.0.0.1:4000;
+        proxy_http_version 1.1;
+        client_max_body_size 8m;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
     # Загрузка сборки клиента — единственная ручка с большим телом.

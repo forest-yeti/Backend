@@ -81,3 +81,8 @@ config :block_poker, :client_release,
   minimum: "0.0.0",
   feed_url: "http://localhost:4000/client-updates",
   dir: "priv/client_updates"
+
+# Баннеры: файлы лежат в репозитории, адрес смотрит на сам же dev-сервер.
+config :block_poker, :banners,
+  dir: "priv/banners",
+  base_url: "http://localhost:4000/banners"

@@ -26,6 +26,11 @@ defmodule BlockPoker.ErrorCode do
           | :upload_write_failed
           | :empty_upload
           | :feed_write_failed
+          | :invalid_place
+          | :banner_image_required
+          | :banners_dir_not_configured
+          | :unsupported_image_type
+          | :image_too_large
           | :insufficient_funds
           | :seat_taken
           | :already_seated
@@ -110,6 +115,13 @@ defmodule BlockPoker.ErrorCode do
     upload_write_failed: {500, "Не удалось сохранить файл сборки"},
     empty_upload: {422, "Загруженный файл пуст"},
     feed_write_failed: {500, "Не удалось перезаписать фид обновлений"},
+    # Баннеры. Список мест закрыт: неизвестное место — ошибка панели, а не
+    # повод завести новое (§ `BlockPoker.Banners.Banner`).
+    invalid_place: {422, "Неизвестное место показа баннера"},
+    banner_image_required: {422, "У нового баннера должна быть картинка"},
+    banners_dir_not_configured: {503, "Каталог картинок баннеров не настроен"},
+    unsupported_image_type: {422, "Поддерживаются PNG, JPEG, WebP и GIF"},
+    image_too_large: {422, "Картинка больше 5 МБ"},
     insufficient_funds: {422, "Недостаточно средств"},
     seat_taken: {409, "Место уже занято"},
     already_seated: {409, "Вы уже сидите за этим столом"},
