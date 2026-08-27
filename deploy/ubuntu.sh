@@ -44,6 +44,7 @@ BASE_DIR="${BASE_DIR:-/opt/block_poker}"
 SRC_DIR="$BASE_DIR/src"
 REL_DIR="$BASE_DIR/current"
 ENV_FILE="/etc/block_poker.env"
+UPDATES_DIR="${UPDATES_DIR:-$BASE_DIR/client_updates}"
 DB_NAME="block-poker"
 DB_USER="blockpoker"
 ELIXIR_VERSION="${ELIXIR_VERSION:-1.18.4}"
@@ -295,7 +296,10 @@ if ! id -u "$APP_USER" >/dev/null 2>&1; then
   useradd --system --create-home --home-dir "$BASE_DIR" --shell /bin/bash "$APP_USER"
 fi
 
-mkdir -p "$SRC_DIR" "$REL_DIR"
+# `client_updates` — каталог сборок клиента: панель кладёт туда
+# инсталляторы и `latest.yml`, приложение раздаёт его по `/client-updates`.
+# Владелец — служебный пользователь: пишет в него нода, а не root.
+mkdir -p "$SRC_DIR" "$REL_DIR" "$UPDATES_DIR"
 chown -R "$APP_USER:$APP_USER" "$BASE_DIR"
 
 # --------------------------------------------------------------------------
@@ -313,6 +317,7 @@ if [[ -f "$ENV_FILE" ]] && grep -q '^DATABASE_URL=' "$ENV_FILE"; then
   # прочитать до этого. Origin'ы панели — как раз такое поле: пароли
   # скрипт генерирует сам, а адрес панели знает только администратор.
   ADMIN_ORIGINS="${ADMIN_ORIGINS:-$(sed -n 's/^ADMIN_ORIGINS=//p' "$ENV_FILE")}"
+  CLIENT_FEED_URL="${CLIENT_FEED_URL:-$(sed -n 's/^CLIENT_FEED_URL=//p' "$ENV_FILE")}"
 else
   DB_PASS="$(openssl rand -hex 24)"
   SECRET_KEY_BASE="$(openssl rand -base64 64 | tr -d '\n')"
@@ -332,6 +337,14 @@ SQL
 # 6. Файл окружения
 # --------------------------------------------------------------------------
 
+# Схема нужна раньше, чем выпускается сертификат: адрес фида пишется
+# в env-файл, а `SCHEME` вычисляется только в блоке TLS ниже.
+if [[ "${SKIP_TLS:-0}" == "1" ]]; then
+  UPDATES_SCHEME="http"
+else
+  UPDATES_SCHEME="https"
+fi
+
 log "Пишу $ENV_FILE"
 cat > "$ENV_FILE" <<ENV
 PHX_SERVER=true
@@ -344,6 +357,17 @@ POOL_SIZE=10
 # https://admin.example.com. Пусто — панель снаружи не пускается: CORS для
 # `/admin/*` разрешает только перечисленные адреса, `*` не поддерживается.
 ADMIN_ORIGINS=${ADMIN_ORIGINS:-}
+# Автообновление клиента. Каталог раздаётся самим приложением по
+# `/client-updates`, панель кладёт туда инсталляторы и `latest.yml`.
+#
+# Слеш в конце адреса обязателен: `electron-updater` строит ссылку на
+# `latest.yml` как `new URL(file, feed_url)`, а без слеша такое
+# разрешение отбрасывает последний сегмент пути и уводит клиента за
+# фидом в корень домена. Сервер адрес всё равно нормализует, но
+# держать в файле заведомо рабочее значение дешевле, чем однажды
+# разбираться, почему обновление молчит.
+CLIENT_UPDATES_DIR=${UPDATES_DIR}
+CLIENT_FEED_URL=${CLIENT_FEED_URL:-${UPDATES_SCHEME}://${DOMAIN}/client-updates/}
 MIX_ENV=prod
 LANG=C.UTF-8
 ENV
