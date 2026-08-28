@@ -386,6 +386,43 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       assert busted.prize == 700
       assert busted.bounty_earned == 0
     end
+
+    test "player_busted несёт счётчик оставшихся — «в игре» за столом не висит прежним", ctx do
+      # Снимок турнира за столом целиком перезапрашивается редко, поэтому
+      # цифры счётчика едут самим событием вылета. Без них панель стола
+      # показывала бы прежнее число до конца турнира.
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(ctx.tournament.id))
+
+      :finished = play_until_finished(ctx.pid, ctx.table)
+
+      assert_received {:tournament_event, "player_busted", busted}
+      assert busted.players_left == 1
+      assert busted.entries == 2
+    end
+
+    test "личный след едет адресно и не попадает в общий топик — карты чужих раздач", ctx do
+      # Экран вылета показывает карманные карты лучшей, худшей и последней
+      # раздачи. Они личные: топик турнира смотрят все, включая тех, с кем
+      # игрок ещё сыграет после ре-энтри.
+      Phoenix.PubSub.subscribe(BlockPoker.PubSub, Tournaments.topic(ctx.tournament.id))
+
+      :finished = play_until_finished(ctx.pid, ctx.table)
+
+      assert_received {:tournament_private, _user_id, "entry_stats", stats}
+      assert stats.hands > 0
+      assert [%{rank: _, suit: _}, %{rank: _, suit: _}] = stats.last
+      assert stats.best != nil
+      assert stats.worst != nil
+      assert stats.duration_s >= 0
+
+      # Победитель не вылетает, но след получает тоже — иначе экран итога
+      # ему нечем заполнить.
+      assert_received {:tournament_private, _winner_id, "entry_stats", _winner_stats}
+
+      # В широковещательном событии карт нет вовсе.
+      assert_received {:tournament_event, "player_busted", busted}
+      refute Map.has_key?(busted, :stats)
+    end
   end
 
   describe "баунти" do
@@ -450,6 +487,148 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
     end
   end
 
+  describe "подготовительная рассадка" do
+    test "подготовленный турнир не раздаёт до старта", _ctx do
+      # `prepare/1` поднимает столы и сажает игроков за минуту до старта.
+      # Раздавать в это окно нельзя: одна сданная раздача переводила турнир
+      # в `:finishing` (`maybe_final_table/1`), а `start_due/1` ищет
+      # `:registering` — и турнир не стартовал уже никогда.
+      setting = fast_setting(%{min_players: 4, rebuy_allowed: false})
+      tournament = tournament_fixture(setting)
+
+      for _index <- 1..4 do
+        {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+      end
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.prepare(pid)
+
+      [{_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+      room = TableServer.state(table)
+
+      # Игроки за столом, но стол стоит: ни раздачи, ни розыгрыша кнопки.
+      assert length(RoomState.players(room)) == 4
+      assert room.paused?
+      assert room.hand == nil
+      assert room.phase == :idle
+
+      # Статус не сдвинулся — значит старт по расписанию его найдёт.
+      assert TournamentServer.state(pid).status in [:announced, :registering]
+    end
+
+    test "старт после подготовки снимает паузу и раздаёт", _ctx do
+      setting = fast_setting(%{min_players: 4, rebuy_allowed: false})
+      tournament = tournament_fixture(setting)
+
+      for _index <- 1..4 do
+        {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+      end
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.prepare(pid)
+      :ok = TournamentServer.start_tournament(pid)
+
+      [{_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      refute TableServer.state(table).paused?
+
+      deal_hand(table)
+
+      assert TableServer.state(table).hand != nil
+    end
+  end
+
+  describe "вылет за одним столом" do
+    test "после вылета стол планирует следующую раздачу", _ctx do
+      # Четверо за одним столом: один вылетает, троим играть дальше.
+      # Проверяем не «можно ли сдать», а **запланировал ли стол сам**:
+      # `deal_hand/1` жмёт таймер руками и молча глотает
+      # `{:error, :no_such_timer}`, поэтому незапланированную раздачу
+      # остальные тесты не замечают.
+      setting = fast_setting(%{table_size: 6, min_players: 4, rebuy_allowed: false})
+      tournament = tournament_fixture(setting)
+
+      for _index <- 1..4 do
+        {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+      end
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      [{_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      # Играем, пока не выбьет ровно одного: `play_until_bust/3` доводит
+      # до хедз-апа и для четверых не годится.
+      :busted =
+        Enum.reduce_while(1..30, :playing, fn _index, _acc ->
+          if TournamentServer.state(pid).players_left < 4 do
+            {:halt, :busted}
+          else
+            deal_hand(table)
+            play_hand(table)
+            {:cont, :playing}
+          end
+        end)
+
+      assert TournamentServer.state(pid).players_left == 3
+
+      room = TableServer.state(table)
+      refute room.paused?
+
+      # Стол доиграл раздачу и обязан взвести паузу до следующей.
+      assert Map.has_key?(:sys.get_state(table).timers, :next_hand)
+    end
+  end
+
+  describe "ники за столом" do
+    test "турнирная рассадка ставит на места ники, а не «Игрок»", ctx do
+      # Ник и аватар приносит на место тот, кто сажает. В турнире сажает
+      # турнир, а не контекст `Tables`, — забыть профиль здесь означает
+      # стол из UUID'ов, подписанных на клиенте «Игрок».
+      tournament = tournament_fixture(ctx.setting)
+      users = for _index <- 1..2, do: user_fixture()
+
+      for user <- users do
+        {:ok, _entry} = Tournaments.register(tournament.id, user.id)
+      end
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      [{_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+
+      names =
+        table
+        |> TableServer.state()
+        |> RoomState.seats()
+        |> Enum.reject(&(&1.user_id == nil))
+        |> Enum.map(& &1.name)
+
+      assert Enum.sort(names) == users |> Enum.map(& &1.name) |> Enum.sort()
+    end
+
+    test "поздний вход садится со своим ником", ctx do
+      # Отдельно от старта: профили всей явки тянутся пачкой до рассадки,
+      # а этот приходит, когда пачку уже разобрали.
+      tournament = tournament_fixture(ctx.setting)
+
+      for _index <- 1..2 do
+        {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+      end
+
+      pid = start_server(tournament.id)
+      :ok = TournamentServer.start_tournament(pid)
+
+      latecomer = user_fixture()
+      {:ok, _entry} = Tournaments.register(tournament.id, latecomer.id)
+
+      [{_id, table}] = Map.to_list(:sys.get_state(pid).tables)
+      seat = table |> TableServer.state() |> RoomState.find_seat(latecomer.id)
+
+      assert seat.name == latecomer.name
+    end
+  end
+
   describe "ре-энтри" do
     setup do
       setting = fast_setting(%{rebuy_allowed: true, max_rebuys: 1})
@@ -484,6 +663,23 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
       entry = Repo.get!(Entry, offer.entry_id)
       assert entry.place == nil
       assert entry.status == :busted
+    end
+
+    test "предложение несёт место, приз и баунти — окно вылета показывает, от чего отказ",
+         ctx do
+      play_until_bust(ctx.pid, ctx.table)
+
+      assert_received {:tournament_event, "reentry_offer", offer}
+
+      # Ровно то, что придёт в `player_busted`, если игрок промолчит:
+      # место зарезервировано, и цена входа заново измеряется им.
+      assert offer.place == 2
+      assert offer.entries == 2
+      assert offer.prize == 700
+      assert offer.bounty_earned == 0
+
+      # В БД места по-прежнему нет: вылет не окончателен.
+      assert Repo.get!(Entry, offer.entry_id).place == nil
     end
 
     test "вход заново сажает игрока обратно и не присваивает места", ctx do

@@ -31,6 +31,7 @@ defmodule BlockPoker.Tables.TableServer do
     Stats
   }
 
+  alias BlockPoker.Engine.Card
   alias BlockPoker.Engine.Straddle
   alias BlockPoker.History
   alias BlockPoker.History.Report
@@ -1572,6 +1573,16 @@ defmodule BlockPoker.Tables.TableServer do
     #
     # Уходит **до** обработки вылетов: она затрёт стеки, по которым
     # разводятся места. В кэше на это событие не подписан никто.
+    # Личная статистика раздачи уезжает **отдельным** сообщением, а не
+    # полем в `hand_summary`: тот идёт по общему топику стола, и канал
+    # пушит клиентам всё, что по нему приходит. Карманные карты в общем
+    # событии — раздача в открытую, поэтому здесь `:table_report`, кортеж
+    # другой формы: канал игнорирует его catch-all, а подписан на него
+    # только тот, кто столом распоряжается. Уходит **до** `hand_summary`,
+    # потому что тот несёт вылеты, а вылетевший должен увидеть свою
+    # последнюю раздачу.
+    report(state, "hand_stats", hand_stats_payload(state, hand))
+
     broadcast(state, "hand_summary", hand_summary_payload(state, hand))
 
     state =
@@ -1812,6 +1823,38 @@ defmodule BlockPoker.Tables.TableServer do
       button_seat: state.room.button_seat,
       stacks: Map.new(players, fn {number, player} -> {number, player.stack} end)
     }
+  end
+
+  # Что игрок сделал в этой раздаче: карманные карты и нетто фишек.
+  # Только те, кому карты сдали, — сидевший в перерыве или ждущий блайнда
+  # раздачу не играл, и считать её ему нельзя.
+  #
+  # Нетто — выплата минус вложенное за раздачу, а не разница стеков:
+  # стеки к этому моменту уже включают выплату, и вычесть её из них
+  # нечем.
+  defp hand_stats_payload(state, hand) do
+    results = discipline(state).results(hand)
+    payouts = Map.get(results, :payouts, %{})
+
+    # Игроки берутся из самой раздачи, а не из проекции
+    # `discipline().players/1`: та отдаёт только стек и вложенное, а
+    # карманных карт в ней нет — она делалась для расчёта, а не для
+    # показа.
+    players =
+      for {number, player} <- Map.get(hand, :players, %{}),
+          hole = Map.get(player, :hole) || [],
+          hole != [],
+          seat = Map.get(state.room.seats, number),
+          seat != nil and Seat.occupied?(seat) do
+        %{
+          seat: number,
+          user_id: seat.user_id,
+          cards: Enum.map(hole, &Card.to_map/1),
+          net: Map.get(payouts, number, 0) - Map.get(player, :total, 0)
+        }
+      end
+
+    %{players: players}
   end
 
   defp pots_of(%{runs: runs}), do: Enum.flat_map(runs, & &1.pots)
@@ -2128,6 +2171,17 @@ defmodule BlockPoker.Tables.TableServer do
       @pubsub,
       topic(state.room.room_id),
       {:table_event, event, Map.put(payload, :room_id, state.room.room_id)}
+    )
+  end
+
+  # Служебное сообщение по топику стола: адресовано владельцу стола
+  # (турниру), а не игрокам. Форма кортежа другая намеренно — канал
+  # пушит клиенту всякий `:table_event`, и попасть туда этому нельзя.
+  defp report(state, event, payload) do
+    PubSub.broadcast(
+      @pubsub,
+      topic(state.room.room_id),
+      {:table_report, event, Map.put(payload, :room_id, state.room.room_id)}
     )
   end
 

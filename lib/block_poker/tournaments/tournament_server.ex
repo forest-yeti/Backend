@@ -48,6 +48,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     TournamentPayout
   }
 
+  alias BlockPoker.Accounts
   alias BlockPoker.History
   alias BlockPoker.Tables.{RoomState, TableRegistry, TableServer, TableSupervisor}
   alias BlockPoker.Tournaments
@@ -70,7 +71,24 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     """
 
     @enforce_keys [:entry_id, :user_id, :stack]
-    defstruct [:entry_id, :user_id, :stack, :table_id, :seat, bounty: 0, alive?: true]
+    defstruct [
+      :entry_id,
+      :user_id,
+      :stack,
+      :table_id,
+      :seat,
+      # Момент регистрации входа. Отсюда считается время в турнире,
+      # которое видит вылетевший: часы идут с регистрации, а не со
+      # старта, — поздний вход и ре-энтри провели в турнире меньше.
+      :registered_at,
+      bounty: 0,
+      alive?: true,
+      # Личный след входа: сколько раздач сыграно и карманные карты
+      # лучшей, худшей и последней. Живёт в процессе, а не читается на
+      # вылете из истории: та пишется асинхронно, и вылетная раздача —
+      # ровно та, которой в ней ещё может не быть.
+      stats: %{hands: 0, best: nil, best_net: nil, worst: nil, worst_net: nil, last: nil}
+    ]
   end
 
   defmodule State do
@@ -119,7 +137,14 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       # равный числу живых плюс один.
       results: [],
       final_table: nil,
-      hands_played: 0
+      hands_played: 0,
+      # Снимки профилей входов: `%{user_id => %{name, avatar, flair, role}}`.
+      # Стол показывает игрока ником, а не UUID, и ник ему приносит тот,
+      # кто сажает. В турнире сажает турнир — значит, и профили его забота.
+      # Держатся здесь, а не спрашиваются на каждую посадку, потому что
+      # посадок за турнир много: старт, поздняя регистрация, ре-энтри,
+      # каждая пересадка и подъём упавшего стола.
+      profiles: %{}
     ]
   end
 
@@ -353,6 +378,10 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   # Стек и место берутся у живого стола, а не из снимка: пока турнир
   # лежал, стол раздавал, и снимок отстал ровно на эти раздачи.
   defp restore_players(state, entries, snapshot) do
+    # Пережившие падение сидят за живыми столами со своими никами: там
+    # их поставила посадка до рестарта. Тянем на всех всё равно —
+    # бездомных отсюда сажают заново, и им ник нужен.
+    state = load_profiles(state, Enum.map(entries, & &1.user_id))
     live = live_seats(state)
     saved = Map.new(snapshot.seats, &{Map.get(&1, "entry_id"), &1})
 
@@ -381,7 +410,12 @@ defmodule BlockPoker.Tournaments.TournamentServer do
                id: entry.id,
                user_id: entry.user_id,
                entry_number: entry.entry_number,
-               bounty: entry.bounty
+               bounty: entry.bounty,
+               # Момент входа переживает рестарт в самой строке входа:
+               # `seat_at/4` кладёт его в `Player.registered_at`, и без
+               # него посадка падает на `badkey` — то есть турнир не
+               # поднимается вовсе.
+               inserted_at: entry.inserted_at
              },
              stack
            ) do
@@ -415,7 +449,8 @@ defmodule BlockPoker.Tournaments.TournamentServer do
           stack: seat.stack,
           table_id: seat.table_id,
           seat: seat.seat,
-          bounty: entry.bounty
+          bounty: entry.bounty,
+          registered_at: entry.inserted_at
         }
 
       true ->
@@ -523,8 +558,20 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
   def handle_call({:seat, entry}, _from, state) do
     case seat_player(state, entry) do
-      {:ok, state} -> {:reply, :ok, state}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:ok, state} ->
+        # Поздняя регистрация меняет обе цифры счётчика «в игре из
+        # входов». Снимок целиком за столом не перезапрашивается, поэтому
+        # цифры едут событием — той же дорогой, что и на вылете.
+        broadcast(state, "player_seated", %{
+          entry_id: entry.id,
+          players_left: alive_count(state),
+          entries: map_size(state.players)
+        })
+
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -603,6 +650,15 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   end
 
   def handle_info({:table_event, _event, _payload}, state), do: {:noreply, state}
+
+  # Личная статистика раздачи. Приходит до `hand_summary` — то есть до
+  # вылетов, — потому что вылетевший обязан увидеть в итоге ту раздачу,
+  # на которой вылетел.
+  def handle_info({:table_report, "hand_stats", payload}, state) do
+    {:noreply, record_hand_stats(state, payload)}
+  end
+
+  def handle_info({:table_report, _event, _payload}, state), do: {:noreply, state}
 
   def handle_info({:tournament_updated, _id}, state), do: {:noreply, state}
 
@@ -728,6 +784,10 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     table_size = table_size(state)
     count = Seating.tables_needed(length(entries), table_size)
 
+    # Ники всей явки — одним запросом до рассадки: дальше каждая посадка
+    # берёт свой из карты, а не ходит в базу.
+    state = load_profiles(state, Enum.map(entries, & &1.user_id))
+
     state = Enum.reduce(1..count//1, state, fn _index, acc -> open_table(acc) end)
 
     table_ids = Map.keys(state.tables)
@@ -775,11 +835,20 @@ defmodule BlockPoker.Tournaments.TournamentServer do
         Process.monitor(pid)
 
         # Стол поднимается уже раздающим (`auto_start?`). Если турнир
-        # сейчас стоит — перерыв или круг hand-for-hand, — новый стол
-        # обязан встать вместе со всеми: иначе поздняя регистрация,
-        # ре-энтри или пересадка после падения открыли бы стол, который
-        # играет в перерыв.
-        if state.break != nil or state.hand_for_hand != nil do
+        # сейчас стоит — перерыв, круг hand-for-hand или **ещё не
+        # стартовал**, — новый стол обязан встать вместе со всеми: иначе
+        # поздняя регистрация, ре-энтри или пересадка после падения
+        # открыли бы стол, который играет в перерыв.
+        #
+        # «Ещё не стартовал» — это подготовительная рассадка (`prepare/1`)
+        # за минуту до старта. Пауза там ставилась **после** рассадки всех,
+        # а стол начинает раздавать, как только за ним набралось двое, —
+        # и успевал сдать раздачу в это окно. Одной сданной раздачи хватало,
+        # чтобы `maybe_final_table/1` перевёл турнир в `:finishing`, после
+        # чего `start_due/1` (он ищет `:registering`) не находил его уже
+        # никогда: `started_at` оставался пустым, `resume_tables/1` не
+        # звался, и столы стояли на паузе до конца времён.
+        if state.break != nil or state.hand_for_hand != nil or not started?(state) do
           send(pid, {:tournament_paused, true})
         end
 
@@ -818,6 +887,8 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   # --- Посадка -------------------------------------------------------------
 
   defp seat_player(state, entry) do
+    state = load_profiles(state, [entry.user_id])
+
     with {:ok, state} <- place_player(state, entry) do
       {:ok, _count} = Tournaments.mark_playing([entry.id])
       {:ok, state}
@@ -871,7 +942,13 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     stack = stack || stack_for(state, entry)
 
     with {:ok, %{reservation_id: reservation, seat: seat}} <-
-           TableServer.reserve_seat(pid, entry.user_id, :first_free, stack),
+           TableServer.reserve_seat(
+             pid,
+             entry.user_id,
+             :first_free,
+             stack,
+             profile(state, entry.user_id)
+           ),
          {:ok, _seat} <- TableServer.confirm_seat(pid, reservation, stack, :wait_bb) do
       player = %Player{
         entry_id: entry.id,
@@ -879,10 +956,30 @@ defmodule BlockPoker.Tournaments.TournamentServer do
         stack: stack,
         table_id: table_id,
         seat: seat,
-        bounty: entry.bounty
+        bounty: entry.bounty,
+        registered_at: entry.inserted_at
       }
 
       {:ok, %{state | players: Map.put(state.players, entry.id, player)}}
+    end
+  end
+
+  # Турнир уже раздаёт. До старта столы могут стоять поднятыми и
+  # рассаженными (`prepare/1`), но играть им нельзя.
+  defp started?(%State{status: status}), do: status not in [:announced, :registering]
+
+  # Ник и аватар для места. Пустая карта — вырожденный случай: стол
+  # покажет «Игрок», но посадит. Ронять из-за косметики рассадку нельзя.
+  defp profile(state, user_id), do: Map.get(state.profiles, user_id, %{})
+
+  # Профили входов, которых ещё нет в карте. Один запрос на всех: старт
+  # тянет всю явку разом, поздний вход и ре-энтри — себя одного.
+  defp load_profiles(state, user_ids) do
+    missing = Enum.reject(user_ids, &Map.has_key?(state.profiles, &1))
+
+    case missing do
+      [] -> state
+      ids -> %{state | profiles: Map.merge(state.profiles, Accounts.profiles(ids))}
     end
   end
 
@@ -911,7 +1008,12 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
       case seat_player(state, entry) do
         {:ok, state} ->
-          broadcast(state, "reentry_taken", %{entry_id: entry.id, user_id: user_id})
+          broadcast(state, "reentry_taken", %{
+            entry_id: entry.id,
+            user_id: user_id,
+            players_left: alive_count(state),
+            entries: map_size(state.players)
+          })
 
           {:ok, entry, state}
 
@@ -1589,6 +1691,8 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       })
     )
 
+    send_stats(state, entry_id)
+
     broadcast(state, "player_busted", %{
       entry_id: entry_id,
       place: place,
@@ -1597,7 +1701,9 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       # Поэтому здесь — та же сетка «при текущей явке», что и в карточке
       # турнира (§3 задачи 30): не кэшируется, для мест вне призов — 0.
       prize: prize,
-      bounty_earned: bounty_paid
+      bounty_earned: bounty_paid,
+      players_left: alive_count(state),
+      entries: map_size(state.players)
     })
 
     state
@@ -1717,11 +1823,20 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     # открыто, вылет не окончателен, и место остаётся зарезервированным
     # в процессе. Без этой записи вход считался бы живым, и ре-энтри
     # тот же человек взять не смог бы.
-    {:ok, _entry} = Tournaments.bust(placement.entry_id, nil)
+    {:ok, entry} = Tournaments.bust(placement.entry_id, nil)
 
     timer = schedule({:reentry_expired, placement.entry_id}, state.setting.rebuy_prompt_ms)
 
     player = Map.fetch!(state.players, placement.entry_id)
+
+    # Вместе с предложением едет то, от чего игрок отказывается, соглашаясь:
+    # место, приз и заработанные головы — ровно то, что придёт в
+    # `player_busted`, если окно истечёт или он откажется. Место здесь
+    # **зарезервировано, а не присвоено** (в БД у входа `place` ещё `nil`),
+    # и цена входа заново измеряется именно им: без этих цифр решение
+    # принимается вслепую — «доплатить или забрать призовые» не тот выбор,
+    # который делают, не видя суммы.
+    send_stats(state, placement.entry_id)
 
     broadcast(state, "reentry_offer", %{
       entry_id: placement.entry_id,
@@ -1729,7 +1844,11 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       deadline_ms: state.setting.rebuy_prompt_ms,
       cost: state.snapshot["rebuy_cost"],
       stack: state.snapshot["rebuy_stack"],
-      left: reentries_left(state, player.user_id)
+      left: reentries_left(state, player.user_id),
+      place: placement.place,
+      entries: map_size(state.players),
+      prize: prize_for(state, placement),
+      bounty_earned: bounty_earned_by(state, entry)
     })
 
     %{
@@ -1797,6 +1916,82 @@ defmodule BlockPoker.Tournaments.TournamentServer do
         player -> update_player(acc, player.entry_id, &%{&1 | stack: stack})
       end
     end)
+  end
+
+  # --- Личная статистика ----------------------------------------------------
+
+  defp record_hand_stats(state, payload) do
+    Enum.reduce(payload.players, state, fn entry, acc ->
+      case player_at(acc, payload.room_id, entry.seat) do
+        # Место могло смениться владельцем между отправкой и приёмом
+        # (пересадка, ре-энтри на то же место). `user_id` в отчёте — тот,
+        # кому карты сдали, и статистика чужому входу не пишется.
+        %{user_id: id} = player when id == entry.user_id ->
+          update_player(acc, player.entry_id, &%{&1 | stats: merge_hand(&1.stats, entry)})
+
+        _other ->
+          acc
+      end
+    end)
+  end
+
+  # Лучшая и худшая меряются нетто фишек за раздачу. Строгое сравнение
+  # намеренно: при равенстве остаётся более ранняя — «лучшая» не должна
+  # переписываться каждой сброшенной на префлопе рукой с тем же нулём.
+  defp merge_hand(stats, %{cards: cards, net: net}) do
+    %{
+      stats
+      | hands: stats.hands + 1,
+        last: cards,
+        best: if(stats.best_net == nil or net > stats.best_net, do: cards, else: stats.best),
+        best_net:
+          if(stats.best_net == nil or net > stats.best_net, do: net, else: stats.best_net),
+        worst: if(stats.worst_net == nil or net < stats.worst_net, do: cards, else: stats.worst),
+        worst_net:
+          if(stats.worst_net == nil or net < stats.worst_net, do: net, else: stats.worst_net)
+    }
+  end
+
+  # Итог входа для экрана вылета. Нетто наружу не едет — игрок видит
+  # карты, а не бухгалтерию: цифры рядом с ними превратили бы окно в
+  # отчёт, а вопрос там один — «чем я играл».
+  # Отправка личного следа тому, кого он касается. **Не** широковещательно
+  # и не полем в `player_busted`: топик турнира смотрят все, включая тех,
+  # с кем игрок ещё сыграет после ре-энтри, а карманные карты его
+  # последних раздач — их знание о нём, а не общее.
+  defp send_stats(state, entry_id) do
+    case Map.get(state.players, entry_id) do
+      nil ->
+        state
+
+      player ->
+        private(
+          state,
+          player.user_id,
+          "entry_stats",
+          Map.put(player_stats(player), :entry_id, entry_id)
+        )
+
+        state
+    end
+  end
+
+  defp player_stats(player) do
+    %{
+      hands: player.stats.hands,
+      best: player.stats.best,
+      worst: player.stats.worst,
+      last: player.stats.last,
+      duration_s: seconds_since(player.registered_at)
+    }
+  end
+
+  # Время в турнире. Стенные часы, а не монотонные: игроку показывается
+  # прожитое время, и перерывы из него не вычитаются — он их тоже ждал.
+  defp seconds_since(nil), do: 0
+
+  defp seconds_since(%DateTime{} = from) do
+    DateTime.utc_now() |> DateTime.diff(from) |> max(0)
   end
 
   # --- Балансировка --------------------------------------------------------
@@ -1880,7 +2075,13 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
   defp seat_moved(state, to, player, move, stack) do
     with {:ok, %{reservation_id: reservation, seat: seat}} <-
-           TableServer.reserve_seat(to, player.user_id, move.seat, stack),
+           TableServer.reserve_seat(
+             to,
+             player.user_id,
+             move.seat,
+             stack,
+             profile(state, player.user_id)
+           ),
          {:ok, _seat} <- TableServer.confirm_seat(to, reservation, stack, :wait_bb) do
       broadcast(state, "table_changed", %{
         entry_id: player.entry_id,
@@ -1910,7 +2111,13 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     )
 
     with {:ok, %{reservation_id: reservation, seat: seat}} <-
-           TableServer.reserve_seat(from, player.user_id, :first_free, stack),
+           TableServer.reserve_seat(
+             from,
+             player.user_id,
+             :first_free,
+             stack,
+             profile(state, player.user_id)
+           ),
          {:ok, _seat} <- TableServer.confirm_seat(from, reservation, stack, :wait_bb) do
       update_player(state, player.entry_id, &%{&1 | seat: seat, stack: stack})
     else
@@ -2010,7 +2217,13 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     with table_id when table_id != nil <- least_filled_table(state),
          {:ok, pid} <- Map.fetch(state.tables, table_id),
          {:ok, %{reservation_id: reservation, seat: seat}} <-
-           TableServer.reserve_seat(pid, player.user_id, :first_free, player.stack),
+           TableServer.reserve_seat(
+             pid,
+             player.user_id,
+             :first_free,
+             player.stack,
+             profile(state, player.user_id)
+           ),
          {:ok, _seat} <- TableServer.confirm_seat(pid, reservation, player.stack, :wait_bb) do
       broadcast(state, "table_changed", %{
         entry_id: player.entry_id,
@@ -2089,6 +2302,10 @@ defmodule BlockPoker.Tournaments.TournamentServer do
         # Дозапись идемпотентна по `entry_id`: у вылетевших строки уже
         # есть, и вторых не появится.
         record_winner(state, winner, payouts)
+
+        # Победитель не вылетает, и своего следа иначе не увидел бы:
+        # `player_busted` для него не бывает.
+        send_stats(state, winner.entry_id)
 
         broadcast(state, "tournament_finished", payload)
 
@@ -2247,6 +2464,18 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       @pubsub,
       Tournaments.topic(state.tournament_id),
       {:tournament_event, event, Map.put(payload, :tournament_id, state.tournament_id)}
+    )
+  end
+
+  # Адресное сообщение по общему топику: каналы остальных подписчиков
+  # молча его пропускают. Форма кортежа та же, что у стола
+  # (`:table_private`), и по той же причине — карманные карты не должны
+  # попасть в общий топик даже на миг.
+  defp private(state, user_id, event, payload) do
+    PubSub.broadcast(
+      @pubsub,
+      Tournaments.topic(state.tournament_id),
+      {:tournament_private, user_id, event, Map.put(payload, :tournament_id, state.tournament_id)}
     )
   end
 end

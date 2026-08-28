@@ -145,6 +145,16 @@ defmodule Socket.Channels.TournamentChannel do
     {:noreply, socket}
   end
 
+  # Личное событие адресовано одному участнику: каналы остальных молча
+  # его пропускают. Карманные карты его раздач — знание о нём, и в общем
+  # топике турнира им не место.
+  def handle_info({:tournament_private, user_id, event, payload}, socket) do
+    if socket.assigns.user_id == user_id,
+      do: push(socket, event, TournamentView.event(event, payload))
+
+    {:noreply, socket}
+  end
+
   # Витрина: инстанс изменился — перечитываем строку и отдаём, если она
   # проходит фильтр подписчика. Отсеянное до клиента не доезжает: иначе
   # ему пришлось бы знать правила фильтрации.
