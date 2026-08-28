@@ -327,7 +327,7 @@ defmodule BlockPoker.Tournaments do
          levels: blind_schedule(tournament.setting),
          level_flags: level_flags(tournament.setting),
          payouts: card_payouts(tournament),
-         chip_counts: chip_counts(tournament, limit, offset)
+         chip_counts: chip_counts(tournament, limit, offset, Keyword.get(opts, :user_id))
        }}
     end
   end
@@ -370,7 +370,7 @@ defmodule BlockPoker.Tournaments do
   # его только снимком рассадки. Поэтому у идущего турнира страница
   # собирается в памяти — иначе порядок «по стеку» пришлось бы считать
   # запросом к тому, чего в таблице нет.
-  defp chip_counts(tournament, limit, offset) do
+  defp chip_counts(tournament, limit, offset, user_id) do
     query =
       from(e in Entry, as: :entry)
       |> where([e], e.tournament_id == ^tournament.id)
@@ -380,16 +380,35 @@ defmodule BlockPoker.Tournaments do
 
     total = Repo.aggregate(query, :count)
 
-    rows =
+    {rows, me} =
       case live_players(tournament.id) do
         nil ->
-          query |> page(limit, offset) |> Repo.all() |> Enum.map(&row(&1, nil))
+          # Турнир не поднят: стеков нет, ранга по фишкам не существует —
+          # искать в этом списке «себя с местом» нечего.
+          {query |> page(limit, offset) |> Repo.all() |> Enum.map(&row(&1, nil)), nil}
 
         players ->
-          query |> Repo.all() |> rank_by_stack(players) |> Enum.slice(offset, limit)
+          ranked = query |> Repo.all() |> rank_by_stack(players)
+
+          {Enum.slice(ranked, offset, limit), mine(ranked, user_id)}
       end
 
-    %{entries: rows, total: total, limit: limit, offset: offset}
+    %{entries: rows, total: total, limit: limit, offset: offset, me: me}
+  end
+
+  # Своя строка с **абсолютным** рангом, вне зависимости от страницы.
+  # Нужна тем, кто смотрит только верх списка: игроку сотому по стеку
+  # верхняя десятка не говорит ничего, пока рядом с ней нет его самого,
+  # а листать за собой по страницам ради одной строки — работа, которую
+  # клиент делать не должен.
+  defp mine(_ranked, nil), do: nil
+
+  defp mine(ranked, user_id) do
+    ranked
+    |> Enum.with_index(1)
+    |> Enum.find_value(fn {row, rank} ->
+      if row.user_id == user_id and row.status == :playing, do: %{row: row, rank: rank}
+    end)
   end
 
   # Вход, отменённый ре-энтри, из чипсчёта убирается: вылета не было,

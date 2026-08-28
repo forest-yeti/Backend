@@ -288,6 +288,13 @@ defmodule Socket.Channels.TournamentChannelTest do
       assert row.stack > 0
       assert row.table_id != nil
       assert row.user_id != nil
+
+      # Своя строка едет отдельно и с абсолютным рангом: игрок сотый по
+      # стеку не должен листать страницы, чтобы найти себя рядом с
+      # верхней десяткой.
+      assert card.chip_counts.me != nil
+      assert card.chip_counts.me.user_id == ctx.user.id
+      assert card.chip_counts.me.rank > 0
     end
 
     test "несуществующий турнир — ошибка, а не падение", ctx do

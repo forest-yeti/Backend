@@ -71,7 +71,7 @@ defmodule Socket.Channels.TournamentChannel do
   def handle_in("tournament_card", payload, socket) do
     with {:ok, tournament_id} <- Message.fetch_id(payload, "tournament_id") do
       tournament_id
-      |> Tournaments.card(offset: offset(payload))
+      |> Tournaments.card(offset: offset(payload), user_id: socket.assigns.user_id)
       |> case do
         {:ok, card} -> {:reply, {:ok, TournamentView.card(card)}, socket}
         {:error, code} -> Message.error_reply(code, socket)

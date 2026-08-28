@@ -166,9 +166,15 @@ defmodule Socket.Views.TournamentView do
         |> Enum.map(fn {entry, rank} -> chip_row(entry, rank) end),
       total: counts.total,
       limit: counts.limit,
-      offset: counts.offset
+      offset: counts.offset,
+      # Своя строка едет отдельным полем, а не подмешивается в список:
+      # иначе она нарушила бы ранжирование страницы.
+      me: mine(Map.get(counts, :me))
     }
   end
+
+  defp mine(nil), do: nil
+  defp mine(%{row: row, rank: rank}), do: chip_row(row, rank)
 
   defp chip_row(entry, rank) do
     %{
