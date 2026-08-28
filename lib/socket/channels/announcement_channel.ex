@@ -10,6 +10,11 @@ defmodule Socket.Channels.AnnouncementChannel do
   Подписка открыта любому аутентифицированному соединению: содержимое
   объявления одинаково для всех, приватного в нём ничего нет.
 
+  Тем же топиком ходит звук, отправленный всему залу
+  (`BlockPoker.Sounds`): множество получателей у него ровно то же, и
+  вторая подписка на тех же самых людей ничего бы не дала. Звук в
+  конкретную комнату сюда не попадает — он идёт событием стола.
+
   Клиент присылать сюда ничего не может — канал односторонний.
   """
 
@@ -33,6 +38,14 @@ defmodule Socket.Channels.AnnouncementChannel do
       text: announcement.text,
       at: DateTime.to_iso8601(announcement.at)
     })
+
+    {:noreply, socket}
+  end
+
+  # Звук всему залу. Событие приходит из контекста готовым — рендерить в
+  # нём нечего вовсе.
+  def handle_info({:sound, sound}, socket) do
+    push(socket, "sound", sound)
 
     {:noreply, socket}
   end

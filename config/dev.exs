@@ -86,3 +86,15 @@ config :block_poker, :client_release,
 config :block_poker, :banners,
   dir: "priv/banners",
   base_url: "http://localhost:4000/banners"
+
+# Звуки: там же и так же.
+config :block_poker, :sounds,
+  dir: "priv/sounds",
+  base_url: "http://localhost:4000/sounds"
+
+# Ограничение частоты HTTP-запросов выключено в dev: 10 логинов за 5 минут
+# на IP выбираются перезапусками клиента за один заход, и разработка упирается
+# в защиту от перебора, которую защищать не от кого — с локальной машины
+# ходит один человек. В test флаг не трогаем (там лимит проверяется тестом),
+# в прод не переносим.
+config :block_poker, Api.Plugs.RateLimit, enabled: false

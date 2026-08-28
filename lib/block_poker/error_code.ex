@@ -33,6 +33,12 @@ defmodule BlockPoker.ErrorCode do
           | :image_too_large
           | :announcement_text_required
           | :announcement_too_long
+          | :sound_title_required
+          | :sound_file_required
+          | :sounds_dir_not_configured
+          | :unsupported_audio_type
+          | :audio_too_large
+          | :invalid_sound_target
           | :insufficient_funds
           | :seat_taken
           | :already_seated
@@ -91,6 +97,24 @@ defmodule BlockPoker.ErrorCode do
           | :admin_self_target
           | :admin_room_not_found
           | :admin_observer_disabled
+          | :admin_setting_not_found
+          | :no_blind_levels
+          | :no_first_level
+          | :levels_not_contiguous
+          | :rebuy_not_monotonic
+          | :rebuy_never_closes
+          | :addon_without_cost
+          | :addon_on_many_levels
+          | :no_prize_tiers
+          | :chances_do_not_sum
+          | :no_payouts
+          | :entries_gap
+          | :entries_overlap
+          | :places_not_contiguous
+          | :shares_do_not_sum
+          | :shares_increase
+          | :too_many_paid_places
+          | :tournament_not_running
           | :internal_error
 
   @codes %{
@@ -127,6 +151,14 @@ defmodule BlockPoker.ErrorCode do
     # Объявление всем игрокам.
     announcement_text_required: {422, "Текст объявления обязателен"},
     announcement_too_long: {422, "Текст объявления слишком длинный"},
+    # Звуки администрации. Формат проверяется по содержимому файла, а не
+    # по расширению (§ `BlockPoker.Sounds.Storage`).
+    sound_title_required: {422, "У звука должно быть название"},
+    sound_file_required: {422, "Файл звука не приложен"},
+    sounds_dir_not_configured: {503, "Каталог звуков на сервере не настроен"},
+    unsupported_audio_type: {422, "Поддерживаются MP3, OGG и WAV"},
+    audio_too_large: {422, "Файл звука больше 5 МБ"},
+    invalid_sound_target: {422, "Неизвестный адресат воспроизведения"},
     insufficient_funds: {422, "Недостаточно средств"},
     seat_taken: {409, "Место уже занято"},
     already_seated: {409, "Вы уже сидите за этим столом"},
@@ -188,6 +220,29 @@ defmodule BlockPoker.ErrorCode do
     admin_self_target: {422, "Себе начислять и списывать нельзя"},
     admin_room_not_found: {404, "Комната не найдена"},
     admin_observer_disabled: {403, "Наблюдение за столами выключено"},
+    admin_setting_not_found: {404, "Шаблон не найден"},
+
+    # Проверка шаблона турнира и Sit & Go целиком. Коды доменные и
+    # приходят из ядра как есть: панель показывает оператору, чем именно
+    # структура не годится, а не «ошибка сохранения». Каждый из них —
+    # турнир, который нельзя доиграть или нечем закончить.
+    no_blind_levels: {422, "В структуре нет ни одного уровня"},
+    no_first_level: {422, "Структура не начинается с первого уровня"},
+    levels_not_contiguous: {422, "Уровни идут с пропусками"},
+    rebuy_not_monotonic: {422, "Ре-энтри закрылись и снова открылись"},
+    rebuy_never_closes: {422, "На последнем уровне регистрация не закрывается"},
+    addon_without_cost: {422, "Аддон разрешён, но цена его не задана"},
+    addon_on_many_levels: {422, "Аддон разрешён больше чем на одном уровне"},
+    no_prize_tiers: {422, "Таблица призов пуста"},
+    chances_do_not_sum: {422, "Шансы таблицы призов не складываются в полную шкалу"},
+    no_payouts: {422, "Сетка выплат пуста"},
+    entries_gap: {422, "В сетке выплат есть явка, для которой нет строки"},
+    entries_overlap: {422, "Полосы явки в сетке выплат пересекаются"},
+    places_not_contiguous: {422, "Места в сетке выплат идут с пропусками"},
+    shares_do_not_sum: {422, "Доли выплат не складываются в целый фонд"},
+    shares_increase: {422, "Доля за нижнее место больше, чем за верхнее"},
+    too_many_paid_places: {422, "Призовых мест больше, чем игроков"},
+    tournament_not_running: {409, "Турнир не идёт"},
     internal_error: {500, "Внутренняя ошибка"}
   }
 

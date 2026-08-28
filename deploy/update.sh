@@ -99,6 +99,7 @@ systemctl list-unit-files "${SERVICE}.service" --no-legend | grep -q . \
 
 UPDATES_DIR="${UPDATES_DIR:-$BASE_DIR/client_updates}"
 BANNERS_DIR="${BANNERS_DIR:-$BASE_DIR/banners}"
+SOUNDS_DIR="${SOUNDS_DIR:-$BASE_DIR/sounds}"
 
 # `if`, а не `grep ... && return`: под `set -e` составное выражение с
 # коротким замыканием возвращает ненулевой статус и роняет весь деплой
@@ -149,10 +150,20 @@ else
   warn "в $ENV_FILE нет PHX_HOST — BANNERS_BASE_URL не добавлен, адреса картинок останутся относительными"
 fi
 
+# Звуки администрации: тот же каталог-и-адрес, что и у баннеров.
+if [[ -n "$PHX_HOST_NOW" ]]; then
+  add_env SOUNDS_BASE_URL "${UPDATES_SCHEME}://${PHX_HOST_NOW}/sounds"
+fi
+
 add_env BANNERS_DIR "$BANNERS_DIR"
 
 mkdir -p "$BANNERS_DIR"
 chown -R "$APP_USER:$APP_USER" "$BANNERS_DIR"
+
+add_env SOUNDS_DIR "$SOUNDS_DIR"
+
+mkdir -p "$SOUNDS_DIR"
+chown -R "$APP_USER:$APP_USER" "$SOUNDS_DIR"
 
 
 # --------------------------------------------------------------------------

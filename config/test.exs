@@ -69,3 +69,7 @@ config :block_poker, :tournament_autostart, false
 config :block_poker, :banners,
   dir: Path.expand("../tmp/banners", __DIR__),
   base_url: "http://localhost/banners"
+
+config :block_poker, :sounds,
+  dir: Path.expand("../tmp/sounds", __DIR__),
+  base_url: "http://localhost/sounds"

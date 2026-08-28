@@ -18,10 +18,23 @@ defmodule BlockPoker.Admin do
   """
 
   alias BlockPoker.Accounts.User
-  alias BlockPoker.Admin.{AdminSession, Audit, Auth, Context, Games, Money, Observer, People}
+
+  alias BlockPoker.Admin.{
+    AdminSession,
+    Audit,
+    Auth,
+    Context,
+    Games,
+    Grids,
+    Money,
+    Observer,
+    People
+  }
+
   alias BlockPoker.Announcements
   alias BlockPoker.Banners
   alias BlockPoker.ClientReleases
+  alias BlockPoker.Sounds
 
   @type ctx :: Context.t()
 
@@ -157,6 +170,44 @@ defmodule BlockPoker.Admin do
     with :ok <- allowed(ctx), do: Announcements.announce(ctx, attrs)
   end
 
+  # --- звуки ------------------------------------------------------------------
+
+  @spec sounds(ctx()) :: {:ok, [map()]} | {:error, atom()}
+  def sounds(%Context{} = ctx) do
+    with :ok <- allowed(ctx), do: {:ok, Sounds.list()}
+  end
+
+  @doc """
+  Загрузка звука в библиотеку. `attrs` — название и путь к временному
+  файлу: разбирать multipart умеет транспорт, решать судьбу файла —
+  только контекст.
+  """
+  @spec upload_sound(ctx(), map()) :: {:ok, map()} | {:error, atom() | Ecto.Changeset.t()}
+  def upload_sound(%Context{} = ctx, attrs) do
+    with :ok <- allowed(ctx), do: Sounds.create(ctx, attrs)
+  end
+
+  @spec delete_sound(ctx(), Ecto.UUID.t()) :: :ok | {:error, atom()}
+  def delete_sound(%Context{} = ctx, id) do
+    with :ok <- allowed(ctx), do: Sounds.delete(ctx, id)
+  end
+
+  @doc """
+  Адресат по строке списка игр. Прав не требует: это разбор значения, а
+  не действие, — как и `kind/1`.
+  """
+  @spec sound_target(atom(), String.t()) :: Sounds.target()
+  defdelegate sound_target(kind, id), to: Sounds, as: :target
+
+  @doc """
+  Воспроизведение звука у адресата: комната, турнир целиком или весь зал.
+  Отозвать отправленное нельзя — см. `BlockPoker.Sounds`.
+  """
+  @spec play_sound(ctx(), Sounds.target(), Ecto.UUID.t()) :: {:ok, map()} | {:error, atom()}
+  def play_sound(%Context{} = ctx, target, sound_id) do
+    with :ok <- allowed(ctx), do: Sounds.play(ctx, target, sound_id)
+  end
+
   # --- игры -----------------------------------------------------------------
 
   @spec live_games(ctx(), atom()) :: {:ok, [map()]} | {:error, atom()}
@@ -186,9 +237,99 @@ defmodule BlockPoker.Admin do
   @spec tournament_topic(Ecto.UUID.t()) :: String.t()
   defdelegate tournament_topic(tournament_id), to: Games, as: :topic
 
+  @doc """
+  Остановка, возобновление и снятие идущего турнира.
+
+  Единственные операции панели, которые вмешиваются в игру, а не в
+  учётку. Причина обязательна: без неё в журнале остаётся «кто-то
+  остановил», а это не ответ ни на один вопрос, который зададут потом.
+  """
+  @spec pause_tournament(ctx(), Ecto.UUID.t(), String.t() | nil) ::
+          {:ok, map()} | {:error, atom()}
+  def pause_tournament(%Context{} = ctx, tournament_id, reason) do
+    with :ok <- allowed(ctx), do: Games.pause_tournament(ctx, tournament_id, reason)
+  end
+
+  @spec resume_tournament(ctx(), Ecto.UUID.t(), String.t() | nil) ::
+          {:ok, map()} | {:error, atom()}
+  def resume_tournament(%Context{} = ctx, tournament_id, reason) do
+    with :ok <- allowed(ctx), do: Games.resume_tournament(ctx, tournament_id, reason)
+  end
+
+  @spec cancel_tournament(ctx(), Ecto.UUID.t(), String.t() | nil) ::
+          {:ok, map()} | {:error, atom()}
+  def cancel_tournament(%Context{} = ctx, tournament_id, reason) do
+    with :ok <- allowed(ctx), do: Games.cancel_tournament(ctx, tournament_id, reason)
+  end
+
   @spec game_card(ctx(), atom(), String.t()) :: {:ok, map()} | {:error, atom()}
   def game_card(%Context{} = ctx, kind, id) do
     with :ok <- allowed(ctx), do: Games.game_card(kind, id)
+  end
+
+  # --- сетки ----------------------------------------------------------------
+
+  @doc """
+  Сетка режима: шаблоны, из которых поднимаются комнаты и турниры.
+
+  Пара к `live_games/2` и её противоположность: там процессы, здесь
+  строки, из которых процессы разворачиваются.
+  """
+  @spec grids(ctx(), atom(), keyword()) :: {:ok, [map()]} | {:error, atom()}
+  def grids(%Context{} = ctx, kind, opts \\ []) do
+    with :ok <- allowed(ctx), do: {:ok, Grids.list(kind, opts)}
+  end
+
+  @spec grid(ctx(), atom(), Ecto.UUID.t()) :: {:ok, map()} | {:error, atom()}
+  def grid(%Context{} = ctx, kind, id) do
+    with :ok <- allowed(ctx), do: Grids.get(kind, id)
+  end
+
+  @doc """
+  Справочник для форм панели. Права требует так же, как остальное:
+  список видов покера — не публичное знание.
+  """
+  @spec grid_meta(ctx()) :: {:ok, map()} | {:error, atom()}
+  def grid_meta(%Context{} = ctx) do
+    with :ok <- allowed(ctx), do: {:ok, Grids.meta()}
+  end
+
+  @doc """
+  Вид сетки из строки с провода. Права не требует: разбор значения,
+  а не операция.
+  """
+  @spec grid_kind(term()) :: {:ok, atom()} | {:error, :validation_failed}
+  defdelegate grid_kind(value), to: Grids, as: :kind
+
+  @spec create_grid(ctx(), atom(), map()) ::
+          {:ok, map()} | {:error, atom() | Ecto.Changeset.t()}
+  def create_grid(%Context{} = ctx, kind, attrs) do
+    with :ok <- allowed(ctx), do: Grids.create(ctx, kind, attrs)
+  end
+
+  @spec update_grid(ctx(), atom(), Ecto.UUID.t(), map()) ::
+          {:ok, map()} | {:error, atom() | Ecto.Changeset.t()}
+  def update_grid(%Context{} = ctx, kind, id, attrs) do
+    with :ok <- allowed(ctx), do: Grids.update(ctx, kind, id, attrs)
+  end
+
+  @doc "Снятие шаблона с сетки. Удаления строки не бывает: см. `Admin.Grids`."
+  @spec archive_grid(ctx(), atom(), Ecto.UUID.t(), String.t() | nil) ::
+          {:ok, map()} | {:error, atom() | Ecto.Changeset.t()}
+  def archive_grid(%Context{} = ctx, kind, id, reason) do
+    with :ok <- allowed(ctx), do: Grids.archive(ctx, kind, id, reason)
+  end
+
+  @spec restore_grid(ctx(), atom(), Ecto.UUID.t()) ::
+          {:ok, map()} | {:error, atom() | Ecto.Changeset.t()}
+  def restore_grid(%Context{} = ctx, kind, id) do
+    with :ok <- allowed(ctx), do: Grids.restore(ctx, kind, id)
+  end
+
+  @doc "«Не жди таймера»: витрины перечитывают сетку немедленно."
+  @spec apply_grids(ctx()) :: {:ok, map()} | {:error, atom()}
+  def apply_grids(%Context{} = ctx) do
+    with :ok <- allowed(ctx), do: Grids.apply(ctx)
   end
 
   # --- журнал ---------------------------------------------------------------

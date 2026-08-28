@@ -32,6 +32,9 @@ defmodule Socket.Endpoint do
   # причинам: разбирать их тело как JSON незачем.
   plug Api.Plugs.BannerImages
 
+  # Звуки администрации — та же статика и по тем же причинам.
+  plug Api.Plugs.SoundFiles
+
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
@@ -49,6 +52,9 @@ defmodule Socket.Endpoint do
   # Загрузка картинки баннера: свой multipart и свой — маленький —
   # предел размера. Общий парсер multipart не понимает вовсе.
   plug Api.Plugs.BannerUpload
+
+  # Загрузка звука: свой multipart и свой предел размера.
+  plug Api.Plugs.SoundUpload
 
   plug Plug.Parsers,
     parsers: [:urlencoded, :json],

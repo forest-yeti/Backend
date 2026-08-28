@@ -46,6 +46,7 @@ REL_DIR="$BASE_DIR/current"
 ENV_FILE="/etc/block_poker.env"
 UPDATES_DIR="${UPDATES_DIR:-$BASE_DIR/client_updates}"
 BANNERS_DIR="${BANNERS_DIR:-$BASE_DIR/banners}"
+SOUNDS_DIR="${SOUNDS_DIR:-$BASE_DIR/sounds}"
 DB_NAME="block-poker"
 DB_USER="blockpoker"
 ELIXIR_VERSION="${ELIXIR_VERSION:-1.18.4}"
@@ -302,7 +303,8 @@ fi
 # Владелец — служебный пользователь: пишет в него нода, а не root.
 # `banners` — картинки баннеров: панель кладёт их туда, приложение
 # раздаёт по `/banners`. Владелец тот же и по той же причине.
-mkdir -p "$SRC_DIR" "$REL_DIR" "$UPDATES_DIR" "$BANNERS_DIR"
+# `sounds` — звуки администрации: то же устройство, что и у баннеров.
+mkdir -p "$SRC_DIR" "$REL_DIR" "$UPDATES_DIR" "$BANNERS_DIR" "$SOUNDS_DIR"
 chown -R "$APP_USER:$APP_USER" "$BASE_DIR"
 
 # --------------------------------------------------------------------------
@@ -377,6 +379,9 @@ CLIENT_FEED_URL=${CLIENT_FEED_URL:-${UPDATES_SCHEME}://${DOMAIN}/client-updates/
 # грузит картинку напрямую, а не через API.
 BANNERS_DIR=${BANNERS_DIR}
 BANNERS_BASE_URL=${UPDATES_SCHEME}://${DOMAIN}/banners
+# Звуки администрации: та же схема, раздача по `/sounds`.
+SOUNDS_DIR=${SOUNDS_DIR}
+SOUNDS_BASE_URL=${UPDATES_SCHEME}://${DOMAIN}/sounds
 MIX_ENV=prod
 LANG=C.UTF-8
 ENV
@@ -576,6 +581,17 @@ server {
     # доменных 5 МБ ровно настолько, чтобы отказ выдавало приложение
     # понятным кодом, а не прокси — молча.
     location /admin/banners {
+        proxy_pass http://127.0.0.1:4000;
+        proxy_http_version 1.1;
+        client_max_body_size 8m;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    # Загрузка звука. Предел тот же и по той же причине, что у баннера.
+    location /admin/sounds {
         proxy_pass http://127.0.0.1:4000;
         proxy_http_version 1.1;
         client_max_body_size 8m;

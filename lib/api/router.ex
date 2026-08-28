@@ -109,6 +109,31 @@ defmodule Api.Router do
     get "/games", GameController, :index
     get "/games/:kind/:id", GameController, :show
 
+    # Вмешательство в идущую игру. По HTTP, а не сообщением канала
+    # `admin:tournament:<id>`: у действия есть `reason` и запись в
+    # журнале, то есть тело и ответ, — а канал панели только смотрит.
+    post "/games/mtt/:id/pause", GameController, :pause
+    post "/games/mtt/:id/resume", GameController, :resume
+    post "/games/mtt/:id/cancel", GameController, :cancel
+
+    # Сетки режимов: то, из чего рум состоит. Ручка одна на четыре
+    # режима — `kind` едет в пути и разбирается ядром.
+    #
+    # `apply` и `meta` стоят выше `:kind`, потому что Phoenix читает
+    # маршруты по порядку, и «apply» иначе уехало бы в шаблон режима
+    # с таким именем.
+    get "/settings", GridController, :index
+    get "/settings/meta", GridController, :meta
+    post "/settings/apply", GridController, :apply
+    get "/settings/:kind/:id", GridController, :show
+    post "/settings/:kind", GridController, :create
+    patch "/settings/:kind/:id", GridController, :update
+
+    # Удаления нет: на строку шаблона ссылается история раздач, поэтому
+    # он снимается с сетки и возвращается, а не исчезает.
+    post "/settings/:kind/:id/archive", GridController, :archive
+    post "/settings/:kind/:id/restore", GridController, :restore
+
     get "/audit", AuditController, :index
 
     # Сборки клиента. Загрузка — единственная ручка панели с файлом, и
@@ -130,5 +155,19 @@ defmodule Api.Router do
     # Объявление всем игрокам. Ручка только создаёт: объявление —
     # событие, а не запись, читать и отзывать нечего.
     post "/announcements", AnnouncementController, :create
+
+    # Звуки. Библиотека — сущность (загрузили один раз, играем много),
+    # само воспроизведение — событие: отозвать его нечем, поэтому ручки
+    # «остановить» нет. Тело загрузки — multipart, его разбирает
+    # `Api.Plugs.SoundUpload` со своим небольшим пределом размера.
+    get "/sounds", SoundController, :index
+    post "/sounds", SoundController, :create
+    delete "/sounds/:id", SoundController, :delete
+    post "/sounds/:id/play", SoundController, :play_everyone
+
+    # Звук в конкретную игру. Живёт в адресном пространстве игр, а не
+    # звуков, потому что выбирают здесь именно игру: `:mtt` — это турнир
+    # целиком со всеми его столами, остальные виды — одна комната.
+    post "/games/:kind/:id/sound", SoundController, :play_game
   end
 end

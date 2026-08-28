@@ -36,7 +36,15 @@ defmodule BlockPoker.Admin.AdminAudit do
     :client_release_delete,
     :banner_update,
     :banner_delete,
-    :announcement
+    :announcement,
+    :sound_upload,
+    :sound_delete,
+    :sound_play,
+    :grid_create,
+    :grid_update,
+    :grid_archive,
+    :grid_restore,
+    :grid_reload
   ]
 
   @subject_types [
@@ -46,14 +54,30 @@ defmodule BlockPoker.Admin.AdminAudit do
     :wallet,
     :client_release,
     :banner,
-    :announcement
+    :announcement,
+    :sound,
+    :game_setting
   ]
   @currencies [:main, :play_money]
 
   # Действия, у которых причина обязательна: без неё запись бесполезна
   # (§7 задачи 8). Чтение и вход причины не требуют — она в них не значит
   # ничего, кроме лишнего поля в форме.
-  @requires_reason [:ban_user, :unban_user, :credit, :debit_to_admin]
+  @requires_reason [
+    :ban_user,
+    :unban_user,
+    :credit,
+    :debit_to_admin,
+    # Вмешательство в идущую игру объясняется всегда: остановленный или
+    # снятый турнир — это чужие деньги и чужой вечер, и «кто-то нажал»
+    # здесь не ответ.
+    :pause_tournament,
+    :resume_tournament,
+    :cancel_tournament,
+    # Снятый с сетки лимит — это закрытые столы и разосланные по кошелькам
+    # фишки. «Кто-то нажал» здесь такой же не-ответ, как и у турнира.
+    :grid_archive
+  ]
 
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id

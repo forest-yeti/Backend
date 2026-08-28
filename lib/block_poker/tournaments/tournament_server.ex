@@ -123,6 +123,9 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       # Hand-for-hand на баббле: `nil` — обычная игра;
       # `%{waiting: MapSet}` — идёт синхронный круг.
       hand_for_hand: nil,
+      # Остановлен администратором: столы стоят, часы уровня и перерыва
+      # не идут. Не статус — статус турнира при этом прежний.
+      paused?: false,
       # Вылеты, по которым идёт окно ре-энтри: место зарезервировано,
       # но ещё не присвоено. `%{entry_id => %{place, user_id, timer}}`.
       pending_reentries: %{},
@@ -200,6 +203,14 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   def players(tournament), do: GenServer.call(server(tournament), :players)
 
   @doc """
+  Комнаты турнира. В снимок не входят: подписчику лобби нужен их счёт, а
+  не список, а вот адресная рассылка по столам (звук администрации)
+  без идентификаторов невозможна.
+  """
+  @spec table_ids(Ecto.UUID.t() | pid()) :: [Ecto.UUID.t()]
+  def table_ids(tournament), do: GenServer.call(server(tournament), :table_ids)
+
+  @doc """
   Рассадка **до** старта: столы поднимаются и игроки садятся за минуту до
   начала, а раздача не идёт.
 
@@ -254,6 +265,28 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   @doc "Прогон таймера вручную — для тестов на инжектированных часах."
   @spec fire(Ecto.UUID.t() | pid(), atom()) :: :ok
   def fire(tournament, timer), do: GenServer.call(server(tournament), {:fire, timer})
+
+  @doc """
+  Останавливает турнир: столы замирают, часы уровня и перерыва стоят.
+
+  Ручной инструмент разбора инцидента. Пауза переживает рестарт ноды —
+  отметка о ней пишется в `tournaments.paused_at` той же операцией.
+  """
+  @spec pause(GenServer.server() | Ecto.UUID.t()) :: :ok | {:error, atom()}
+  def pause(tournament), do: GenServer.call(server(tournament), :pause)
+
+  @doc "Снимает паузу: часы идут дальше с того места, где встали."
+  @spec resume(GenServer.server() | Ecto.UUID.t()) :: :ok | {:error, atom()}
+  def resume(tournament), do: GenServer.call(server(tournament), :resume)
+
+  @doc """
+  Снимает турнир целиком: возвраты всем, столы гаснут, процесс кончается.
+
+  Возвращает число входов, которым вернули взнос.
+  """
+  @spec abort(GenServer.server() | Ecto.UUID.t()) ::
+          {:ok, non_neg_integer()} | {:error, atom()}
+  def abort(tournament), do: GenServer.call(server(tournament), :abort)
 
   defp server(pid) when is_pid(pid), do: pid
   defp server(tournament_id), do: via(tournament_id)
@@ -321,14 +354,20 @@ defmodule BlockPoker.Tournaments.TournamentServer do
         | level: snapshot.level,
           hands_played: snapshot.hands_played,
           late_reg_until: tournament.late_reg_until,
+          # Остановленный администратором турнир обязан подняться
+          # остановленным: иначе рестарт ноды снимал бы паузу сам собой
+          # ровно посреди разбора, ради которого её и ставили.
+          paused?: Tournament.paused?(tournament),
           results: restored_results(tournament.id)
       }
       |> adopt_tables(snapshot)
       |> restore_players(entries, snapshot)
 
     # Стол мог остаться на паузе — турнир упал на перерыве или посреди
-    # круга hand-for-hand, а снять паузу было уже некому.
-    resume_tables(state)
+    # круга hand-for-hand, а снять паузу было уже некому. И наоборот:
+    # поднятый стол остановленного турнира надо остановить, потому что
+    # сам он про паузу не знает — она свойство турнира.
+    if state.paused?, do: pause_tables(state), else: resume_tables(state)
 
     state
     |> arm_level()
@@ -495,6 +534,8 @@ defmodule BlockPoker.Tournaments.TournamentServer do
 
   def handle_call(:players, _from, state), do: {:reply, Map.values(state.players), state}
 
+  def handle_call(:table_ids, _from, state), do: {:reply, Map.keys(state.tables), state}
+
   def handle_call(:start, _from, %State{status: status} = state)
       when status in [:running, :late_reg_closed, :finishing, :finished] do
     {:reply, {:error, :tournament_started}, state}
@@ -593,6 +634,35 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   def handle_call({:addon, user_id}, _from, state) do
     case do_addon(state, user_id) do
       {:ok, stack, state} -> {:reply, {:ok, %{stack: stack}}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  # Пауза идемпотентна: повторный вызов не двигает ни часы, ни столы.
+  def handle_call(:pause, _from, %State{paused?: true} = state), do: {:reply, :ok, state}
+
+  def handle_call(:pause, _from, state) do
+    case Tournaments.pause(state.tournament_id) do
+      {:ok, _tournament} -> {:reply, :ok, do_pause(state)}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(:resume, _from, %State{paused?: false} = state), do: {:reply, :ok, state}
+
+  def handle_call(:resume, _from, state) do
+    case Tournaments.resume(state.tournament_id) do
+      {:ok, _tournament} -> {:reply, :ok, do_resume(state)}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  # Деньги возвращает контекст, столы гасит процесс — и только после
+  # того, как возвраты прошли. Обратный порядок оставил бы игроков без
+  # стола при неудачной транзакции.
+  def handle_call(:abort, _from, state) do
+    case Tournaments.abort(state.tournament_id) do
+      {:ok, count} -> {:stop, :normal, {:ok, count}, do_abort(state)}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -1164,7 +1234,86 @@ defmodule BlockPoker.Tournaments.TournamentServer do
     end
   end
 
+  # --- Пауза ---------------------------------------------------------------
+
+  # Что именно останавливается. Столы — потому что раздавать нельзя;
+  # часы уровня — потому что иначе простой съел бы уровень целиком и
+  # игроки вернулись бы на блайндах, которых не видели; таймер перерыва —
+  # потому что перерыв посреди паузы бессмыслен.
+  #
+  # Окно поздней регистрации при этом **не трогается**: оно объявлено
+  # игрокам стенными часами (`late_reg_until`), и сдвинуть его паузой
+  # значило бы разойтись с тем, что уже показано в лобби и что проверяет
+  # `Tournaments.check_slot/5`.
+  defp do_pause(state) do
+    state = pause_level(state)
+    state = %{state | paused?: true, break_timer: cancel(state.break_timer)}
+
+    pause_tables(state)
+    broadcast(state, "tournament_paused", %{})
+
+    state
+  end
+
+  # Снятие паузы — не «начать заново», а «продолжить с того места».
+  # Уровень получает остаток своего времени (`level_elapsed_ms` копится
+  # с паузы), перерыв — остаток своего.
+  defp do_resume(state) do
+    state = %{state | paused?: false}
+    broadcast(state, "tournament_resumed", %{})
+
+    cond do
+      state.break == nil ->
+        state = state |> arm_level() |> arm_break()
+        resume_tables(state)
+        state
+
+      # Перерыв кончился, пока турнир стоял: пауза его не удлиняет —
+      # отдых отсчитан стенными часами и игроки его получили.
+      break_over?(state) ->
+        end_break(state)
+
+      true ->
+        case break_ends_in_ms(state) do
+          # Пять минут ещё не пошли: столы доигрывают начатое, и конец
+          # перерыва взведёт `arm_break_end/1`, когда доиграет последний.
+          nil -> state
+          left -> %{state | break_timer: schedule(:break_over, left)}
+        end
+    end
+  end
+
+  defp break_over?(%State{break: %{ends_at: nil}}), do: false
+
+  defp break_over?(%State{break: %{ends_at: ends_at}} = state) do
+    DateTime.compare(state.wall.(), ends_at) != :lt
+  end
+
+  # Турнир снят. Деньги уже вернулись — здесь только столы и события.
+  #
+  # Событие уходит **до** остановки столов: канал стола умрёт вместе с
+  # процессом, и игрок, услышавший только тишину, не узнал бы, что
+  # случилось. Порядок тот же, что у итога турнира (`maybe_finish/1`),
+  # только без пятнадцати секунд ожидания: показывать здесь нечего.
+  defp do_abort(state) do
+    broadcast(state, "tournament_cancelled", %{})
+    notify_tables(state, "tournament_cancelled", %{})
+
+    Enum.each(state.tables, fn {table_id, pid} ->
+      PubSub.unsubscribe(@pubsub, TableServer.topic(table_id))
+      TableSupervisor.stop_room(pid)
+    end)
+
+    %{state | tables: %{}, status: :cancelled, paused?: false}
+  end
+
   # --- Уровни --------------------------------------------------------------
+
+  # Остановленный турнир таймеров не заводит: часы уровня стоят вместе со
+  # столами. Оговорка живёт здесь, а не в каждом вызывающем, потому что
+  # `arm_level/1` зовут пять разных мест, и пропущенное означало бы
+  # тикающий уровень при стоящих столах.
+  defp arm_level(%State{paused?: true} = state), do: state
 
   defp arm_level(state) do
     levels = TableSetting.levels(state.snapshot)
@@ -1224,6 +1373,8 @@ defmodule BlockPoker.Tournaments.TournamentServer do
   end
 
   # --- Перерывы ------------------------------------------------------------
+
+  defp arm_break(%State{paused?: true} = state), do: state
 
   defp arm_break(state) do
     %{state | break_timer: schedule(:break_due, TournamentBreak.until_stop_ms(state.wall.()))}
@@ -1544,6 +1695,11 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       :error -> :ok
     end
   end
+
+  # Пока турнир остановлен, столы не поднимает никто: ни конец перерыва,
+  # ни конец круга hand-for-hand. Тот же приём, что и у `arm_level/1` —
+  # запрет в одном месте вместо оговорки в каждом вызывающем.
+  defp resume_tables(%State{paused?: true}), do: :ok
 
   defp resume_tables(state) do
     Enum.each(state.tables, fn {_id, pid} -> send(pid, {:tournament_paused, false}) end)
@@ -2418,6 +2574,7 @@ defmodule BlockPoker.Tournaments.TournamentServer do
       entries: map_size(state.players),
       tables: map_size(state.tables),
       on_break: state.break != nil,
+      paused: state.paused?,
       # Сколько ещё стоять. `nil` при `on_break: true` означает не «нисколько»,
       # а «столы ещё доигрывают» — пять минут не начались (`start_break_clock/1`).
       break_ends_in_ms: break_ends_in_ms(state),

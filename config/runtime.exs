@@ -98,6 +98,12 @@ if config_env() == :prod do
     dir: System.get_env("BANNERS_DIR"),
     base_url: System.get_env("BANNERS_BASE_URL")
 
+  # Звуки администрации: та же пара переменных и та же логика пустого
+  # `SOUNDS_BASE_URL` — путь `/sounds/...` относительно адреса API.
+  config :block_poker, :sounds,
+    dir: System.get_env("SOUNDS_DIR"),
+    base_url: System.get_env("SOUNDS_BASE_URL")
+
   config :block_poker, Socket.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [

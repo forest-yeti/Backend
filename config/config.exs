@@ -42,6 +42,9 @@ config :block_poker, :client_release,
 # nginx или CDN, и бэкенд об этом знать не обязан.
 config :block_poker, :banners, dir: nil, base_url: nil
 
+# Звуки администрации — та же схема, что и у баннеров.
+config :block_poker, :sounds, dir: nil, base_url: nil
+
 # База часовых поясов. `tz` компилирует данные IANA в модули на сборке:
 # в рантайме нет ни сетевых загрузок, ни фонового процесса обновления.
 config :elixir, :time_zone_database, Tz.TimeZoneDatabase
