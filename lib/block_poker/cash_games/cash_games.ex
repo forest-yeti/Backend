@@ -2,12 +2,14 @@ defmodule BlockPoker.CashGames do
   @moduledoc """
   Контекст шаблонов кэш-игры.
 
-  Приложение шаблоны в основном **читает**: правятся они напрямую в БД (§8
-  задачи 3). Запись здесь нужна двум клиентам — `mix cash_game.seed` при
-  первичном наполнении и оператору из `iex`; HTTP-админки нет и не планируется.
+  Пишут в контекст трое: `mix cash_game.seed` при первичном наполнении,
+  оператор из `iex` и панель администратора через `Admin.Grids`.
 
-  Удаления шаблона нет вовсе: на строку ссылается история раздач. Лимит
-  убирается из лобби через `enabled = false`.
+  Удаления шаблона нет вовсе: на строку ссылается история раздач. Из сетки
+  лимит убирается двумя разными способами, и путать их нельзя. `enabled =
+  false` — «сегодня не раздаём», строка остаётся в списке оператора и
+  возвращается одним переключателем. `archived_at` — «этого лимита в руме
+  больше нет»: он исчезает и из витрины, и из обычного списка панели.
   """
 
   import Ecto.Query
@@ -15,9 +17,18 @@ defmodule BlockPoker.CashGames do
   alias BlockPoker.CashGames.CashGameSetting
   alias BlockPoker.Repo
 
-  @spec list_settings() :: [CashGameSetting.t()]
-  def list_settings do
+  @typedoc """
+  `archived: false` — только живые шаблоны (умолчание), `true` — только
+  снятые, `nil` — и те и другие. Списком по умолчанию пользуется `Lobby`,
+  и снятый шаблон обязан из него пропасть: тогда его комнаты уходят
+  в drain сами, по общему правилу «шаблона нет — комнат нет».
+  """
+  @type filter :: [archived: boolean() | nil]
+
+  @spec list_settings(filter()) :: [CashGameSetting.t()]
+  def list_settings(filter \\ []) do
     CashGameSetting
+    |> filter_archived(Keyword.get(filter, :archived, false))
     |> order_by(asc: :sort_order, asc: :small_blind, asc: :max_players)
     |> Repo.all()
   end
@@ -26,9 +37,16 @@ defmodule BlockPoker.CashGames do
   def list_enabled_settings do
     CashGameSetting
     |> where(enabled: true)
+    |> filter_archived(false)
     |> order_by(asc: :sort_order, asc: :small_blind, asc: :max_players)
     |> Repo.all()
   end
+
+  @doc false
+  @spec filter_archived(Ecto.Queryable.t(), boolean() | nil) :: Ecto.Queryable.t()
+  def filter_archived(query, nil), do: query
+  def filter_archived(query, false), do: where(query, [s], is_nil(s.archived_at))
+  def filter_archived(query, true), do: where(query, [s], not is_nil(s.archived_at))
 
   @spec get_setting(Ecto.UUID.t()) :: {:ok, CashGameSetting.t()} | {:error, :not_found}
   def get_setting(id) when is_binary(id) do
@@ -96,16 +114,18 @@ defmodule BlockPoker.CashGames do
   @spec create_private_setting(map(), non_neg_integer()) ::
           {:ok, CashGameSetting.t()} | {:error, Ecto.Changeset.t()}
   def create_private_setting(attrs, attempts \\ 5) do
+    # Ключи приводятся к строкам до подстановки своих: с провода приходит
+    # карта со строковыми ключами, и смешанную Ecto не принимает вовсе.
     attrs =
       attrs
-      |> Map.new()
-      |> Map.put(:visibility, :private)
-      |> Map.put(:code, CashGameSetting.generate_code())
+      |> Map.new(fn {key, value} -> {to_string(key), value} end)
+      |> Map.put("visibility", "private")
+      |> Map.put("code", CashGameSetting.generate_code())
 
     case create_setting(attrs) do
       {:error, changeset} when attempts > 0 ->
         if Keyword.has_key?(changeset.errors, :code) do
-          create_private_setting(Map.delete(attrs, :code), attempts - 1)
+          create_private_setting(Map.delete(attrs, "code"), attempts - 1)
         else
           {:error, changeset}
         end
@@ -127,6 +147,31 @@ defmodule BlockPoker.CashGames do
   def update_setting(%CashGameSetting{} = setting, attrs) do
     setting
     |> CashGameSetting.changeset(attrs)
+    |> Repo.update()
+  end
+
+  @doc """
+  Снятие шаблона с сетки. Строка остаётся ради истории, но выпадает
+  и из витрины, и из пула: `enabled` гасится **вместе** с отметкой, иначе
+  возвращённый из архива лимит молча начал бы раздавать сам.
+  """
+  @spec archive_setting(CashGameSetting.t()) ::
+          {:ok, CashGameSetting.t()} | {:error, Ecto.Changeset.t()}
+  def archive_setting(%CashGameSetting{} = setting) do
+    setting
+    |> Ecto.Changeset.change(archived_at: DateTime.utc_now(), enabled: false)
+    |> Repo.update()
+  end
+
+  @doc """
+  Возврат из архива. Шаблон возвращается **выключенным**: оператор сначала
+  смотрит, что в нём написано, и только потом пускает на него людей.
+  """
+  @spec restore_setting(CashGameSetting.t()) ::
+          {:ok, CashGameSetting.t()} | {:error, Ecto.Changeset.t()}
+  def restore_setting(%CashGameSetting{} = setting) do
+    setting
+    |> Ecto.Changeset.change(archived_at: nil, enabled: false)
     |> Repo.update()
   end
 

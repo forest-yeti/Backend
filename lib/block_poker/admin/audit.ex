@@ -54,6 +54,25 @@ defmodule BlockPoker.Admin.Audit do
     :ok
   end
 
+  @doc """
+  Проверка причины **до** действия.
+
+  Нужна там, где операция и запись журнала не помещаются в одну
+  транзакцию: остановить турнир — значит позвать процесс, а процесс в
+  `Ecto.Multi` не завернуть. Порядок поэтому обратный обычному — сперва
+  убеждаемся, что записать будет что, потом действуем, потом пишем.
+  Правило «без причины действия не было» от этого не слабеет: причина
+  проверяется тем же changeset'ом схемы, а не отдельной копией правила.
+  """
+  @spec ensure_reason(Context.t(), map()) :: :ok | {:error, :admin_reason_required}
+  def ensure_reason(%Context{} = ctx, attrs) do
+    changeset = changeset(ctx, attrs)
+
+    if Keyword.has_key?(changeset.errors, :reason),
+      do: {:error, :admin_reason_required},
+      else: :ok
+  end
+
   @doc "Страница журнала, свежие записи первыми."
   @spec list(map()) :: %{entries: [AdminAudit.t()], cursor: String.t() | nil}
   def list(params) do

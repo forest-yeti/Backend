@@ -92,6 +92,12 @@ defmodule BlockPoker.Tournaments.Tournament do
     field :started_at, :utc_datetime_usec
     field :finished_at, :utc_datetime_usec
 
+    # Момент остановки администратором либо `nil`. Колонкой, а не полем
+    # процесса: остановленный турнир обязан остаться остановленным и
+    # после рестарта ноды, иначе пауза не защищает ровно там, где она
+    # нужнее всего.
+    field :paused_at, :utc_datetime_usec
+
     has_many :entries, Entry, foreign_key: :tournament_id
 
     timestamps(type: :utc_datetime_usec)
@@ -117,6 +123,17 @@ defmodule BlockPoker.Tournaments.Tournament do
   """
   @spec over?(t()) :: boolean()
   def over?(%__MODULE__{status: status}), do: status in @over
+
+  @doc """
+  Турнир остановлен администратором: столы стоят, часы уровня не идут.
+
+  Это не статус: остановленный турнир по-прежнему `running` (или
+  `finishing`) и обязан таким остаться — пауза кончается, а статус после
+  неё тот же самый.
+  """
+  @spec paused?(t()) :: boolean()
+  def paused?(%__MODULE__{paused_at: nil}), do: false
+  def paused?(%__MODULE__{}), do: true
 
   @doc """
   Принимает ли турнир вход прямо сейчас — первичный или повторный.
@@ -155,7 +172,8 @@ defmodule BlockPoker.Tournaments.Tournament do
       :bounty_pool,
       :snapshot,
       :started_at,
-      :finished_at
+      :finished_at,
+      :paused_at
     ])
     |> validate_required([:tournament_setting_id, :starts_at, :status])
     |> validate_counters()

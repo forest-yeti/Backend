@@ -19,7 +19,7 @@ defmodule Api.Admin.AdminParams do
   @statuses ~w(active blocked)
   @roles ~w(default admin)
   @sorts ~w(registered_at name balance)
-  @subject_types ~w(user room tournament wallet)
+  @subject_types ~w(user room tournament wallet game_setting)
 
   @doc "Параметры страницы списка пользователей."
   @spec users(map()) :: {:ok, map()} | {:error, :validation_failed}
@@ -80,6 +80,29 @@ defmodule Api.Admin.AdminParams do
   """
   @spec kind(term()) :: {:ok, atom()}
   def kind(value), do: {:ok, Admin.game_kind(value)}
+
+  @doc """
+  Вид сетки: адрес таблицы, а не фильтр. Разбирает его ядро — «какие
+  бывают режимы» доменное знание, и второй его список в транспорте
+  разошёлся бы с первым (§3 CLAUDE.md).
+  """
+  @spec setting_kind(term()) :: {:ok, atom()} | {:error, :validation_failed}
+  def setting_kind(value), do: Admin.grid_kind(value)
+
+  @doc """
+  Фильтр сетки: показывать живые шаблоны, снятые или всё вместе.
+  `archived=all` — это форма запроса, а не доменное понятие, поэтому
+  разбирается здесь.
+  """
+  @spec grid_filter(map()) :: {:ok, keyword()} | {:error, :validation_failed}
+  def grid_filter(params) do
+    case params["archived"] do
+      value when value in [nil, "", "false", false] -> {:ok, [archived: false]}
+      value when value in ["true", true] -> {:ok, [archived: true]}
+      "all" -> {:ok, [archived: nil]}
+      _other -> {:error, :validation_failed}
+    end
+  end
 
   @doc """
   Тело денежной операции: валюта, сумма, причина и ключ идемпотентности.

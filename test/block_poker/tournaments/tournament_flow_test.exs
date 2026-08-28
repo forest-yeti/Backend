@@ -570,7 +570,11 @@ defmodule BlockPoker.Tournaments.TournamentFlowTest do
           end
         end)
 
-      assert TournamentServer.state(pid).players_left == 3
+      # Ровно трое не гарантированы: при блайндах 1000/2000 и стеке 5000
+      # двое вылетают одной раздачей. Важно другое — кто-то вылетел, и
+      # играть ещё есть кому.
+      left = TournamentServer.state(pid).players_left
+      assert left in 2..3
 
       room = TableServer.state(table)
       refute room.paused?

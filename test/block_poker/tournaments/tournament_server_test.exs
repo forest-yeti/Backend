@@ -17,7 +17,8 @@ defmodule BlockPoker.Tournaments.TournamentServerTest do
 
   alias BlockPoker.Tables.TableServer
   alias BlockPoker.Tournaments
-  alias BlockPoker.Tournaments.TournamentServer
+  alias BlockPoker.Tournaments.{Tournament, TournamentServer}
+  alias BlockPoker.Wallet
   alias Ecto.Adapters.SQL.Sandbox
 
   setup tags do
@@ -287,6 +288,175 @@ defmodule BlockPoker.Tournaments.TournamentServerTest do
       :ok = TournamentServer.fire(pid, :break)
 
       assert TournamentServer.state(pid).on_break
+    end
+  end
+
+  describe "пауза" do
+    test "останавливает столы и часы уровня", ctx do
+      clock = start_supervised!({Agent, fn -> 0 end}, id: :pause_clock)
+      now = fn -> Agent.get(clock, & &1) end
+      advance = fn ms -> Agent.update(clock, &(&1 + ms)) end
+
+      %{pid: pid} = start_tournament(ctx.setting, 3, monotonic: now)
+      :ok = TournamentServer.start_tournament(pid)
+
+      advance.(60_000)
+      :ok = TournamentServer.pause(pid)
+
+      state = TournamentServer.state(pid)
+      assert state.paused
+
+      # Часы уровня встали: остаток не отсчитывается, пока никто не играет.
+      assert state.next_level_in_ms == nil
+
+      for {_id, table} <- tables_of(pid) do
+        assert TableServer.state(table).paused?
+      end
+    end
+
+    test "снятие паузы отдаёт уровню его остаток, а не начинает заново", ctx do
+      clock = start_supervised!({Agent, fn -> 0 end}, id: :pause_clock)
+      now = fn -> Agent.get(clock, & &1) end
+      advance = fn ms -> Agent.update(clock, &(&1 + ms)) end
+
+      %{pid: pid} = start_tournament(ctx.setting, 3, monotonic: now)
+      :ok = TournamentServer.start_tournament(pid)
+
+      advance.(60_000)
+      :ok = TournamentServer.pause(pid)
+
+      # Час простоя уровню не засчитывается: он не игровое время.
+      advance.(3_600_000)
+      :ok = TournamentServer.resume(pid)
+
+      state = TournamentServer.state(pid)
+      refute state.paused
+      assert state.level == 1
+
+      # Уровень длится десять минут, минута из них сыграна.
+      assert state.next_level_in_ms == 540_000
+
+      for {_id, table} <- tables_of(pid) do
+        refute TableServer.state(table).paused?
+      end
+    end
+
+    test "пауза записана в БД и переживает перезапуск процесса", ctx do
+      %{pid: pid, tournament: tournament} = start_tournament(ctx.setting, 3)
+      :ok = TournamentServer.start_tournament(pid)
+      :ok = TournamentServer.pause(pid)
+
+      assert Tournaments.get_tournament(tournament.id) |> elem(1) |> Tournament.paused?()
+
+      stop_supervised!({TournamentServer, tournament.id})
+
+      {:ok, restarted} = start_server(tournament_id: tournament.id)
+
+      # Поднявшийся заново турнир остаётся остановленным: иначе рестарт
+      # ноды снимал бы паузу сам собой.
+      assert TournamentServer.state(restarted).paused
+
+      for {_id, table} <- tables_of(restarted) do
+        assert TableServer.state(table).paused?
+      end
+    end
+
+    test "остановленный турнир не поднимает уровень по таймеру", ctx do
+      %{pid: pid} = start_tournament(ctx.setting, 3)
+      :ok = TournamentServer.start_tournament(pid)
+      :ok = TournamentServer.pause(pid)
+
+      # Таймер уровня снят вместе с паузой — будить некого.
+      assert :sys.get_state(pid).level_timer == nil
+    end
+
+    test "повторная пауза и повторное снятие идемпотентны", ctx do
+      %{pid: pid} = start_tournament(ctx.setting, 3)
+      :ok = TournamentServer.start_tournament(pid)
+
+      :ok = TournamentServer.pause(pid)
+      :ok = TournamentServer.pause(pid)
+      assert TournamentServer.state(pid).paused
+
+      :ok = TournamentServer.resume(pid)
+      :ok = TournamentServer.resume(pid)
+      refute TournamentServer.state(pid).paused
+    end
+
+    test "недоигранный перерыв продолжается после паузы, а не начинается заново", ctx do
+      %{pid: pid} = start_tournament(ctx.setting, 3)
+      :ok = TournamentServer.start_tournament(pid)
+
+      :ok = TournamentServer.fire(pid, :break)
+      :ok = TournamentServer.pause(pid)
+      :ok = TournamentServer.resume(pid)
+
+      state = TournamentServer.state(pid)
+
+      # Перерыв ещё идёт: столы остаются стоять, и снятие паузы их не
+      # поднимает — иначе турнир раздавал бы посреди перерыва.
+      assert state.on_break
+      assert state.break_ends_in_ms <= 300_000
+
+      for {_id, table} <- tables_of(pid) do
+        assert TableServer.state(table).paused?
+      end
+    end
+
+    test "перерыв, кончившийся во время паузы, не удлиняется ею", ctx do
+      # Стенные часы под контролем теста: перерыв отсчитывается ими, и
+      # проверка ровно в том, что пауза их не останавливает.
+      clock = start_supervised!({Agent, fn -> DateTime.utc_now() end}, id: :break_wall)
+      wall = fn -> Agent.get(clock, & &1) end
+      advance = fn sec -> Agent.update(clock, &DateTime.add(&1, sec, :second)) end
+
+      %{pid: pid} = start_tournament(ctx.setting, 3, wall: wall)
+      :ok = TournamentServer.start_tournament(pid)
+
+      :ok = TournamentServer.fire(pid, :break)
+      :ok = TournamentServer.pause(pid)
+
+      # Пять минут прошли, пока турнир стоял: отдых игроки получили.
+      advance.(301)
+      :ok = TournamentServer.resume(pid)
+
+      refute TournamentServer.state(pid).on_break
+
+      for {_id, table} <- tables_of(pid) do
+        refute TableServer.state(table).paused?
+      end
+    end
+  end
+
+  describe "снятие турнира" do
+    test "возвращает взносы, гасит столы и кончает процесс", ctx do
+      %{pid: pid, tournament: tournament, users: users} = start_tournament(ctx.setting, 3)
+      :ok = TournamentServer.start_tournament(pid)
+
+      tables = tables_of(pid)
+      ref = Process.monitor(pid)
+
+      assert {:ok, 3} = TournamentServer.abort(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+
+      {:ok, fresh} = Tournaments.get_tournament(tournament.id)
+      assert fresh.status == :cancelled
+
+      # Столы турнира гаснут вместе с ним: играть за ними больше не за что.
+      for {_id, table} <- tables, do: refute(Process.alive?(table))
+
+      # Взнос вернулся каждому: снятый турнир призов не разыграл.
+      for user <- users do
+        {:ok, wallet} = Wallet.get_wallet(user.id, ctx.setting.currency)
+        assert wallet.amount == Wallet.play_money_default()
+      end
+    end
+
+    test "снять можно только идущий турнир", ctx do
+      %{pid: pid} = start_tournament(ctx.setting, 3)
+
+      # Регистрация ещё открыта: это отмена (`cancel/1`), а не снятие.
+      assert {:error, :tournament_not_running} = TournamentServer.abort(pid)
     end
   end
 

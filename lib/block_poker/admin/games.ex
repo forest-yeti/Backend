@@ -16,6 +16,7 @@ defmodule BlockPoker.Admin.Games do
   принадлежат турниру и в витрине не показываются, а надзору нужны и они.
   """
 
+  alias BlockPoker.Admin.{Audit, Context}
   alias BlockPoker.Tables
   alias BlockPoker.Tables.{RoomState, TableRegistry, TableServer}
   alias BlockPoker.Tournaments
@@ -85,6 +86,94 @@ defmodule BlockPoker.Admin.Games do
       {:ok, room} -> {:ok, room_card(room)}
       {:error, _reason} -> {:error, :admin_room_not_found}
     end
+  end
+
+  @doc """
+  Останавливает идущий турнир: столы замирают, часы уровня стоят.
+
+  Три операции ниже — единственное, что панель делает с игрой, а не с
+  игроком, и правило у них общее: **решает контекст, исполняет процесс.**
+  Панель не знает ни про `Registry`, ни про то, что пауза это ещё и
+  строка в `tournaments`.
+
+  Журнал пишется отдельной записью, а не шагом транзакции, и порядок
+  здесь обратный обычному: сперва `Audit.ensure_reason/2`, потом
+  действие, потом запись. Причина — процесс: остановка турнира это
+  `GenServer.call`, и завернуть его в `Ecto.Multi` вместе с записью
+  нельзя. Проверка причины до действия закрывает ровно ту дыру, ради
+  которой запись обычно и делают транзакционной: без причины ничего не
+  происходит.
+  """
+  @spec pause_tournament(Context.t(), Ecto.UUID.t(), String.t() | nil) ::
+          {:ok, map()} | {:error, atom()}
+  def pause_tournament(%Context{} = ctx, tournament_id, reason) do
+    control(ctx, tournament_id, :pause_tournament, reason, &TournamentServer.pause/1)
+  end
+
+  @doc "Снимает паузу: уровень доигрывает свой остаток, столы раздают."
+  @spec resume_tournament(Context.t(), Ecto.UUID.t(), String.t() | nil) ::
+          {:ok, map()} | {:error, atom()}
+  def resume_tournament(%Context{} = ctx, tournament_id, reason) do
+    control(ctx, tournament_id, :resume_tournament, reason, &TournamentServer.resume/1)
+  end
+
+  @doc """
+  Снимает турнир целиком: возвраты всем, столы гаснут.
+
+  Единственная из трёх, что работает и **без процесса**. Турнир, чей
+  процесс не поднялся, — это и есть тот случай, ради которого ручка
+  нужна: в БД он идёт, раздавать некому, и снять его иначе нечем.
+  """
+  @spec cancel_tournament(Context.t(), Ecto.UUID.t(), String.t() | nil) ::
+          {:ok, map()} | {:error, atom()}
+  def cancel_tournament(%Context{} = ctx, tournament_id, reason) do
+    attrs = audit_attrs(:cancel_tournament, tournament_id, reason)
+
+    with :ok <- Audit.ensure_reason(ctx, attrs),
+         {:ok, refunded} <- do_cancel_tournament(tournament_id) do
+      Audit.write(ctx, put_in(attrs[:meta], %{refunded: refunded}))
+
+      {:ok, %{id: tournament_id, status: :cancelled, refunded: refunded}}
+    end
+  end
+
+  defp do_cancel_tournament(tournament_id) do
+    case TournamentServer.whereis(tournament_id) do
+      nil -> Tournaments.abort(tournament_id)
+      pid -> TournamentServer.abort(pid)
+    end
+  end
+
+  defp control(ctx, tournament_id, action, reason, fun) do
+    attrs = audit_attrs(action, tournament_id, reason)
+
+    with :ok <- Audit.ensure_reason(ctx, attrs),
+         {:ok, pid} <- fetch_server(tournament_id),
+         :ok <- fun.(pid) do
+      Audit.write(ctx, attrs)
+
+      game_card(:mtt, tournament_id)
+    end
+  end
+
+  # Турнир без процесса остановить нельзя: останавливать нечего.
+  # Отдельный код, а не `admin_room_not_found`, — панели важно различать
+  # «нет такого турнира» и «турнир есть, но он не идёт».
+  defp fetch_server(tournament_id) do
+    case TournamentServer.whereis(tournament_id) do
+      nil -> {:error, :tournament_not_running}
+      pid -> {:ok, pid}
+    end
+  end
+
+  defp audit_attrs(action, tournament_id, reason) do
+    %{
+      action: action,
+      subject_type: :tournament,
+      subject_id: tournament_id,
+      reason: reason,
+      meta: %{}
+    }
   end
 
   defp rooms do
@@ -210,6 +299,7 @@ defmodule BlockPoker.Admin.Games do
           limits: snapshot.limits,
           next_level_in_ms: snapshot.next_level_in_ms,
           on_break: snapshot.on_break,
+          paused: snapshot.paused,
           break_ends_in_ms: snapshot.break_ends_in_ms,
           tables: snapshot.tables,
           entries: snapshot.entries,

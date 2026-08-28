@@ -15,6 +15,7 @@ defmodule BlockPoker.SitAndGo do
 
   import Ecto.Query
 
+  alias BlockPoker.CashGames
   alias BlockPoker.Engine.{BlindSchedule, PrizePool}
   alias BlockPoker.Repo
   alias BlockPoker.SitAndGo.{BlindLevel, PrizeTier, SitAndGoSetting}
@@ -25,7 +26,12 @@ defmodule BlockPoker.SitAndGo do
   не является, иначе экран с ничем не отмеченным фильтром показывал бы
   пустое лобби вместо всего пула.
   """
-  @type filter :: [game_types: [atom()], currency: :main | :play_money, enabled: boolean()]
+  @type filter :: [
+          game_types: [atom()],
+          currency: :main | :play_money,
+          enabled: boolean(),
+          archived: boolean() | nil
+        ]
 
   @doc """
   Шаблоны для витрины, отсортированные так, как их показывает лобби.
@@ -38,6 +44,7 @@ defmodule BlockPoker.SitAndGo do
   def list_settings(filter \\ []) do
     SitAndGoSetting
     |> filter_enabled(Keyword.get(filter, :enabled, true))
+    |> CashGames.filter_archived(Keyword.get(filter, :archived, false))
     |> filter_game_types(Keyword.get(filter, :game_types, []))
     |> filter_currency(Keyword.get(filter, :currency))
     |> preload([:blind_levels, :prize_tiers])
@@ -95,6 +102,67 @@ defmodule BlockPoker.SitAndGo do
       {:ok, %{setting: setting}} -> get_setting(setting.id)
       {:error, _step, reason, _changes} -> {:error, reason}
     end
+  end
+
+  @doc """
+  Правка шаблона целиком: поля, структура уровней и таблица призов.
+
+  Целиком или никак — по той же причине, что и создание: шаблон без
+  уровней не запускается, а без таблицы призов не может закончиться
+  выплатой. `nil` вместо списка означает «эту часть не трогаем», и это
+  не то же самое, что пустой список: пустой список — это стирание,
+  которое не переживёт проверку.
+
+  Уже идущие турниры правка не задевает: `SitAndGoServer` читает шаблон
+  один раз при старте, и подмена структуры под севшими игроками была бы
+  сменой правил посреди партии.
+  """
+  @spec update_setting(SitAndGoSetting.t(), map(), [map()] | nil, [map()] | nil) ::
+          {:ok, SitAndGoSetting.t()} | {:error, atom() | Ecto.Changeset.t()}
+  def update_setting(%SitAndGoSetting{} = setting, attrs, levels \\ nil, tiers \\ nil) do
+    Multi.new()
+    |> Multi.update(:setting, SitAndGoSetting.changeset(setting, attrs))
+    |> replace_children(:levels, levels, BlindLevel, &BlindLevel.changeset(%BlindLevel{}, &1))
+    |> replace_children(:tiers, tiers, PrizeTier, &PrizeTier.changeset(%PrizeTier{}, &1))
+    |> Multi.run(:audit, fn _repo, %{setting: updated} ->
+      with {:ok, reloaded} <- get_setting(updated.id), do: audit(reloaded)
+    end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{setting: updated}} -> get_setting(updated.id)
+      {:error, _step, reason, _changes} -> {:error, reason}
+    end
+  end
+
+  # `nil` — часть не переданa, шага в транзакции просто нет.
+  defp replace_children(multi, _name, nil, _schema, _to_changeset), do: multi
+
+  defp replace_children(multi, name, rows, schema, to_changeset) do
+    multi
+    |> Multi.delete_all({:cleared, name}, fn %{setting: setting} ->
+      where(schema, sit_n_go_setting_id: ^setting.id)
+    end)
+    |> Multi.run(name, fn repo, %{setting: setting} ->
+      insert_all(repo, setting, rows, to_changeset)
+    end)
+  end
+
+  @doc "Снятие шаблона с сетки. См. `BlockPoker.CashGames.archive_setting/1`."
+  @spec archive_setting(SitAndGoSetting.t()) ::
+          {:ok, SitAndGoSetting.t()} | {:error, Ecto.Changeset.t()}
+  def archive_setting(%SitAndGoSetting{} = setting) do
+    setting
+    |> Ecto.Changeset.change(archived_at: DateTime.utc_now(), enabled: false)
+    |> Repo.update()
+  end
+
+  @doc "Возврат из архива — выключенным. См. `BlockPoker.CashGames.restore_setting/1`."
+  @spec restore_setting(SitAndGoSetting.t()) ::
+          {:ok, SitAndGoSetting.t()} | {:error, Ecto.Changeset.t()}
+  def restore_setting(%SitAndGoSetting{} = setting) do
+    setting
+    |> Ecto.Changeset.change(archived_at: nil, enabled: false)
+    |> Repo.update()
   end
 
   @doc """

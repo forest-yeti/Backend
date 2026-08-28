@@ -31,6 +31,7 @@ defmodule BlockPoker.Tournaments do
 
   import Ecto.Query
 
+  alias BlockPoker.CashGames
   alias BlockPoker.Engine.{BlindSchedule, Bounty, TournamentPayout}
   alias BlockPoker.History
   alias BlockPoker.Engine.Elimination
@@ -64,7 +65,12 @@ defmodule BlockPoker.Tournaments do
   @addons_per_entry 1
 
   @typedoc "Фильтр витрины шаблонов."
-  @type filter :: [game_types: [atom()], currency: atom(), enabled: boolean()]
+  @type filter :: [
+          game_types: [atom()],
+          currency: atom(),
+          enabled: boolean(),
+          archived: boolean() | nil
+        ]
 
   # --- Шаблоны -------------------------------------------------------------
 
@@ -81,6 +87,7 @@ defmodule BlockPoker.Tournaments do
   def list_settings(filter \\ []) do
     TournamentSetting
     |> filter_enabled(Keyword.get(filter, :enabled, true))
+    |> CashGames.filter_archived(Keyword.get(filter, :archived, false))
     |> filter_game_types(Keyword.get(filter, :game_types, []))
     |> filter_currency(Keyword.get(filter, :currency))
     |> preload([:blind_levels, :schedules, payout_rows: :ticket])
@@ -211,6 +218,80 @@ defmodule BlockPoker.Tournaments do
       {:ok, %{setting: setting}} -> get_setting(setting.id)
       {:error, _step, reason, _changes} -> {:error, reason}
     end
+  end
+
+  @doc """
+  Правка шаблона целиком: поля, уровни, сетка выплат, расписание.
+
+  Каждая из трёх частей необязательна: `nil` значит «не трогаем», и это
+  не пустой список — пустым списком стирают. Что передали, то заменяется
+  целиком: править уровни по одному значило бы держать в БД промежуточные
+  структуры, которые не проходят `audit/1`.
+
+  Проверка — до коммита, как и при создании: шаблон, который нельзя
+  доиграть, не должен пережить транзакцию.
+
+  Уже анонсированных и идущих инстансов правка не касается: свою
+  структуру они прочитали при старте, и менять её под севшими игроками
+  нельзя. Новые условия достаются запускам следующего дня.
+  """
+  @spec update_setting(TournamentSetting.t(), map(), [map()] | nil, [map()] | nil, [map()] | nil) ::
+          {:ok, TournamentSetting.t()} | {:error, atom() | Ecto.Changeset.t()}
+  def update_setting(
+        %TournamentSetting{} = setting,
+        attrs,
+        levels \\ nil,
+        payouts \\ nil,
+        schedules \\ nil
+      ) do
+    Multi.new()
+    |> Multi.update(:setting, TournamentSetting.changeset(setting, attrs))
+    |> replace_children(:levels, levels, BlindLevel)
+    |> replace_children(:payouts, payouts, PayoutRow)
+    |> replace_children(:schedules, schedules, Schedule)
+    # `audit/1` отвечает `:ok`, а шаг `Multi` обязан вернуть кортеж:
+    # перевод здесь, а не в `audit/1`, потому что снаружи её читают
+    # как проверку, а не как источник значения.
+    |> Multi.run(:audit, fn _repo, %{setting: updated} ->
+      with {:ok, reloaded} <- get_setting(updated.id),
+           :ok <- audit(reloaded),
+           do: {:ok, :audited}
+    end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{setting: updated}} -> get_setting(updated.id)
+      {:error, _step, reason, _changes} -> {:error, reason}
+    end
+  end
+
+  defp replace_children(multi, _name, nil, _schema), do: multi
+
+  defp replace_children(multi, name, rows, schema) do
+    multi
+    |> Multi.delete_all({:cleared, name}, fn %{setting: setting} ->
+      where(schema, tournament_setting_id: ^setting.id)
+    end)
+    |> Multi.run(name, fn repo, %{setting: setting} ->
+      insert_children(repo, setting, rows, schema)
+    end)
+  end
+
+  @doc "Снятие шаблона с сетки. См. `BlockPoker.CashGames.archive_setting/1`."
+  @spec archive_setting(TournamentSetting.t()) ::
+          {:ok, TournamentSetting.t()} | {:error, Ecto.Changeset.t()}
+  def archive_setting(%TournamentSetting{} = setting) do
+    setting
+    |> Ecto.Changeset.change(archived_at: DateTime.utc_now(), enabled: false)
+    |> Repo.update()
+  end
+
+  @doc "Возврат из архива — выключенным. См. `BlockPoker.CashGames.restore_setting/1`."
+  @spec restore_setting(TournamentSetting.t()) ::
+          {:ok, TournamentSetting.t()} | {:error, Ecto.Changeset.t()}
+  def restore_setting(%TournamentSetting{} = setting) do
+    setting
+    |> Ecto.Changeset.change(archived_at: nil, enabled: false)
+    |> Repo.update()
   end
 
   @doc """
@@ -1120,13 +1201,74 @@ defmodule BlockPoker.Tournaments do
   """
   @spec cancel(Ecto.UUID.t()) :: {:ok, non_neg_integer()} | {:error, atom()}
   def cancel(tournament_id) do
+    do_cancel(tournament_id, &pre_game_guard/1)
+  end
+
+  @doc """
+  Отмечает турнир остановленным. Пишет только момент паузы: столы
+  останавливает процесс.
+
+  Разделение то же, что у отмены: контекст владеет тем, что переживает
+  рестарт, процесс — столами и таймерами. Флаг в БД нужен именно затем,
+  чтобы поднявшийся после перезагрузки процесс узнал, что раздавать
+  нельзя, — без него пауза кончалась бы вместе с нодой.
+  """
+  @spec pause(Ecto.UUID.t()) :: {:ok, Tournament.t()} | {:error, atom()}
+  def pause(tournament_id), do: set_paused(tournament_id, DateTime.utc_now())
+
+  @doc "Снимает отметку паузы. Столы поднимает процесс."
+  @spec resume(Ecto.UUID.t()) :: {:ok, Tournament.t()} | {:error, atom()}
+  def resume(tournament_id), do: set_paused(tournament_id, nil)
+
+  defp set_paused(tournament_id, at) do
+    with {:ok, tournament} <- get_tournament(tournament_id),
+         {:ok, :allowed} <- live_guard(tournament) do
+      tournament
+      |> Tournament.changeset(%{paused_at: at})
+      |> Repo.update()
+      |> announce()
+    end
+  end
+
+  @doc """
+  Снимает **идущий** турнир: возвраты всем и статус `cancelled`.
+
+  Отличается от `cancel/1` только тем, кому разрешено: там турнир ещё не
+  раздал ни одной карты, здесь раздал. Всё остальное — та же транзакция,
+  те же ключи идемпотентности, та же строка истории с `outcome:
+  :cancelled`, потому что для кошелька и статистики разницы нет: взнос
+  вернулся целиком.
+
+  Это ручной инструмент разбора инцидента, а не часть жизненного цикла
+  турнира: сам собой идущий турнир не отменяется никогда. Отсюда и
+  политика возврата — **возвращается уплаченное, целиком и всем**, включая
+  уже вылетевших. Считать, кто «успел доиграть до денег», в снятом турнире
+  не по чему: призовых мест он не разыграл.
+
+  Головы не выплачиваются заново: уже выбитые остаются у выбивших как
+  движение по ledger, а невыбитые возвращаются вместе со взносом (голова
+  входит в его цену).
+
+  Столы турнира гасит процесс (`TournamentServer`), а не эта функция:
+  контекст владеет деньгами и статусом, процессы — своим деревом.
+  """
+  @spec abort(Ecto.UUID.t()) :: {:ok, non_neg_integer()} | {:error, atom()}
+  def abort(tournament_id) do
+    do_cancel(tournament_id, &live_guard/1)
+  end
+
+  defp pre_game_guard(tournament) do
+    if Tournament.pre_game?(tournament), do: {:ok, :allowed}, else: {:error, :tournament_started}
+  end
+
+  defp live_guard(tournament) do
+    if Tournament.live?(tournament), do: {:ok, :allowed}, else: {:error, :tournament_not_running}
+  end
+
+  defp do_cancel(tournament_id, guard) do
     Multi.new()
     |> Multi.run(:tournament, fn repo, _changes -> lock_tournament(repo, tournament_id) end)
-    |> Multi.run(:guard, fn _repo, %{tournament: tournament} ->
-      if Tournament.pre_game?(tournament),
-        do: {:ok, :allowed},
-        else: {:error, :tournament_started}
-    end)
+    |> Multi.run(:guard, fn _repo, %{tournament: tournament} -> guard.(tournament) end)
     |> Multi.run(:setting, fn _repo, %{tournament: tournament} ->
       get_setting(tournament.tournament_setting_id)
     end)
@@ -1148,7 +1290,12 @@ defmodule BlockPoker.Tournaments do
     )
     |> Tickets.refund_all(:tickets, tournament_id)
     |> Multi.run(:status, fn repo, %{tournament: tournament} ->
-      tournament |> Tournament.changeset(%{status: :cancelled}) |> repo.update()
+      # Пауза снимается вместе с отменой: отменённый турнир не «стоит на
+      # паузе», он кончился, и оставленный флаг сбивал бы и панель, и
+      # восстановление после рестарта.
+      tournament
+      |> Tournament.changeset(%{status: :cancelled, paused_at: nil})
+      |> repo.update()
     end)
     |> Repo.transaction()
     |> case do
@@ -2038,9 +2185,18 @@ defmodule BlockPoker.Tournaments do
     |> SeatSnapshot.changeset(attrs)
     # `conflict_target` MySQL не принимает: `ON DUPLICATE KEY UPDATE`
     # срабатывает по уникальному индексу сам, и указывать его нечем.
+    # `updated_at` перечисляется явно: `ON DUPLICATE KEY UPDATE` меняет
+    # ровно то, что названо, и без этой строки у снимка навсегда осталось
+    # бы время **первой** записи. Врало бы оно ровно там, где по нему
+    # разбирают инцидент: «снимок от 17:56» при девяти сыгранных раздачах.
     |> Repo.insert(
       on_conflict: [
-        set: [level: attrs.level, hands_played: attrs[:hands_played] || 0, seats: attrs.seats]
+        set: [
+          level: attrs.level,
+          hands_played: attrs[:hands_played] || 0,
+          seats: attrs.seats,
+          updated_at: DateTime.utc_now()
+        ]
       ]
     )
   end

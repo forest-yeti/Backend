@@ -28,4 +28,24 @@ defmodule Api.Admin.GameController do
       render(conn, :show, game: game)
     end
   end
+
+  def pause(conn, %{"id" => id} = params) do
+    with {:ok, game} <- Admin.pause_tournament(ctx(conn), id, params["reason"]) do
+      render(conn, :show, game: game)
+    end
+  end
+
+  def resume(conn, %{"id" => id} = params) do
+    with {:ok, game} <- Admin.resume_tournament(ctx(conn), id, params["reason"]) do
+      render(conn, :show, game: game)
+    end
+  end
+
+  def cancel(conn, %{"id" => id} = params) do
+    with {:ok, result} <- Admin.cancel_tournament(ctx(conn), id, params["reason"]) do
+      render(conn, :show, game: result)
+    end
+  end
+
+  defp ctx(conn), do: conn.assigns.admin_ctx
 end

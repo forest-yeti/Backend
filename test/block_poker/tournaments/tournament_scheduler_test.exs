@@ -158,6 +158,62 @@ defmodule BlockPoker.Tournaments.TournamentSchedulerTest do
     end
   end
 
+  describe "восстановление после рестарта ноды" do
+    setup do
+      setting = setting_fixture(%{registration_opens_before: 3600, min_players: 2})
+      schedule = schedule_fixture(setting, %{start_time: ~T[21:30:00], repeat: true})
+
+      %{setting: setting, schedule: schedule}
+    end
+
+    test "идущий турнир без процесса поднимается заново", ctx do
+      scheduler = start_scheduler(~U[2026-09-01 17:45:00Z])
+      :ok = TournamentScheduler.tick(scheduler)
+
+      [tournament] = instances()
+
+      for _index <- 1..2 do
+        {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+      end
+
+      later = start_scheduler_at(~U[2026-09-01 18:30:00Z])
+      :ok = TournamentScheduler.tick(later)
+
+      # Нода упала: процесс турнира исчез, строка в БД осталась живой.
+      pid = TournamentServer.whereis(tournament.id)
+      assert pid != nil
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
+      refute TournamentServer.whereis(tournament.id)
+
+      # Первый же тик после подъёма ноды обязан его вернуть: иначе стол
+      # у игроков стоит навсегда — статус меняет только процесс.
+      :ok = TournamentScheduler.tick(later)
+
+      assert TournamentServer.whereis(tournament.id)
+    end
+
+    test "живой процесс не поднимается вторым", ctx do
+      scheduler = start_scheduler(~U[2026-09-01 17:45:00Z])
+      :ok = TournamentScheduler.tick(scheduler)
+
+      [tournament] = instances()
+
+      for _index <- 1..2 do
+        {:ok, _entry} = Tournaments.register(tournament.id, user_fixture().id)
+      end
+
+      later = start_scheduler_at(~U[2026-09-01 18:30:00Z])
+      :ok = TournamentScheduler.tick(later)
+
+      pid = TournamentServer.whereis(tournament.id)
+      :ok = TournamentScheduler.tick(later)
+
+      assert TournamentServer.whereis(tournament.id) == pid
+    end
+  end
+
   describe "старт по часам" do
     setup do
       setting = setting_fixture(%{registration_opens_before: 3600, min_players: 2})

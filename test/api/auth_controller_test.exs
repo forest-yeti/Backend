@@ -88,6 +88,19 @@ defmodule Api.AuthControllerTest do
       assert %{"code" => "rate_limited"} =
                conn |> post("/api/auth/login", params) |> json_response(429)
     end
+
+    test "выключенный конфигом лимит не срабатывает вовсе", %{conn: conn} do
+      # Флаг снимается на каждом запросе, а не на компиляции пайплайна:
+      # иначе выключить его можно было бы только пересборкой.
+      Application.put_env(:block_poker, Api.Plugs.RateLimit, enabled: false)
+      on_exit(fn -> Application.delete_env(:block_poker, Api.Plugs.RateLimit) end)
+
+      params = %{"email" => "nobody@example.com", "password" => "whatever!"}
+
+      for _attempt <- 1..12 do
+        assert conn |> post("/api/auth/login", params) |> json_response(401)
+      end
+    end
   end
 
   describe "POST /api/auth/refresh" do

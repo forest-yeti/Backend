@@ -139,6 +139,11 @@ defmodule BlockPoker.CashGames.CashGameSetting do
     field :sort_order, :integer, default: 0
     field :max_rooms, :integer, default: 100
 
+    # Снятый с сетки шаблон: строка остаётся ради истории и реплея, но
+    # витрина её не видит и комнат под неё не поднимается. Не в `@editable`
+    # — снимают и возвращают отдельным действием, а не правкой формы.
+    field :archived_at, :utc_datetime_usec
+
     timestamps(type: :utc_datetime_usec)
   end
 

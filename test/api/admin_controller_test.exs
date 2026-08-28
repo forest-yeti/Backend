@@ -227,6 +227,37 @@ defmodule Api.Admin.AdminControllerTest do
     end
   end
 
+  describe "POST /admin/games/mtt/:id/*" do
+    test "без причины отвечает 422 и ничего не делает", %{conn: conn, session: session} do
+      body =
+        conn
+        |> authed(session)
+        |> post("/admin/games/mtt/#{Ecto.UUID.generate()}/pause", %{})
+        |> json_response(422)
+
+      assert body["code"] == "admin_reason_required"
+    end
+
+    test "несуществующий турнир — 404, а не молчаливое согласие", %{
+      conn: conn,
+      session: session
+    } do
+      body =
+        conn
+        |> authed(session)
+        |> post("/admin/games/mtt/#{Ecto.UUID.generate()}/cancel", %{"reason" => "висяк"})
+        |> json_response(404)
+
+      assert body["code"] == "not_found"
+    end
+
+    test "без сессии администратора не пускает", %{conn: conn} do
+      conn
+      |> post("/admin/games/mtt/#{Ecto.UUID.generate()}/pause", %{"reason" => "причина"})
+      |> json_response(401)
+    end
+  end
+
   describe "GET /admin/auth/me" do
     test "отдаёт админа, его сессии и флаг наблюдения", %{conn: conn, session: session} do
       conn = conn |> authed(session) |> get("/admin/auth/me")

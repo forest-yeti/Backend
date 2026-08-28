@@ -5,6 +5,16 @@ defmodule Api.Plugs.RateLimit do
       plug Api.Plugs.RateLimit, scope: :login, limit: 10, window_ms: :timer.minutes(5)
 
   Транспортная мера защиты, доменных правил не содержит.
+
+  Выключается конфигом целиком:
+
+      config :block_poker, Api.Plugs.RateLimit, enabled: false
+
+  Флаг читается **на каждом запросе**, а не в `init/1`: пайплайны роутера
+  разворачиваются на компиляции, и значение, снятое в `init/1`, вмёрзло бы
+  в собранный роутер — переключение потребовало бы пересборки, а не
+  перезапуска. Умолчание — включено: забытый флаг обязан оставлять защиту
+  на месте, а не снимать её.
   """
 
   import Plug.Conn
@@ -24,6 +34,22 @@ defmodule Api.Plugs.RateLimit do
 
   @impl true
   def call(conn, %{scope: scope, limit: limit, window_ms: window_ms}) do
+    if enabled?() do
+      limit(conn, scope, limit, window_ms)
+    else
+      conn
+    end
+  end
+
+  @doc "Включено ли ограничение. Умолчание — да."
+  @spec enabled?() :: boolean()
+  def enabled? do
+    :block_poker
+    |> Application.get_env(__MODULE__, [])
+    |> Keyword.get(:enabled, true)
+  end
+
+  defp limit(conn, scope, limit, window_ms) do
     case Api.RateLimiter.hit({scope, client_ip(conn)}, limit, window_ms) do
       :ok ->
         conn

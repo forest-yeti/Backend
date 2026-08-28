@@ -12,8 +12,6 @@ defmodule BlockPoker.Sounds.Storage do
   каталоге всегда означает MP3.
   """
 
-  import Bitwise, only: [band: 2]
-
   # 5 МБ. Звук в игровой комнате — это короткий эффект или фраза, а не
   # трек; жёсткий предел тела стоит в `Api.Plugs.SoundUpload`, этот —
   # доменный, и он сообщает осмысленный код вместо обрыва разбора.
@@ -106,12 +104,16 @@ defmodule BlockPoker.Sounds.Storage do
   # Сигнатуры, а не расширения. У MP3 их две: файл с тегами начинается с
   # `ID3`, файл без тегов — сразу с кадра, у которого выставлены
   # одиннадцать старших бит синхрослова.
+  #
+  # Одиннадцать бит и проверяются образцом: `0xFF` — первые восемь,
+  # `0b111::3` — три старших бита второго байта. Хвост после них не
+  # выровнен по байту, поэтому `bitstring`, а не `binary`.
   defp ensure_audio(path) do
     case File.read(path) do
       {:ok, <<"OggS", _rest::binary>>} -> {:ok, "ogg"}
       {:ok, <<"RIFF", _size::binary-size(4), "WAVE", _rest::binary>>} -> {:ok, "wav"}
       {:ok, <<"ID3", _rest::binary>>} -> {:ok, "mp3"}
-      {:ok, <<0xFF, second, _rest::binary>>} when band(second, 0xE0) == 0xE0 -> {:ok, "mp3"}
+      {:ok, <<0xFF, 0b111::3, _rest::bitstring>>} -> {:ok, "mp3"}
       {:ok, _other} -> {:error, :unsupported_audio_type}
       {:error, _reason} -> {:error, :upload_write_failed}
     end

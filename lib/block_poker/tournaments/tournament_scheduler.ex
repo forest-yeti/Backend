@@ -72,6 +72,11 @@ defmodule BlockPoker.Tournaments.TournamentScheduler do
       wall: Keyword.get(opts, :wall, &DateTime.utc_now/0)
     }
 
+    # Первый тик — сразу, а не через минуту: на нём поднимаются турниры,
+    # пережившие рестарт ноды (`resume_live/0`). Минута ожидания здесь —
+    # это минута замершего стола у людей, которые уже сидят и играют.
+    if state.tick_ms != nil, do: send(self(), :tick)
+
     {:ok, schedule_next(state)}
   end
 
@@ -100,6 +105,7 @@ defmodule BlockPoker.Tournaments.TournamentScheduler do
   defp run(state) do
     now = state.wall.()
 
+    resume_live()
     announce_upcoming(now)
     open_registrations(now)
     prepare_starting(now)
@@ -246,6 +252,35 @@ defmodule BlockPoker.Tournaments.TournamentScheduler do
     |> where([t], t.status == :registering and t.starts_at <= ^now)
     |> preload(setting: [:blind_levels, payout_rows: :ticket])
     |> Repo.all()
+  end
+
+  # --- Восстановление после рестарта ---------------------------------------
+
+  # Турниры, которые шли в момент остановки ноды.
+  #
+  # Процесс инстанса поднимают ровно две вещи: первая регистрация и старт
+  # по расписанию. Обе смотрят на турнир, который ещё не начался, — а
+  # начавшийся не поднимает никто. Пережить рестарт ему при этом есть чем:
+  # `TournamentServer.init/1` умеет восстанавливаться по снимку (§8
+  # CLAUDE.md), и код этот исправен — его просто некому было позвать.
+  #
+  # Без этого шага рестарт оставлял турнир висеть навсегда: в БД `running`,
+  # процесса нет, игроки сидят за столами, которых тоже нет, и ничего не
+  # раздаётся. Само оно не рассасывается — статус меняет только процесс,
+  # которого нет.
+  defp resume_live do
+    for tournament <- live_without_server() do
+      Logger.warning("турнир #{tournament.id} пережил рестарт ноды — поднимаем")
+      ensure_server(tournament)
+    end
+  end
+
+  defp live_without_server do
+    Tournament
+    |> where([t], t.status in [:running, :late_reg_closed, :finishing])
+    |> preload(setting: [:blind_levels, payout_rows: :ticket])
+    |> Repo.all()
+    |> Enum.reject(&TournamentServer.whereis(&1.id))
   end
 
   # --- Процессы ------------------------------------------------------------

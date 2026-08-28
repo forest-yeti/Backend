@@ -75,6 +75,29 @@ defmodule BlockPoker.Accounts do
   end
 
   @doc """
+  Снимки профилей пачкой: ник, аватар, флейр и роль по списку id.
+
+  Существует ради турнирной рассадки. Сажать три сотни человек по одному
+  `get_user/1` — три сотни round-trip'ов на старте, ровно та причина, по
+  которой рядом стоит `mark_playing/1` на весь список сразу.
+
+  Отсутствующие id просто не попадают в результат: место без ника — это
+  ник «Игрок» на клиенте, а не отказ в посадке.
+  """
+  @spec profiles([Ecto.UUID.t()]) :: %{Ecto.UUID.t() => BlockPoker.Tables.RoomState.profile()}
+  def profiles([]), do: %{}
+
+  def profiles(user_ids) do
+    ids = for id <- user_ids, {:ok, uuid} = Ecto.UUID.cast(id), do: uuid
+
+    from(u in User, where: u.id in ^ids, select: {u.id, u.name, u.avatar, u.flair, u.role})
+    |> Repo.all()
+    |> Map.new(fn {id, name, avatar, flair, role} ->
+      {id, %{name: name, avatar: avatar, flair: flair, role: role}}
+    end)
+  end
+
+  @doc """
   Поиск учётки по нику или email — для команд обслуживания, где UUID под
   рукой нет. Ник регистрозависим, email нормализуется, как при регистрации.
   """
