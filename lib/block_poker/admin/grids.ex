@@ -305,9 +305,18 @@ defmodule BlockPoker.Admin.Grids do
   end
 
   defp row(row, allowed) when is_map(row) do
-    allowed
-    |> Map.new(fn key -> {key, row[Atom.to_string(key)] || row[key]} end)
+    # `||` здесь не годится: `false` — законное значение поля, а не
+    # «ключа нет», и подмена его дефолтом схемы молча превращает разовое
+    # расписание в повторяющееся.
+    Map.new(allowed, fn key -> {key, field(row, key)} end)
     |> Map.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp field(row, key) do
+    case Map.fetch(row, Atom.to_string(key)) do
+      {:ok, value} -> value
+      :error -> Map.get(row, key)
+    end
   end
 
   # --- чтение ---------------------------------------------------------------
